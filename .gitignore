@@ -1,0 +1,48 @@
+# --- Секреты, ни в коем случае не коммитить ---
+.env
+.env.*
+!.env.example
+cookies.json
+
+# --- Локальные данные ---
+bot_database.db
+bot_database.db-journal
+bot_database.db-wal
+bot_database.db-shm
+logs/
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+ENV/
+
+# --- IDE / редакторы ---
+.vscode/
+.idea/
+.kiro/
+*.swp
+*.swo
+*~
+
+# --- ОС ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Отладочные файлы (мусор от разработки) ---
+_*.py
+_*.txt
+_*.html
+_rules_dump/

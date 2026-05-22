@@ -1,0 +1,1242 @@
+import asyncio
+import json
+import logging
+import re
+import time
+from html import escape as escape_html
+from typing import Optional
+
+import httpx
+from bs4 import BeautifulSoup
+
+from src.config import COOKIES_PATH, FORUM_URL, USER_AGENT
+
+logger = logging.getLogger(__name__)
+
+# Регулярка для извлечения node_id из ссылки на форум XenForo
+# /forums/some-name.123/  или  /forums/123/  или  /categories/some-name.123/
+NODE_ID_RE = re.compile(r"(?:forums|categories)/(?:[^/]+\.)?(\d+)/?")
+
+# Ключевые слова для распознавания категорий жалоб (lowercase)
+COMPLAINT_CATEGORY_KEYWORDS = {
+    "players": ("жалобы на игроков", "жалоба на игрока"),
+    "admins":  ("жалобы на администрацию", "жалоба на администрацию", "жалобы на админ"),
+    "leaders": ("жалобы на лидеров", "жалоба на лидера", "жалобы на лидера"),
+    "appeals": ("обжалование наказаний", "обжалование наказания", "обжалования"),
+}
+
+# Приоритет проверок: более специфичные классы — раньше "players"
+_CATEGORY_PRIORITY = ("admins", "leaders", "appeals", "players")
+
+HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Origin": FORUM_URL,
+    "Referer": f"{FORUM_URL}/",
+}
+
+# Используем lxml, если установлен — он в 5-10 раз быстрее html.parser
+try:
+    import lxml  # noqa: F401
+    _PARSER = "lxml"
+    logger.debug("BeautifulSoup будет использовать парсер lxml.")
+except ImportError:
+    _PARSER = "html.parser"
+
+
+def _soup(html: str) -> BeautifulSoup:
+    """Создаёт BeautifulSoup с лучшим доступным парсером."""
+    return BeautifulSoup(html, _PARSER)
+
+
+# ---------------- Куки ----------------
+
+# Кэш кук в памяти, чтобы не читать файл при каждом запросе.
+# Сбрасывается через invalidate_cookies_cache() после загрузки нового cookies.json.
+_cookies_cache: Optional[dict] = None
+_cookies_mtime: float = 0.0
+
+
+def load_cookies(use_cache: bool = True) -> dict:
+    """Загрузка кук из cookies.json. Кэширует результат до изменения файла."""
+    global _cookies_cache, _cookies_mtime
+
+    if not COOKIES_PATH.exists():
+        logger.warning("Файл с куками не найден по пути: %s", COOKIES_PATH)
+        return {}
+
+    mtime = COOKIES_PATH.stat().st_mtime
+    if use_cache and _cookies_cache is not None and mtime == _cookies_mtime:
+        return _cookies_cache
+
+    try:
+        with open(COOKIES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        cookies_dict: dict = {}
+        if isinstance(data, list):
+            for cookie in data:
+                if "name" in cookie and "value" in cookie:
+                    cookies_dict[cookie["name"]] = cookie["value"]
+        elif isinstance(data, dict):
+            cookies_dict = data
+
+        _cookies_cache = cookies_dict
+        _cookies_mtime = mtime
+        logger.debug("Загружено %d кук из %s.", len(cookies_dict), COOKIES_PATH.name)
+        return cookies_dict
+    except json.JSONDecodeError as e:
+        logger.error("Файл cookies.json содержит некорректный JSON: %s", e)
+        return {}
+    except Exception as e:
+        logger.exception("Не удалось прочитать файл с куками: %s", e)
+        return {}
+
+
+def save_cookies(cookies_dict: dict) -> None:
+    """Сохранение кук обратно в файл cookies.json."""
+    global _cookies_cache, _cookies_mtime
+    try:
+        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+            json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
+        _cookies_cache = dict(cookies_dict)
+        _cookies_mtime = COOKIES_PATH.stat().st_mtime
+        logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))
+    except Exception as e:
+        logger.exception("Не удалось сохранить куки в файл: %s", e)
+
+
+def invalidate_cookies_cache() -> None:
+    """Сбрасывает кэш кук — вызывается после ручной перезаписи cookies.json."""
+    global _cookies_cache, _cookies_mtime
+    _cookies_cache = None
+    _cookies_mtime = 0.0
+
+
+def apply_account_cookies(cookies: dict) -> None:
+    """Записывает куки в cookies.json и обновляет кэш в памяти.
+    Используется при переключении между несколькими форумными аккаунтами —
+    после вызова все запросы к форуму пойдут от имени этих кук."""
+    save_cookies(cookies)
+    # save_cookies сам обновляет кэш, но для надёжности
+    invalidate_cookies_cache()
+    load_cookies()  # прогреть кэш
+
+
+def _make_client(timeout: float = 20.0) -> httpx.AsyncClient:
+    """Создаёт httpx-клиент с куками и общими заголовками. Куки берутся из кэша.
+
+    ВАЖНО: после `async with _make_client() as c: ...` нужно вызвать
+    `_persist_cookies_from_client(c)` или использовать обёртку `_session()`,
+    чтобы свежие куки от форума попали в cookies.json. Иначе `xf_session`,
+    обновлённая форумом во время запросов, потеряется.
+    """
+    return httpx.AsyncClient(
+        cookies=load_cookies(),
+        headers=HEADERS,
+        follow_redirects=True,
+        timeout=timeout,
+        http2=False,  # форум стабильно работает по HTTP/1.1, не плодим зависимости
+    )
+
+
+class _session:
+    """Async context-manager: открывает клиент, по выходу автоматически
+    сливает свежие куки в cookies.json. Использовать вместо _make_client()
+    везде, где сессия может быть обновлена форумом.
+    """
+
+    def __init__(self, timeout: float = 20.0):
+        self._client = _make_client(timeout=timeout)
+
+    async def __aenter__(self) -> httpx.AsyncClient:
+        return self._client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            _persist_cookies_from_client(self._client)
+        finally:
+            await self._client.aclose()
+
+
+# ---------------- Авторизация ----------------
+
+def _extract_user_id(html: str) -> int:
+    """Извлечение ID авторизованного пользователя из HTML XenForo.
+    Использует regex по сырому HTML, потому что BeautifulSoup+lxml на
+    нестандартной разметке Black Russia (meta до <html>) может терять
+    атрибуты <html> тэга.
+    """
+    m_html = _HTML_TAG_RE.search(html)
+    if not m_html:
+        return 0
+    attrs = m_html.group(1)
+    m_logged = _LOGGED_IN_RE.search(attrs)
+    if not m_logged or m_logged.group(1) != "true":
+        return 0
+    m_uid = _USER_ID_RE.search(attrs)
+    if m_uid:
+        return int(m_uid.group(1))
+    return 1  # logged-in=true, но id не нашёлся — считаем авторизованным
+
+
+def _extract_username(soup: BeautifulSoup) -> str:
+    """Достаёт имя авторизованного пользователя из шапки XenForo."""
+    tag = soup.find("span", class_="p-navgroup-linkText")
+    if tag and tag.text.strip():
+        return tag.text.strip()
+
+    avatar = soup.find("span", class_="avatar")
+    if avatar and avatar.parent:
+        sibling = avatar.parent.find("span")
+        if sibling and sibling.text.strip():
+            return sibling.text.strip()
+
+    for a in soup.find_all("a", href=True):
+        if "/members/" in a["href"]:
+            text = a.text.strip()
+            if text:
+                return text
+
+    return "Авторизован (Имя не найдено)"
+
+
+async def _resolve_username(client: httpx.AsyncClient) -> str:
+    """Пытается выяснить имя авторизованного пользователя через GET / .
+    Если упирается в DDoS-Guard заглушку — обновляет R3ACTLB и пробует ещё раз.
+    Возвращает имя или плейсхолдер."""
+    try:
+        r = await client.get(FORUM_URL)
+        if "vddosw3data.js" in r.text or "slowAES" in r.text:
+            fresh = await _solve_ddos_guard()
+            if fresh:
+                client.cookies.set("R3ACTLB", fresh,
+                                    domain="forum.blackrussia.online", path="/")
+                r = await client.get(FORUM_URL)
+        soup = _soup(r.text)
+        if _extract_user_id(r.text) > 0:
+            return _extract_username(soup)
+        return _extract_username(soup)
+    except httpx.RequestError as e:
+        logger.debug("Не удалось получить имя пользователя: %s", e)
+        return "Авторизован"
+
+
+# ---------------- Авторизация ----------------
+
+LOGIN_URL = f"{FORUM_URL}/login/"
+LOGIN_POST_URL = f"{FORUM_URL}/login/login"
+TWO_STEP_URL = f"{FORUM_URL}/login/two-step"
+
+# Регулярка для извлечения трёх hex-строк AES (a, b, c) из заглушки DDoS-Guard
+_DDOS_KEYS_RE = re.compile(
+    r'"([0-9a-f]{32})"\s*,\s*'
+    r'"([0-9a-f]{32})"\s*,\s*'
+    r'"([0-9a-f]{32})"'
+)
+
+# Атрибуты <html> тэга, надёжнее чем через BeautifulSoup, потому что lxml
+# может ломаться на нестандартной разметке Black Russia (meta до <html>).
+_HTML_TAG_RE = re.compile(r"<html\b([^>]*)>", re.IGNORECASE | re.DOTALL)
+_LOGGED_IN_RE = re.compile(r'data-logged-in\s*=\s*"([^"]*)"', re.IGNORECASE)
+_USER_ID_RE = re.compile(r'data-user-id\s*=\s*"(\d+)"', re.IGNORECASE)
+_CSRF_RE = re.compile(r'data-csrf\s*=\s*"([^"]+)"', re.IGNORECASE)
+
+
+async def _solve_ddos_guard() -> Optional[str]:
+    """Решает JS-челлендж DDoS-Guard и возвращает значение cookie R3ACTLB.
+    Возвращает None если страница не оказалась челленджем или решить не вышло.
+
+    Заглушка содержит три 32-символьные hex-строки a, b, c. Cookie вычисляется
+    как hex(AES-128-CBC.decrypt(ciphertext=c, key=a, iv=b)).
+    """
+    try:
+        async with httpx.AsyncClient(
+            headers=HEADERS, follow_redirects=False, timeout=15.0,
+        ) as client:
+            r = await client.get(FORUM_URL)
+            html = r.text
+            if "slowAES" not in html and "vddosw3data" not in html:
+                # Уже не челлендж — нечего решать
+                return None
+            m = _DDOS_KEYS_RE.search(html)
+            if not m:
+                logger.debug("В заглушке DDoS-Guard не нашлись AES-ключи.")
+                return None
+            a_hex, b_hex, c_hex = m.group(1), m.group(2), m.group(3)
+    except httpx.RequestError as e:
+        logger.warning("Сетевая ошибка при загрузке заглушки DDoS-Guard: %s", e)
+        return None
+
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+    except ImportError:
+        logger.warning("Для решателя DDoS-Guard нужен пакет cryptography. "
+                       "Установите: pip install cryptography")
+        return None
+
+    try:
+        key = bytes.fromhex(a_hex)
+        iv = bytes.fromhex(b_hex)
+        ct = bytes.fromhex(c_hex)
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(ct) + decryptor.finalize()
+        return plaintext.hex()
+    except Exception as e:
+        logger.warning("Не удалось расшифровать DDoS-Guard challenge: %s", e)
+        return None
+
+
+async def forum_login(login: str, password: str) -> dict:
+    """Логинится на форум по логину/паролю.
+
+    Возвращает один из вариантов:
+    - {"status": "ok", "username": str, "cookies": dict}
+    - {"status": "2fa", "providers": list[str], "csrf": str, "client": httpx.AsyncClient,
+       "provider": str, "two_step_url": str}
+       — форум требует код подтверждения; код уже отправлен на email/totp.
+       Клиент остаётся открытым, его передаём в forum_submit_2fa() и он же
+       закрывается там. Если 2FA отменили — вызовите client.aclose() сами.
+    - {"status": "error", "message": str}
+    """
+    logger.info("Начинаю вход на форум по паролю (логин: %r).", login)
+
+    # DDoS-Guard на BR обязательно требует cookie R3ACTLB, который выдаётся после
+    # JS-челленджа. Сами решаем челлендж AES-128-CBC, чтобы не зависеть от ручного
+    # экспорта кук. Если по какой-то причине не получилось — пробуем взять
+    # существующий R3ACTLB из cookies.json (вдруг сработает).
+    initial_cookies: dict = {}
+    solved = await _solve_ddos_guard()
+    if solved:
+        initial_cookies["R3ACTLB"] = solved
+        logger.info("DDoS-Guard челлендж решён, R3ACTLB получен.")
+    else:
+        existing = load_cookies()
+        if existing.get("R3ACTLB"):
+            initial_cookies["R3ACTLB"] = existing["R3ACTLB"]
+            logger.warning("Решатель не отработал, использую R3ACTLB из cookies.json.")
+        else:
+            logger.warning("R3ACTLB получить не удалось — продолжаю без него (скорее всего, упадёт).")
+
+    client = httpx.AsyncClient(
+        cookies=initial_cookies,
+        headers=HEADERS, follow_redirects=True, timeout=20.0,
+    )
+
+    # При любом раннем return нужно закрыть клиент, чтобы не утекало соединение.
+    # Только успешный 2FA-ответ оставляет клиент открытым (его закроет submit_2fa).
+    keep_open = False
+    try:
+        # 1. Получаем CSRF и стартовые куки с /login/
+        r = await client.get(LOGIN_URL)
+        if r.status_code != 200:
+            logger.error("HTTP %s при загрузке /login/", r.status_code)
+            return {"status": "error",
+                    "message": f"Форум вернул HTTP {r.status_code} на странице входа."}
+
+        if "vddosw3data.js" in r.text or "slowAES" in r.text:
+            logger.warning("На /login/ снова DDoS-Guard заглушка — пробую обновить R3ACTLB.")
+            fresh = await _solve_ddos_guard()
+            if fresh:
+                client.cookies.set("R3ACTLB", fresh,
+                                    domain="forum.blackrussia.online", path="/")
+                r = await client.get(LOGIN_URL)
+            if "vddosw3data.js" in r.text or "slowAES" in r.text:
+                logger.error("DDoS-Guard заглушка остаётся даже после нового R3ACTLB.")
+                return {"status": "error",
+                        "message": (
+                            "Форум упорно показывает DDoS-Guard защиту. "
+                            "Возможно, сменился алгоритм или ваш IP в чёрном списке. "
+                            "Попробуйте экспортировать <code>cookies.json</code> "
+                            "из браузера и прислать боту."
+                        )}
+
+        soup = _soup(r.text)
+        csrf = _extract_csrf(r.text)
+        if not csrf:
+            logger.error("CSRF-токен не найден на /login/.")
+            return {"status": "error", "message": "Не удалось получить CSRF-токен формы входа."}
+
+        # 2. Отправляем форму /login/login
+        payload = {
+            "login": login,
+            "password": password,
+            "remember": "1",
+            "register": "0",
+            "_xfToken": csrf,
+            "_xfRedirect": f"{FORUM_URL}/",
+            "_xfRequestUri": "/login/login",
+            "_xfWithData": "1",
+            "_xfResponseType": "json",
+        }
+        ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": LOGIN_URL}
+        r2 = await client.post(LOGIN_POST_URL, data=payload, headers=ajax)
+        logger.debug("POST /login/login -> HTTP %s, content-type %s",
+                     r2.status_code, r2.headers.get("content-type"))
+
+        try:
+            resp_json = r2.json()
+        except ValueError:
+            resp_json = None
+
+        if resp_json:
+            errors = resp_json.get("errors")
+            if errors:
+                msg = "; ".join(errors) if isinstance(errors, list) else str(errors)
+                logger.warning("Форум вернул ошибку входа: %s", msg)
+                return {"status": "error", "message": msg}
+
+            html_content = (resp_json.get("html") or {}).get("content", "")
+            redirect_url = resp_json.get("redirect", "")
+
+            if "two-step" in redirect_url or "two-step" in html_content:
+                # Загружаем страницу 2FA в этом же клиенте, оставляем его открытым
+                two_step_data = await _start_two_step(client, redirect_url, html_content)
+                if two_step_data["status"] == "2fa":
+                    keep_open = True
+                    two_step_data["client"] = client
+                return two_step_data
+
+            if redirect_url:
+                final = await client.get(_to_abs(redirect_url))
+                if _extract_user_id(final.text):
+                    username = _extract_username(_soup(final.text))
+                    logger.info("Вход успешен (без 2FA): «%s».", username)
+                    return {"status": "ok", "username": username,
+                            "cookies": _flatten_cookies(client)}
+
+        # Фолбэк: проверим главную форума на data-logged-in
+        r3 = await client.get(FORUM_URL)
+        if _extract_user_id(r3.text):
+            username = _extract_username(_soup(r3.text))
+            logger.info("Вход успешен (фолбэк): «%s».", username)
+            return {"status": "ok", "username": username,
+                    "cookies": _flatten_cookies(client)}
+
+        # Если URL после редиректа содержит two-step — 2FA требуется
+        if "two-step" in str(r2.url):
+            two_step_data = await _start_two_step(client, str(r2.url), r2.text)
+            if two_step_data["status"] == "2fa":
+                keep_open = True
+                two_step_data["client"] = client
+            return two_step_data
+
+        logger.warning("Вход не удался, форум не пустил.")
+        return {"status": "error",
+                "message": "Неверный логин или пароль (либо форум потребовал капчу/действие в браузере)."}
+
+    except httpx.RequestError as e:
+        logger.error("Сетевая ошибка при входе: %s", e)
+        return {"status": "error", "message": f"Ошибка сети: {e}"}
+    except Exception as e:
+        logger.exception("Непредвиденная ошибка входа на форум")
+        return {"status": "error", "message": f"Ошибка: {e}"}
+    finally:
+        if not keep_open:
+            await client.aclose()
+
+
+def _to_abs(url: str) -> str:
+    """Превращает относительный URL форума в абсолютный."""
+    if not url:
+        return FORUM_URL
+    if url.startswith("http"):
+        return url
+    return FORUM_URL + (url if url.startswith("/") else "/" + url)
+
+
+def _flatten_cookies(client: httpx.AsyncClient) -> dict:
+    """Возвращает {name: value} для домена форума.
+
+    Если на одно имя в jar лежат несколько записей (XenForo при логине
+    может прислать два Set-Cookie: 'xf_session=deleted' и затем настоящую
+    новую сессию), берём ПОСЛЕДНЮЮ непустую — это самая свежая.
+    Также игнорируем явно "удалённые" значения вроде 'deleted' или пустой строки.
+    """
+    forum_host = httpx.URL(FORUM_URL).host
+    # Собираем все валидные значения по имени, берём последнее
+    by_name: dict[str, str] = {}
+    for cookie in client.cookies.jar:
+        if not cookie.domain or forum_host not in cookie.domain:
+            continue
+        val = cookie.value
+        # Отбрасываем удалённые/пустые куки
+        if not val or val == "deleted":
+            # Если в jar уже было нормальное значение — не затираем им deleted
+            continue
+        by_name[cookie.name] = val  # перезапись = последнее значение побеждает
+    return by_name
+
+
+def _persist_cookies_from_client(client: httpx.AsyncClient) -> None:
+    """Сливает текущее состояние jar клиента в cookies.json.
+    Сохраняет существующие записи, обновляя/добавляя свежие. Безопасно
+    вызывать часто — на старые значения просто перезаписывает."""
+    fresh = _flatten_cookies(client)
+    if not fresh:
+        return
+    existing = load_cookies()
+    merged = {**existing, **fresh}
+    if merged != existing:
+        save_cookies(merged)
+
+
+async def _start_two_step(client: httpx.AsyncClient, redirect_url: str,
+                           html_content: str) -> dict:
+    """Загружает страницу /login/two-step, парсит форму и возвращает
+    данные для последующей отправки кода."""
+    target = _to_abs(redirect_url) if redirect_url else TWO_STEP_URL
+    logger.info("Форум требует 2FA. Загружаю страницу подтверждения: %s", target)
+
+    page = await client.get(target)
+    if page.status_code != 200:
+        logger.error("HTTP %s на странице 2FA.", page.status_code)
+        return {"status": "error",
+                "message": f"HTTP {page.status_code} при загрузке страницы 2FA."}
+
+    soup = _soup(page.text)
+    csrf = _extract_csrf(page.text)
+    if not csrf:
+        # На странице two-step может быть отдельный input
+        form = soup.find("form")
+        if form:
+            inp = form.find("input", {"name": "_xfToken"})
+            if inp:
+                csrf = inp.get("value")
+    if not csrf:
+        return {"status": "error", "message": "CSRF-токен на странице 2FA не найден."}
+
+    # Извлекаем доступные провайдеры (email, totp, backup)
+    providers: list[str] = []
+    for inp in soup.find_all("input", {"name": "provider"}):
+        val = inp.get("value")
+        if val and val not in providers:
+            providers.append(val)
+    # Если кнопок-провайдеров нет, ищем по data-attribute
+    if not providers:
+        for el in soup.find_all(attrs={"data-provider": True}):
+            val = el.get("data-provider")
+            if val and val not in providers:
+                providers.append(val)
+
+    # Выбор по умолчанию: email > totp > что есть
+    default_provider = None
+    for pref in ("email", "totp", "backup"):
+        if pref in providers:
+            default_provider = pref
+            break
+    if default_provider is None:
+        default_provider = providers[0] if providers else "email"
+
+    logger.info("2FA: доступны провайдеры %s, выбран по умолчанию «%s».",
+                providers or ["?"], default_provider)
+
+    return {
+        "status": "2fa",
+        "providers": providers or ["email"],
+        "provider": default_provider,
+        "csrf": csrf,
+        "two_step_url": target,
+    }
+
+
+async def forum_submit_2fa(state: dict, code: str,
+                            trust_device: bool = True) -> dict:
+    """Отправляет код 2FA. state — dict от forum_login() со status='2fa'.
+
+    state['client'] — открытый httpx.AsyncClient с куками от логина.
+    Этот метод закроет клиент перед возвратом (в любом случае).
+    """
+    code = code.strip().replace(" ", "")
+    logger.info("Отправляю 2FA-код (провайдер: %s, длина кода: %d).",
+                state.get("provider"), len(code))
+
+    client: httpx.AsyncClient = state["client"]
+    csrf = state["csrf"]
+    provider = state["provider"]
+    two_step_url = state.get("two_step_url", TWO_STEP_URL)
+
+    try:
+        payload = {
+            "code": code,
+            "provider": provider,
+            "trust": "1" if trust_device else "0",
+            "remember": "1",
+            "confirm": "1",
+            "_xfToken": csrf,
+            "_xfRedirect": f"{FORUM_URL}/",
+            "_xfRequestUri": "/login/two-step",
+            "_xfWithData": "1",
+            "_xfResponseType": "json",
+        }
+        ajax = {
+            **HEADERS,
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": two_step_url,
+        }
+        r = await client.post(two_step_url, data=payload, headers=ajax)
+        logger.debug("POST %s -> HTTP %s, content-type=%s",
+                     two_step_url, r.status_code, r.headers.get("content-type"))
+
+        try:
+            resp_json = r.json()
+        except ValueError:
+            resp_json = None
+
+        # XenForo на правильный 2FA-код возвращает JSON с пустым errors и
+        # redirect="/" (или другим URL). На неправильный код — errors с описанием.
+        # Это и есть надёжный признак успеха, парсить главную незачем.
+        if resp_json:
+            errors = resp_json.get("errors")
+            if errors:
+                msg = "; ".join(errors) if isinstance(errors, list) else str(errors)
+                logger.warning("Форум отверг 2FA-код: %s", msg)
+                return {"status": "error", "message": msg}
+
+            redirect_url = resp_json.get("redirect")
+            if redirect_url:
+                # Дёргаем redirect, чтобы XenForo дописал в jar финальные куки
+                # (иногда новые xf_session/xf_user приходят именно на этом шаге)
+                if redirect_url.startswith("/"):
+                    redirect_url = FORUM_URL + redirect_url
+                logger.debug("Делаю GET по redirect: %s", redirect_url)
+                try:
+                    await client.get(redirect_url)
+                except httpx.RequestError as e:
+                    logger.debug("GET redirect упал, но 2FA уже принят: %s", e)
+
+            cookies_dict = _flatten_cookies(client)
+            # Минимальный признак рабочей сессии: есть xf_user
+            if "xf_user" not in cookies_dict:
+                logger.warning("В jar нет xf_user после 2FA, что-то не так. Куки: %s",
+                               ", ".join(sorted(cookies_dict.keys())))
+                return {"status": "error",
+                        "message": "Форум принял код, но не выдал сессионную куку xf_user."}
+
+            username = await _resolve_username(client)
+            logger.info("2FA пройден, аккаунт: «%s».", username)
+            return {"status": "ok", "username": username, "cookies": cookies_dict}
+
+        # JSON не вернулся вообще — fallback на парсинг главной
+        final = await client.get(FORUM_URL)
+        if "vddosw3data.js" in final.text or "slowAES" in final.text:
+            logger.debug("Финальная страница показала DDoS-Guard заглушку, обновляю R3ACTLB.")
+            fresh = await _solve_ddos_guard()
+            if fresh:
+                client.cookies.set("R3ACTLB", fresh,
+                                    domain="forum.blackrussia.online", path="/")
+                final = await client.get(FORUM_URL)
+
+        if _extract_user_id(final.text):
+            username = _extract_username(_soup(final.text))
+            logger.info("2FA пройден (через парсинг главной): «%s».", username)
+            return {"status": "ok", "username": username,
+                    "cookies": _flatten_cookies(client)}
+
+        soup = _soup(final.text)
+        html_tag = soup.find("html")
+        logged = html_tag.get("data-logged-in") if html_tag else "?"
+        logger.warning("После 2FA: data-logged-in=%r, кук в jar: %s",
+                       logged, ", ".join(sorted(_flatten_cookies(client).keys())))
+        return {"status": "error",
+                "message": "Код принят, но форум не активировал сессию. "
+                           "Попробуйте ещё раз — возможно, код устарел."}
+
+    except httpx.RequestError as e:
+        logger.error("Сетевая ошибка при отправке 2FA-кода: %s", e)
+        return {"status": "error", "message": f"Ошибка сети: {e}"}
+    except Exception as e:
+        logger.exception("Непредвиденная ошибка 2FA")
+        return {"status": "error", "message": f"Ошибка: {e}"}
+    finally:
+        await client.aclose()
+
+
+async def check_auth() -> tuple[bool, str]:
+    """Проверка авторизации на форуме (использует активные куки из cookies.json).
+    Возвращает (успех, имя_пользователя/описание_ошибки)."""
+    return await _check_auth_with_cookies(load_cookies())
+
+
+async def check_auth_for_cookies(cookies: dict) -> tuple[bool, str]:
+    """Проверка авторизации с конкретным набором куков (без записи в cookies.json).
+    Используется для проверки нескольких аккаунтов за один проход."""
+    return await _check_auth_with_cookies(cookies)
+
+
+async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
+    started = time.monotonic()
+    logger.info("Проверяю авторизацию на форуме %s ...", FORUM_URL)
+
+    if not cookies:
+        logger.warning("Файл cookies.json пуст или отсутствует.")
+        return False, "Куки не загружены."
+
+    if "xf_user" not in cookies:
+        names = ", ".join(sorted(cookies.keys())) or "—"
+        logger.warning("В куках нет xf_user. Имеется: %s", names)
+        return False, (
+            f"В файле нет ключа <code>xf_user</code>.\n"
+            f"Найдено: <code>{names}</code>"
+        )
+
+    async with httpx.AsyncClient(
+        cookies=cookies, headers=HEADERS, follow_redirects=True, timeout=15.0,
+    ) as client:
+        try:
+            response = await client.get(FORUM_URL)
+            elapsed = time.monotonic() - started
+            logger.debug("GET %s -> HTTP %s за %.2f с", FORUM_URL, response.status_code, elapsed)
+
+            if response.status_code != 200:
+                logger.warning("Форум вернул HTTP %s при проверке авторизации.", response.status_code)
+                return False, f"Форум вернул ошибку HTTP {response.status_code}."
+
+            html = response.text
+
+            # Если упёрлись в DDoS-Guard заглушку — обновляем R3ACTLB и пробуем ещё раз
+            if "vddosw3data.js" in html or "slowAES" in html:
+                logger.info("На главной DDoS-Guard заглушка — обновляю R3ACTLB.")
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain="forum.blackrussia.online", path="/")
+                    response = await client.get(FORUM_URL)
+                    html = response.text
+                    # Обновим cookies.json со свежим R3ACTLB
+                    save_cookies({**cookies, "R3ACTLB": fresh})
+
+            user_id = _extract_user_id(html)
+            if user_id == 0:
+                # Подробная диагностика, чтобы пользователь понял в чём дело
+                soup = _soup(html)
+                html_tag = soup.find("html")
+                logged_in_attr = html_tag.get("data-logged-in") if html_tag else None
+                title_tag = soup.find("title")
+                title = title_tag.text.strip() if title_tag else "?"
+
+                names = ", ".join(sorted(cookies.keys()))
+                logger.warning(
+                    "Форум не считает сессию авторизованной. data-logged-in=%r, "
+                    "title=%r, имеющиеся куки: %s",
+                    logged_in_attr, title, names,
+                )
+                return False, (
+                    "Форум не принял сессию (<code>data-logged-in != true</code>).\n\n"
+                    "Возможные причины:\n"
+                    "• <b>Куки истекли</b> — экспортируйте свежие из браузера.\n"
+                    "• <b>User-Agent не совпадает</b> с браузером, где брали куки. "
+                    f"Сейчас в .env: <code>{escape_html(USER_AGENT)}</code>\n"
+                    "• Куки взяты из режима инкогнито — после закрытия они умирают."
+                )
+
+            updated = _flatten_cookies(client)
+            if updated:
+                save_cookies({**cookies, **updated})
+
+            username = _extract_username(_soup(html))
+            logger.info("Авторизация успешна: пользователь «%s» (user_id=%s).",
+                        username, user_id)
+            return True, username
+
+        except httpx.RequestError as e:
+            logger.error("Сетевая ошибка при проверке авторизации: %s", e)
+            return False, f"Ошибка сети: {e}"
+        except Exception as e:
+            logger.exception("Неизвестная ошибка проверки авторизации")
+            return False, f"Ошибка: {e}"
+
+
+# ---------------- Публикация жалобы ----------------
+
+def _extract_csrf(soup_or_html) -> Optional[str]:
+    """Достаёт CSRF-токен XenForo. Сначала из <html data-csrf> через regex
+    (надёжно при битой разметке), потом из формы через BeautifulSoup.
+
+    Принимает либо BeautifulSoup, либо строку HTML.
+    """
+    if isinstance(soup_or_html, str):
+        html = soup_or_html
+        soup = _soup(html)
+    else:
+        soup = soup_or_html
+        html = None
+
+    # 1. Через regex по <html ...>
+    if html is None:
+        # Восстановим исходный HTML из soup (приблизительно). Лучше передавать
+        # сразу строку — это путь по умолчанию.
+        try:
+            html = str(soup)
+        except Exception:
+            html = ""
+
+    m_html = _HTML_TAG_RE.search(html)
+    if m_html:
+        m_csrf = _CSRF_RE.search(m_html.group(1))
+        if m_csrf:
+            return m_csrf.group(1)
+
+    # 2. Запасной способ — input в форме
+    csrf_input = soup.find("input", {"name": "_xfToken"})
+    if csrf_input:
+        return csrf_input.get("value")
+    return None
+
+
+def _extract_required_prefix(soup: BeautifulSoup) -> Optional[str]:
+    """Возвращает prefix_id, который форум обязательно требует выбрать.
+    Берёт первый ненулевой <option>. None — если префикс не нужен."""
+    select_tag = soup.find("select", {"name": "prefix_id"})
+    if not select_tag:
+        return None
+
+    available: list[tuple[str, str]] = []
+    for opt in select_tag.find_all("option"):
+        val = (opt.get("value") or "").strip()
+        text = opt.get_text(strip=True)
+        if val and val != "0":
+            available.append((val, text))
+
+    if not available:
+        return None
+
+    chosen, label = available[0]
+    logger.info("Раздел требует префикс. Авто-выбор: id=%s, «%s». Доступно вариантов: %d.",
+                chosen, label, len(available))
+    if len(available) > 1:
+        others = ", ".join(f"{v}={t!r}" for v, t in available[1:])
+        logger.debug("Прочие доступные префиксы: %s", others)
+    return chosen
+
+
+async def post_complaint(section_id: int, title: str, message: str) -> tuple[bool, str]:
+    """Публикация темы (жалобы) в указанный раздел форума.
+    Возвращает (успех, ссылка_на_тему/текст_ошибки)."""
+    started = time.monotonic()
+    logger.info("Публикую жалобу в раздел node_id=%s. Заголовок: «%s», длина тела: %d симв.",
+                section_id, title, len(message))
+
+    cookies = load_cookies()
+    if not cookies:
+        logger.warning("Невозможно отправить жалобу: куки отсутствуют.")
+        return False, "Отсутствуют куки. Загрузите файл cookies.json."
+
+    post_url = f"{FORUM_URL}/forums/{section_id}/post-thread"
+
+    async with _session() as client:
+        try:
+            # 1. Загружаем форму создания темы (CSRF + список префиксов)
+            logger.debug("Шаг 1/3: запрашиваю форму создания темы — %s", post_url)
+            get_response = await client.get(post_url)
+
+            # DDoS-Guard?
+            if (get_response.status_code == 200 and
+                    ("vddosw3data.js" in get_response.text or "slowAES" in get_response.text)):
+                logger.info("На форме создания темы DDoS-Guard заглушка — обновляю R3ACTLB.")
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain="forum.blackrussia.online", path="/")
+                    save_cookies({**cookies, "R3ACTLB": fresh})
+                    get_response = await client.get(post_url)
+
+            if get_response.status_code != 200:
+                if get_response.status_code == 403:
+                    logger.error("HTTP 403 при открытии формы (раздел %s). Возможно, нет прав.",
+                                 section_id)
+                    return False, (
+                        f"Доступ запрещён (HTTP 403). Проверьте права аккаунта или куки "
+                        f"для раздела {section_id}."
+                    )
+                logger.error("HTTP %s при открытии формы создания темы.", get_response.status_code)
+                return False, f"Не удалось открыть страницу создания темы. HTTP {get_response.status_code}."
+
+            soup = _soup(get_response.text)
+
+            csrf_token = _extract_csrf(get_response.text)
+            if not csrf_token:
+                logger.error("CSRF-токен не найден на странице создания темы.")
+                return False, "Не удалось найти CSRF-токен защиты XenForo на странице."
+            logger.debug("Шаг 2/3: CSRF-токен получен (длина %d).", len(csrf_token))
+
+            prefix_id = _extract_required_prefix(soup)
+
+            payload = {
+                "title": title,
+                "message": message,
+                "_xfToken": csrf_token,
+                "_xfRequestUri": f"/forums/{section_id}/post-thread",
+                "_xfWithData": "1",
+                "_xfResponseType": "json",
+            }
+            if prefix_id is not None:
+                payload["prefix_id"] = prefix_id
+
+            ajax_headers = {**HEADERS, "X-Requested-With": "XMLHttpRequest"}
+            logger.debug("Шаг 3/3: POST %s (AJAX, %d полей)...", post_url, len(payload))
+            post_response = await client.post(post_url, data=payload, headers=ajax_headers)
+
+            updated = _flatten_cookies(client)
+            if updated:
+                save_cookies({**cookies, **updated})
+
+            elapsed = time.monotonic() - started
+            if post_response.status_code != 200:
+                logger.error("Форум вернул HTTP %s при отправке жалобы (за %.2f с).",
+                             post_response.status_code, elapsed)
+                return False, f"Ошибка отправки формы. HTTP {post_response.status_code}."
+
+            try:
+                result_json = post_response.json()
+            except ValueError:
+                snippet = post_response.text[:200].replace("\n", " ")
+                logger.error("Форум вернул не-JSON ответ. Начало: %s", snippet)
+                return False, f"Форум вернул некорректный ответ (не JSON): {snippet}"
+
+            if "errors" in result_json:
+                errors = result_json["errors"]
+                if isinstance(errors, list):
+                    error_msg = "; ".join(errors)
+                elif isinstance(errors, dict):
+                    error_msg = "; ".join(str(v) for v in errors.values())
+                else:
+                    error_msg = str(errors)
+                logger.warning("Форум вернул ошибку валидации формы: %s", error_msg)
+                return False, f"Ошибка форума: {error_msg}"
+
+            redirect_url = result_json.get("redirect")
+            if redirect_url:
+                if redirect_url.startswith("/"):
+                    redirect_url = FORUM_URL + redirect_url
+                logger.info("Жалоба успешно опубликована за %.2f с. URL темы: %s",
+                            elapsed, redirect_url)
+                return True, redirect_url
+
+            logger.warning("Форум принял запрос, но не вернул URL новой темы. Ответ: %s",
+                           str(result_json)[:300])
+            return False, "Тема отправлена, но форум не вернул ссылку перенаправления."
+
+        except httpx.RequestError as e:
+            logger.error("Сетевая ошибка при отправке жалобы: %s", e)
+            return False, f"Ошибка сети при связи с форумом: {e}"
+        except Exception as e:
+            logger.exception("Неизвестная ошибка при отправке жалобы")
+            return False, f"Внутренняя ошибка отправки: {e}"
+
+
+# ---------------- Автообнаружение структуры форума ----------------
+
+def _extract_node_id(href: str) -> Optional[int]:
+    """Извлекает числовой node_id из ссылки на форум XenForo."""
+    if not href:
+        return None
+    match = NODE_ID_RE.search(href)
+    return int(match.group(1)) if match else None
+
+
+def _classify_category(text: str) -> Optional[str]:
+    """Классифицирует название подраздела жалоб по ключевым словам."""
+    lower = text.lower()
+    for key in _CATEGORY_PRIORITY:
+        for keyword in COMPLAINT_CATEGORY_KEYWORDS[key]:
+            if keyword in lower:
+                return key
+    return None
+
+
+async def discover_servers() -> tuple[bool, list[tuple[str, int]] | str]:
+    """Сканирует главную страницу форума и собирает список серверов.
+
+    Сервера именуются как "Сервер №01 | RED" — имя берём после '|'.
+    Возвращает (успех, [(имя, node_id), ...] в порядке с форума или текст_ошибки).
+    """
+    if not load_cookies():
+        logger.warning("Сканирование серверов прервано: куки не загружены.")
+        return False, "Куки не загружены."
+
+    logger.info("Сканирую главную страницу форума на предмет списка серверов...")
+
+    async with _session() as client:
+        try:
+            response = await client.get(FORUM_URL)
+            if response.status_code != 200:
+                logger.error("HTTP %s при загрузке главной страницы.", response.status_code)
+                return False, f"HTTP {response.status_code} при загрузке главной страницы."
+
+            # Если форум показал DDoS-Guard заглушку — решаем и повторяем
+            if "vddosw3data.js" in response.text or "slowAES" in response.text:
+                logger.info("На главной DDoS-Guard заглушка — обновляю R3ACTLB.")
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain="forum.blackrussia.online", path="/")
+                    cookies = load_cookies()
+                    save_cookies({**cookies, "R3ACTLB": fresh})
+                    response = await client.get(FORUM_URL)
+
+            servers = _parse_servers_from_html(response.text)
+            if not servers:
+                logger.warning("На главной странице форума не нашлось ни одного сервера.")
+                return False, "Не найдено ни одного сервера на главной странице форума."
+
+            logger.info("Найдено серверов: %d. Первый: %s, последний: %s.",
+                        len(servers), servers[0][0], servers[-1][0])
+            return True, servers
+
+        except httpx.RequestError as e:
+            logger.error("Сетевая ошибка при сканировании серверов: %s", e)
+            return False, f"Ошибка сети: {e}"
+        except Exception as e:
+            logger.exception("Ошибка при сканировании списка серверов")
+            return False, f"Ошибка: {e}"
+
+
+def _parse_servers_from_html(html: str) -> list[tuple[str, int]]:
+    soup = _soup(html)
+    servers: list[tuple[str, int]] = []
+    seen: set[int] = set()
+    for title_tag in soup.find_all(["h3", "h4"], class_="node-title"):
+        a_tag = title_tag.find("a", href=True)
+        if not a_tag:
+            continue
+        text = a_tag.text.strip()
+        if "|" not in text:
+            continue
+        name = text.split("|")[-1].strip()
+        if not name:
+            continue
+        node_id = _extract_node_id(a_tag["href"])
+        if node_id and node_id not in seen:
+            seen.add(node_id)
+            servers.append((name, node_id))
+    return servers
+
+
+def _parse_categories_from_soup(soup: BeautifulSoup) -> dict[str, tuple[str, int]]:
+    """Извлекает подразделы жалоб со страницы (схема с node-title)."""
+    categories: dict[str, tuple[str, int]] = {}
+    for title_tag in soup.find_all(["h3", "h4"], class_="node-title"):
+        a_tag = title_tag.find("a", href=True)
+        if not a_tag:
+            continue
+        text = a_tag.text.strip()
+        key = _classify_category(text)
+        if key and key not in categories:
+            node_id = _extract_node_id(a_tag["href"])
+            if node_id:
+                categories[key] = (text, node_id)
+    return categories
+
+
+def _find_complaints_link(soup: BeautifulSoup) -> Optional[str]:
+    """Находит ссылку на подраздел/категорию 'Жалобы' на странице сервера."""
+    for a_tag in soup.find_all("a", href=True):
+        if a_tag.text.strip() not in ("Жалобы", "Раздел жалоб"):
+            continue
+        href = a_tag["href"]
+        if "/forums/" not in href and "/categories/" not in href:
+            continue
+        if href.startswith("/"):
+            return FORUM_URL + href
+        if href.startswith("http"):
+            return href
+        return f"{FORUM_URL}/{href}"
+    return None
+
+
+async def _discover_categories_with_client(
+    client: httpx.AsyncClient,
+    server_node_id: int,
+) -> tuple[bool, dict[str, tuple[str, int]] | str]:
+    """То же что discover_complaint_categories, но переиспользует переданный клиент.
+    Полезно при массовой синхронизации, чтобы не плодить новые соединения."""
+    try:
+        server_url = f"{FORUM_URL}/forums/{server_node_id}/"
+        response = await client.get(server_url)
+        if response.status_code != 200:
+            logger.warning("Сервер node=%s: HTTP %s при загрузке раздела.",
+                           server_node_id, response.status_code)
+            return False, f"HTTP {response.status_code} при загрузке раздела сервера."
+
+        soup = _soup(response.text)
+
+        # Схема A: подкатегории жалоб лежат прямо на странице сервера
+        categories = _parse_categories_from_soup(soup)
+        if categories:
+            logger.debug("Сервер node=%s: схема A (категории на верхнем уровне).",
+                         server_node_id)
+
+        # Схема B: ищем ссылку на 'Жалобы' и заходим внутрь
+        if not categories:
+            complaints_url = _find_complaints_link(soup)
+            if complaints_url:
+                logger.debug("Сервер node=%s: схема B → %s", server_node_id, complaints_url)
+                response2 = await client.get(complaints_url)
+                if response2.status_code == 200:
+                    categories = _parse_categories_from_soup(_soup(response2.text))
+                else:
+                    logger.warning("Сервер node=%s: HTTP %s при заходе в раздел жалоб.",
+                                   server_node_id, response2.status_code)
+
+        if not categories:
+            logger.warning("Сервер node=%s: не удалось найти подразделы жалоб.", server_node_id)
+            return False, "Подразделы жалоб не найдены."
+
+        logger.info("Сервер node=%s: найдено категорий жалоб %d (%s).",
+                    server_node_id, len(categories), ", ".join(sorted(categories.keys())))
+        return True, categories
+
+    except httpx.RequestError as e:
+        logger.error("Сервер node=%s: сетевая ошибка — %s", server_node_id, e)
+        return False, f"Ошибка сети: {e}"
+    except Exception as e:
+        logger.exception("Сервер node=%s: ошибка при сканировании категорий", server_node_id)
+        return False, f"Ошибка: {e}"
+
+
+async def discover_complaint_categories(
+    server_node_id: int,
+) -> tuple[bool, dict[str, tuple[str, int]] | str]:
+    """Public-обёртка: открывает разовый клиент и сканирует категории сервера."""
+    if not load_cookies():
+        return False, "Куки не загружены."
+    async with _session() as client:
+        return await _discover_categories_with_client(client, server_node_id)
+
+
+async def discover_all_complaint_categories(
+    servers: list[tuple[str, int]],
+    concurrency: int = 6,
+    progress: Optional[callable] = None,
+) -> dict[int, dict[str, tuple[str, int]]]:
+    """Параллельно сканирует категории жалоб для всех серверов одним клиентом.
+
+    Возвращает {server_node_id: categories_dict_или_None}. Серверы без категорий
+    в результат не попадают.
+
+    progress(idx, total, name, ok) вызывается после обработки каждого сервера —
+    это позволяет хендлеру отображать живой прогресс.
+    """
+    if not load_cookies():
+        return {}
+
+    semaphore = asyncio.Semaphore(concurrency)
+    result: dict[int, dict[str, tuple[str, int]]] = {}
+    total = len(servers)
+    done = 0
+
+    async with _session() as client:
+
+        async def worker(idx: int, name: str, node_id: int):
+            nonlocal done
+            async with semaphore:
+                ok, cats = await _discover_categories_with_client(client, node_id)
+            done += 1
+            ok_flag = bool(ok and isinstance(cats, dict) and cats)
+            if ok_flag:
+                result[node_id] = cats  # type: ignore[assignment]
+            if progress is not None:
+                try:
+                    await progress(done, total, name, ok_flag)
+                except Exception:
+                    logger.debug("progress callback бросил исключение — игнорирую.",
+                                 exc_info=True)
+
+        await asyncio.gather(*[
+            worker(i, name, nid) for i, (name, nid) in enumerate(servers, 1)
+        ])
+
+    return result
+
+
+# ---------------- Проверка статуса темы ----------------
+
+# Сопоставление текста префикса темы (lowercase) на стандартный статус.
+# Статусы в боте:
+#   "pending"  — Ожидание (или префикс не найден)
+#   "accepted" — принята/одобрена/удовлетворена
+#   "rejected" — отклонена/отказ
+#   "closed"   — закрыта (без явного решения)
+_STATUS_KEYWORDS = {
+    "accepted": ("принят", "одобрен", "удовлетвор", "выполнен"),
+    "rejected": ("отклонен", "отклонён", "отказ", "не принят"),
+    "closed":   ("закрыт",),
+    "pending":  ("ожидание", "ожидан", "новая", "новое"),
+}
+
+
+async def fetch_complaint_status(thread_url: str) -> tuple[str | None, str | None]:
+    """Заходит на страницу темы и определяет её статус.
+
+    Возвращает (status, prefix_text). Status — один из 'pending'/'accepted'/
+    'rejected'/'closed' или None если не удалось определить.
+    """
+    if not thread_url:
+        return None, None
+
+    async with _session(timeout=15.0) as client:
+        try:
+            r = await client.get(thread_url)
+            if r.status_code != 200:
+                logger.debug("Тема %s — HTTP %s, статус не определён.",
+                             thread_url, r.status_code)
+                return None, None
+            html = r.text
+            if "vddosw3data.js" in html or "slowAES" in html:
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain="forum.blackrussia.online", path="/")
+                    r = await client.get(thread_url)
+                    html = r.text
+
+            soup = _soup(html)
+
+            # 1. Префикс темы — обычно <span class="label" data-...> или
+            # <div class="p-title"><h1>...<span class="label">префикс</span> Тема</h1></div>
+            prefix_text = None
+            for span in soup.find_all("span", class_=re.compile(r"\blabel\b")):
+                text = span.get_text(strip=True)
+                if text and len(text) <= 40:  # это именно префикс, не длинный текст
+                    prefix_text = text
+                    break
+
+            if not prefix_text:
+                # запасной способ — XenForo пишет ".prefix" перед заголовком
+                el = soup.find(class_=re.compile(r"\bprefix\b"))
+                if el:
+                    txt = el.get_text(strip=True)
+                    if txt and len(txt) <= 40:
+                        prefix_text = txt
+
+            if prefix_text:
+                lowered = prefix_text.lower()
+                for status, keywords in _STATUS_KEYWORDS.items():
+                    if any(k in lowered for k in keywords):
+                        return status, prefix_text
+
+            # 2. Если префикса нет — может тема уже закрыта (lock-icon в шапке)
+            #    XenForo помечает закрытые темы классом 'is-locked' или иконкой
+            if soup.find(class_=re.compile(r"is-locked|threadClosed")):
+                return "closed", prefix_text
+
+            # Иначе считаем что в ожидании
+            return "pending", prefix_text
+
+        except httpx.RequestError as e:
+            logger.warning("Сетевая ошибка при проверке статуса темы %s: %s",
+                           thread_url, e)
+            return None, None
+        except Exception as e:
+            logger.exception("Ошибка проверки статуса темы %s: %s", thread_url, e)
+            return None, None

@@ -1,0 +1,1163 @@
+import logging
+from html import escape
+from math import ceil
+from aiogram import Router, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
+from src.config import COMPLAINT_CATEGORY_LABELS
+from src.forum.xenforo import post_complaint
+from src.forum.templates import (
+    RULES,
+    NEEDS_DATE,
+    TARGET_LABEL,
+    build_body,
+    build_title,
+    get_builtin_templates,
+)
+from src.database import (
+    add_complaint,
+    get_user_complaints,
+    get_complaint,
+    delete_complaint,
+    get_servers,
+    get_complaint_categories,
+    get_active_account,
+    update_account_cookies,
+    find_available_account,
+    set_account_cooldown,
+    set_active_account,
+    list_accounts,
+    list_user_templates,
+    get_user_template,
+    add_user_template,
+    delete_user_template,
+)
+from src.handlers.common import (
+    check_access, main_menu_keyboard, _menu_for, is_admin, account_owner_id,
+)
+from src.logger import describe_user
+from src.effects import EFFECT_CONFETTI, EFFECT_HEART
+from src.forum.xenforo import apply_account_cookies, load_cookies
+from src.status_monitor import status_label
+from src.validation import (
+    validate_nickname,
+    validate_date,
+    validate_summary,
+    validate_description,
+    validate_proof,
+)
+
+router = Router()
+logger = logging.getLogger(__name__)
+
+# Сколько серверов на одной странице inline-клавиатуры
+SERVERS_PER_PAGE = 8
+
+# Кулдаун аккаунта после публикации жалобы (антифлуд форума).
+# 180 секунд — стандартный таймаут на BR между темами в одном разделе.
+COMPLAINT_COOLDOWN_SECONDS = 180
+
+
+def _format_cooldown(seconds: int) -> str:
+    """Преобразует секунды в строку 'Xм Yс' или 'Yс'."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}с"
+    return f"{seconds // 60}м {seconds % 60}с"
+
+
+async def _pick_account_for_complaint(telegram_id: int) -> tuple[dict | None, str | None]:
+    """Подбирает аккаунт для подачи жалобы.
+
+    Для админа — из его собственных аккаунтов. Для обычного пользователя —
+    из пула первого админа (общий пул).
+
+    Возвращает (account, error_message). Если все аккаунты в кулдауне —
+    account=None и error_message с подсказкой когда можно попробовать.
+    """
+    owner_id = account_owner_id(telegram_id)
+    candidate = await find_available_account(owner_id)
+    if not candidate:
+        if is_admin(telegram_id):
+            return None, (
+                "⚠️ У вас нет ни одного сохранённого форумного аккаунта.\n"
+                "Нажмите <b>🔐 Войти по паролю</b> или <b>👥 Аккаунты</b> "
+                "для добавления."
+            )
+        return None, (
+            "⚠️ Бот пока не настроен — у администратора нет добавленных "
+            "форумных аккаунтов. Попробуйте позже."
+        )
+
+    if not candidate["available"]:
+        # Все в кулдауне
+        remaining = candidate["cooldown_remaining_seconds"]
+        return None, (
+            f"⏳ Все аккаунты сейчас в кулдауне после публикации жалоб.\n"
+            f"Самый ранний освободится через <b>{_format_cooldown(remaining)}</b>."
+        )
+
+    # Активируем выбранный аккаунт у его владельца (админа), куки в файл —
+    # тоже общие, так что подача жалобы пройдёт от имени этого аккаунта.
+    await set_active_account(owner_id, candidate["id"])
+    apply_account_cookies(candidate["cookies"])
+    logger.info("Жалоба будет подана от имени аккаунта «%s» (id=%s, owner=%s).",
+                candidate["username"], candidate["id"], owner_id)
+    return candidate, None
+
+
+class ComplaintForm(StatesGroup):
+    choosing_server = State()
+    choosing_category = State()
+    choosing_template = State()
+    waiting_for_your_nickname = State()
+    waiting_for_target_nickname = State()
+    waiting_for_punishment_date = State()
+    waiting_for_summary = State()
+    waiting_for_description = State()
+    waiting_for_proof = State()
+    waiting_for_confirm = State()
+
+
+class TemplateForm(StatesGroup):
+    """FSM для добавления своего шаблона."""
+    waiting_for_name = State()
+    waiting_for_summary = State()
+    waiting_for_description = State()
+
+
+# ---------------- Клавиатуры ----------------
+
+def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
+    """Inline-клавиатура со списком серверов с пагинацией."""
+    total_pages = max(1, ceil(len(servers) / SERVERS_PER_PAGE))
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * SERVERS_PER_PAGE
+    end = start + SERVERS_PER_PAGE
+    chunk = servers[start:end]
+
+    rows: list[list[types.InlineKeyboardButton]] = []
+    # По 2 кнопки в строке
+    for i in range(0, len(chunk), 2):
+        row = []
+        for entry in chunk[i:i + 2]:
+            name, node_id = entry[0], entry[1]
+            row.append(types.InlineKeyboardButton(
+                text=name,
+                callback_data=f"srv_pick:{node_id}:{name}",
+            ))
+        rows.append(row)
+
+    # Навигация
+    nav: list[types.InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(types.InlineKeyboardButton(text="◀️", callback_data=f"srv_page:{page - 1}"))
+    nav.append(types.InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="srv_noop"))
+    if page < total_pages - 1:
+        nav.append(types.InlineKeyboardButton(text="▶️", callback_data=f"srv_page:{page + 1}"))
+    rows.append(nav)
+    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
+
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _categories_keyboard(categories: dict[str, tuple[str, int]]) -> types.InlineKeyboardMarkup:
+    """Inline-клавиатура с категориями жалоб конкретного сервера."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    for key, (name, node_id) in categories.items():
+        label = COMPLAINT_CATEGORY_LABELS.get(key, name)
+        rows.append([types.InlineKeyboardButton(
+            text=label,
+            callback_data=f"cat_pick:{node_id}:{key}",
+        )])
+    rows.append([types.InlineKeyboardButton(text="◀️ К серверам", callback_data="srv_back")])
+    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _cancel_kb() -> types.ReplyKeyboardMarkup:
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True,
+    )
+
+
+# ---------------- Старт сценария ----------------
+
+@router.message(Command("new_complaint"))
+@router.message(F.text == "📝 Подать жалобу")
+async def start_complaint_flow(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+
+    logger.info("Пользователь %s запустил сценарий подачи жалобы.",
+                describe_user(message.from_user))
+
+    # Подбираем свободный аккаунт (не в кулдауне) и автоматически
+    # делаем его активным.
+    account, err = await _pick_account_for_complaint(message.from_user.id)
+    if err:
+        await message.answer(err)
+        return
+    await state.update_data(complaint_account_id=account["id"],
+                             complaint_account_name=account["username"])
+
+    servers = await get_servers()
+    if not servers:
+        logger.warning("Сценарий жалобы прерван: список серверов пуст. Нужна синхронизация.")
+        await message.answer(
+            "⚠️ Список серверов пуст. Сначала выполните <b>🔄 Синхронизировать форум</b> "
+            "или отправьте команду <code>/sync</code>."
+        )
+        return
+
+    # Порядок берём как на форуме (RED → ASTANA), без алфавитной сортировки
+    await state.update_data(servers_list=servers)
+    await state.set_state(ComplaintForm.choosing_server)
+    logger.debug("FSM -> choosing_server (доступно %d серверов).", len(servers))
+
+    await message.answer(
+        "📥 <b>Шаг 1: Выберите сервер</b>",
+        reply_markup=_servers_keyboard(servers, page=0),
+    )
+
+
+# ---------------- Выбор сервера ----------------
+
+@router.callback_query(ComplaintForm.choosing_server, F.data == "srv_noop")
+async def srv_noop(call: types.CallbackQuery):
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_server, F.data.startswith("srv_page:"))
+async def srv_page(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+
+    page = int(call.data.split(":", 1)[1])
+    data = await state.get_data()
+    servers_list = data.get("servers_list", [])
+    await call.message.edit_reply_markup(reply_markup=_servers_keyboard(servers_list, page=page))
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_server, F.data.startswith("srv_pick:"))
+async def srv_pick(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+
+    _, node_id_str, name = call.data.split(":", 2)
+    node_id = int(node_id_str)
+
+    categories = await get_complaint_categories(node_id)
+    if not categories:
+        logger.warning("Пользователь %s выбрал сервер «%s» (node=%s), но категории не найдены.",
+                       describe_user(call.from_user), name, node_id)
+        await call.answer("На сервере не найдено категорий жалоб.", show_alert=True)
+        return
+
+    await state.update_data(server_node_id=node_id, server_name=name)
+    await state.set_state(ComplaintForm.choosing_category)
+    logger.info("Пользователь %s выбрал сервер «%s» (node=%s, %d категорий).",
+                describe_user(call.from_user), name, node_id, len(categories))
+
+    await call.message.edit_text(
+        f"📥 <b>Шаг 2: Сервер <code>{escape(name)}</code></b> — выберите тип жалобы:",
+        reply_markup=_categories_keyboard(categories),
+    )
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_category, F.data == "srv_back")
+async def srv_back(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+
+    data = await state.get_data()
+    servers_list = data.get("servers_list", [])
+    await state.set_state(ComplaintForm.choosing_server)
+    await call.message.edit_text(
+        "📥 <b>Шаг 1: Выберите сервер</b>",
+        reply_markup=_servers_keyboard(servers_list, page=0),
+    )
+    await call.answer()
+
+
+# ---------------- Выбор категории ----------------
+
+def _templates_keyboard(builtin: dict[str, dict[str, str]],
+                         user_templates: list[dict]) -> types.InlineKeyboardMarkup:
+    """Inline-клавиатура с шаблонами + 'Своё описание' + 'Создать шаблон'."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    # Встроенные шаблоны — по 2 в ряд
+    builtin_items = list(builtin.items())
+    for i in range(0, len(builtin_items), 2):
+        row = []
+        for key, info in builtin_items[i:i + 2]:
+            row.append(types.InlineKeyboardButton(
+                text=info["name"],
+                callback_data=f"tpl_use:b:{key}",
+            ))
+        rows.append(row)
+    # Пользовательские шаблоны — по одному в ряд (могут быть длинные имена)
+    for ut in user_templates:
+        rows.append([types.InlineKeyboardButton(
+            text=f"⭐ {ut['name']}",
+            callback_data=f"tpl_use:u:{ut['id']}",
+        )])
+    rows.append([
+        types.InlineKeyboardButton(
+            text="✍️ Своё описание", callback_data="tpl_skip"),
+        types.InlineKeyboardButton(
+            text="➕ Создать шаблон", callback_data="tpl_new"),
+    ])
+    rows.append([
+        types.InlineKeyboardButton(text="◀️ К серверам", callback_data="srv_back"),
+        types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel"),
+    ])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(ComplaintForm.choosing_category, F.data.startswith("cat_pick:"))
+async def cat_pick(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+
+    _, node_id_str, key = call.data.split(":", 2)
+    section_id = int(node_id_str)
+
+    data = await state.get_data()
+    server_name = data.get("server_name", "?")
+    label = COMPLAINT_CATEGORY_LABELS.get(key, key)
+
+    await state.update_data(section_id=section_id, category_key=key, category_label=label)
+    logger.info("Пользователь %s выбрал категорию «%s» на сервере «%s» (раздел node=%s).",
+                describe_user(call.from_user), key, server_name, section_id)
+
+    # Показываем правила раздела перед заполнением
+    rules_text = RULES.get(key)
+    if rules_text:
+        await call.message.answer(rules_text)
+
+    # Шаблоны есть только для players. Для остальных — сразу к нику.
+    builtin = get_builtin_templates(key)
+    user_tpls = await list_user_templates(call.from_user.id, key)
+    if builtin or user_tpls:
+        await state.set_state(ComplaintForm.choosing_template)
+        await call.message.edit_text(
+            f"✅ Сервер <code>{escape(server_name)}</code> → {escape(label)}",
+        )
+        await call.message.answer(
+            "📋 <b>Шаблон жалобы</b>\n\n"
+            "Выберите готовый шаблон или нажмите «Своё описание», "
+            "чтобы заполнить вручную.\nПосле выбора шаблона можно будет "
+            "дополнить описание.",
+            reply_markup=_templates_keyboard(builtin, user_tpls),
+        )
+    else:
+        await state.set_state(ComplaintForm.waiting_for_your_nickname)
+        await call.message.edit_text(
+            f"✅ Сервер <code>{escape(server_name)}</code> → {escape(label)}",
+        )
+        await call.message.answer(
+            "👤 <b>Шаг 3: Введите Ваш Nick_Name</b> на сервере:",
+            reply_markup=_cancel_kb(),
+        )
+    await call.answer()
+
+
+# Колбеки выбора шаблона
+
+@router.callback_query(ComplaintForm.choosing_template, F.data.startswith("tpl_use:"))
+async def tpl_use(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+
+    _, kind, key = call.data.split(":", 2)
+    if kind == "b":
+        builtin = get_builtin_templates((await state.get_data())["category_key"])
+        tpl = builtin.get(key)
+        if not tpl:
+            await call.answer("Шаблон не найден.", show_alert=True)
+            return
+        summary = tpl["summary"]
+        description = tpl["description"]
+        name = tpl["name"]
+    else:
+        ut = await get_user_template(int(key))
+        if not ut or ut["telegram_id"] != call.from_user.id:
+            await call.answer("Шаблон не найден.", show_alert=True)
+            return
+        summary = ut["summary"]
+        description = ut["description"]
+        name = f"⭐ {ut['name']}"
+
+    await state.update_data(template_summary=summary, template_description=description)
+    await state.set_state(ComplaintForm.waiting_for_your_nickname)
+    logger.info("Пользователь %s выбрал шаблон «%s» (kind=%s).",
+                describe_user(call.from_user), name, kind)
+
+    await call.message.edit_text(
+        f"📋 Выбран шаблон: <b>{escape(name)}</b>\n\n"
+        f"<i>{escape(description)}</i>"
+    )
+    await call.message.answer(
+        "👤 <b>Шаг 3: Введите Ваш Nick_Name</b> на сервере:",
+        reply_markup=_cancel_kb(),
+    )
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_template, F.data == "tpl_skip")
+async def tpl_skip(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    # Никаких заранее заполненных полей — пользователь введёт всё сам
+    await state.update_data(template_summary=None, template_description=None)
+    await state.set_state(ComplaintForm.waiting_for_your_nickname)
+    await call.message.edit_text("✍️ Своё описание — заполните вручную.")
+    await call.message.answer(
+        "👤 <b>Шаг 3: Введите Ваш Nick_Name</b> на сервере:",
+        reply_markup=_cancel_kb(),
+    )
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_template, F.data == "tpl_new")
+async def tpl_new(call: types.CallbackQuery, state: FSMContext):
+    """Запускает мини-сценарий создания пользовательского шаблона."""
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    data = await state.get_data()
+    # Сохраняем категорию из текущего сценария жалобы, чтобы шаблон сохранился
+    # с правильной привязкой
+    await state.update_data(_creating_template_category=data.get("category_key"))
+    await state.set_state(TemplateForm.waiting_for_name)
+    await call.message.edit_text(
+        "➕ <b>Создание своего шаблона жалобы</b>\n\n"
+        "Введите название (как будет отображаться в кнопке).\n"
+        "Пример: <code>🎯 RDM в больнице</code>"
+    )
+    await call.message.answer("Название шаблона:", reply_markup=_cancel_kb())
+    await call.answer()
+
+
+@router.message(TemplateForm.waiting_for_name)
+async def tpl_name(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 50:
+        await message.answer("Название должно быть от 1 до 50 символов.",
+                             reply_markup=_cancel_kb())
+        return
+    await state.update_data(_tpl_name=name)
+    await state.set_state(TemplateForm.waiting_for_summary)
+    await message.answer(
+        "Теперь введите <b>краткую суть</b> для заголовка темы "
+        "(пример: <code>nRP Drive</code>):",
+        reply_markup=_cancel_kb(),
+    )
+
+
+@router.message(TemplateForm.waiting_for_summary)
+async def tpl_summary(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+    summary = (message.text or "").strip()
+    if not summary or len(summary) > 80 or "\n" in summary:
+        await message.answer(
+            "Суть — одна строка длиной до 80 символов.",
+            reply_markup=_cancel_kb(),
+        )
+        return
+    await state.update_data(_tpl_summary=summary)
+    await state.set_state(TemplateForm.waiting_for_description)
+    await message.answer(
+        "Теперь введите <b>описание нарушения</b> — оно подставится в текст темы. "
+        "Это можно будет дополнить при подаче конкретной жалобы.",
+        reply_markup=_cancel_kb(),
+    )
+
+
+@router.message(TemplateForm.waiting_for_description)
+async def tpl_description(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+    description = (message.text or "").strip()
+    if len(description) < 10 or len(description) > 2000:
+        await message.answer(
+            "Описание — от 10 до 2000 символов.",
+            reply_markup=_cancel_kb(),
+        )
+        return
+
+    data = await state.get_data()
+    cat_key = data.get("_creating_template_category") or "players"
+    name = data.get("_tpl_name", "Без имени")
+    summary = data.get("_tpl_summary", "")
+    tid = await add_user_template(
+        telegram_id=message.from_user.id,
+        category_key=cat_key,
+        name=name,
+        summary=summary,
+        description=description,
+    )
+
+    # Возвращаемся к выбору шаблона — теперь там появится новый
+    builtin = get_builtin_templates(cat_key)
+    user_tpls = await list_user_templates(message.from_user.id, cat_key)
+    await state.set_state(ComplaintForm.choosing_template)
+    await message.answer(
+        f"✅ Шаблон <b>{escape(name)}</b> сохранён (id={tid}).\n\n"
+        "Можете выбрать его из списка ниже:",
+        reply_markup=_templates_keyboard(builtin, user_tpls),
+    )
+
+
+# ---------------- Универсальная отмена ----------------
+
+@router.callback_query(F.data == "cmpl_cancel")
+async def cb_cancel(call: types.CallbackQuery, state: FSMContext):
+    logger.info("Пользователь %s отменил сценарий жалобы (через inline-кнопку).",
+                describe_user(call.from_user))
+    await state.clear()
+    await call.message.edit_text("❌ Сценарий отменён.")
+    await call.message.answer("Главное меню:", reply_markup=_menu_for(call.from_user.id))
+    await call.answer()
+
+
+async def _cancel_via_text(message: types.Message, state: FSMContext) -> bool:
+    """Если пользователь прислал '❌ Отмена' — выходим из сценария."""
+    if message.text and message.text.strip() == "❌ Отмена":
+        logger.info("Пользователь %s отменил сценарий жалобы (через текстовую кнопку).",
+                    describe_user(message.from_user))
+        await state.clear()
+        await message.answer("❌ Сценарий отменён.", reply_markup=_menu_for(message.from_user.id))
+        return True
+    return False
+
+
+# ---------------- Сбор полей ----------------
+
+@router.message(ComplaintForm.waiting_for_your_nickname)
+async def process_your_nickname(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    ok, value = validate_nickname(message.text or "")
+    if not ok:
+        logger.info("Валидация ника (свой) от %s не прошла: %s",
+                    describe_user(message.from_user), value)
+        await message.answer(
+            f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+            reply_markup=_cancel_kb(),
+        )
+        return
+
+    await state.update_data(your_nickname=value)
+    await state.set_state(ComplaintForm.waiting_for_target_nickname)
+    logger.debug("Шаг: получен свой ник «%s» от %s.", value, describe_user(message.from_user))
+
+    data = await state.get_data()
+    target = TARGET_LABEL.get(data["category_key"], "нарушителя")
+    await message.answer(
+        f"👤 <b>Шаг 4: Введите Nick_Name {escape(target)}</b>:",
+        reply_markup=_cancel_kb(),
+    )
+
+
+@router.message(ComplaintForm.waiting_for_target_nickname)
+async def process_target_nickname(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    ok, value = validate_nickname(message.text or "")
+    if not ok:
+        logger.info("Валидация ника (цель) от %s не прошла: %s",
+                    describe_user(message.from_user), value)
+        await message.answer(
+            f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+            reply_markup=_cancel_kb(),
+        )
+        return
+
+    await state.update_data(target_nickname=value)
+    data = await state.get_data()
+    key = data["category_key"]
+    logger.debug("Шаг: получен ник цели «%s» (категория %s).", value, key)
+
+    if key in NEEDS_DATE:
+        await state.set_state(ComplaintForm.waiting_for_punishment_date)
+        await message.answer(
+            "📅 <b>Шаг 5: Дата выдачи/получения наказания</b> "
+            "(например: <code>15.05.2026 19:30</code>):",
+            reply_markup=_cancel_kb(),
+        )
+    else:
+        await state.set_state(ComplaintForm.waiting_for_summary)
+        await _ask_summary(message, key, state)
+
+
+async def _ask_summary(message: types.Message, key: str, state: FSMContext):
+    """Запрашивает короткую суть для заголовка темы. Если есть шаблон —
+    предлагает использовать его суть нажатием кнопки."""
+    data = await state.get_data()
+    template_summary = data.get("template_summary")
+
+    if key == "appeals":
+        prompt = (
+            "🏷 <b>Шаг: Причина наказания</b> (короткая фраза для заголовка темы)\n"
+            "Например: <code>Массовый DM</code>"
+        )
+    elif key == "leaders":
+        prompt = (
+            "🏷 <b>Шаг: Краткая суть жалобы</b> (для заголовка темы)\n"
+            "Например: <code>Электронные заявления не проверяются</code>"
+        )
+    else:
+        prompt = (
+            "🏷 <b>Краткая суть жалобы</b> (для заголовка темы)\n"
+            "Например: <code>nRP Drive</code>"
+        )
+
+    if template_summary:
+        prompt += (
+            f"\n\n<i>Из шаблона:</i> <code>{escape(template_summary)}</code>"
+            "\nНажмите «✅ Из шаблона», чтобы использовать его."
+        )
+        kb = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="✅ Из шаблона")],
+                [types.KeyboardButton(text="❌ Отмена")],
+            ],
+            resize_keyboard=True,
+        )
+    else:
+        kb = _cancel_kb()
+    await message.answer(prompt, reply_markup=kb)
+
+
+@router.message(ComplaintForm.waiting_for_punishment_date)
+async def process_punishment_date(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    ok, value = validate_date(message.text or "")
+    if not ok:
+        logger.info("Валидация даты от %s не прошла: %s",
+                    describe_user(message.from_user), value)
+        await message.answer(
+            f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+            reply_markup=_cancel_kb(),
+        )
+        return
+
+    await state.update_data(punishment_date=value)
+    data = await state.get_data()
+    logger.debug("Шаг: получена дата наказания «%s».", value)
+    await state.set_state(ComplaintForm.waiting_for_summary)
+    await _ask_summary(message, data["category_key"], state)
+
+
+@router.message(ComplaintForm.waiting_for_summary)
+async def process_summary(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    text = (message.text or "").strip()
+    data = await state.get_data()
+
+    # Кнопка "Из шаблона" — берём заранее заготовленную суть
+    if text == "✅ Из шаблона" and data.get("template_summary"):
+        value = data["template_summary"]
+    else:
+        ok, value = validate_summary(text)
+        if not ok:
+            logger.info("Валидация сути от %s не прошла: %s",
+                        describe_user(message.from_user), value)
+            await message.answer(
+                f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+                reply_markup=_cancel_kb(),
+            )
+            return
+
+    await state.update_data(summary=value)
+    await state.set_state(ComplaintForm.waiting_for_description)
+    logger.debug("Шаг: получена краткая суть «%s».", value)
+
+    template_description = data.get("template_description")
+    if data["category_key"] == "appeals":
+        prompt = (
+            "📝 <b>Подробное описание ситуации</b>\n"
+            "Опишите, за что было выдано наказание и почему оно несправедливо."
+        )
+    elif data["category_key"] == "leaders":
+        prompt = (
+            "📝 <b>Подробное описание</b>\n"
+            "Опишите ситуацию максимально подробно и раскрыто."
+        )
+    else:
+        prompt = (
+            "📝 <b>Подробное описание нарушения</b>\n"
+            "Опишите, что именно произошло."
+        )
+
+    if template_description:
+        prompt += (
+            f"\n\n<i>Из шаблона (можно использовать как есть, "
+            f"нажав кнопку, или ввести своё):</i>\n"
+            f"<blockquote>{escape(template_description)}</blockquote>"
+        )
+        kb = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="✅ Использовать шаблон")],
+                [types.KeyboardButton(text="❌ Отмена")],
+            ],
+            resize_keyboard=True,
+        )
+    else:
+        kb = _cancel_kb()
+    await message.answer(prompt, reply_markup=kb)
+
+
+@router.message(ComplaintForm.waiting_for_description)
+async def process_description(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    text = (message.text or "").strip()
+    data = await state.get_data()
+
+    if text == "✅ Использовать шаблон" and data.get("template_description"):
+        value = data["template_description"]
+    else:
+        ok, value = validate_description(text)
+        if not ok:
+            logger.info("Валидация описания от %s не прошла: %s",
+                        describe_user(message.from_user), value)
+            await message.answer(
+                f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+                reply_markup=_cancel_kb(),
+            )
+            return
+
+    await state.update_data(description=value)
+    await state.set_state(ComplaintForm.waiting_for_proof)
+    logger.debug("Шаг: получено описание (%d симв.).", len(value))
+    await message.answer(
+        "🔗 <b>Доказательства</b> (ссылки на YouTube/Imgur/Yapix и т.д. через пробел или запятую):\n\n"
+        "<i>Загрузка в ВКонтакте/Одноклассники запрещена правилами форума.</i>",
+        reply_markup=_cancel_kb(),
+    )
+
+
+@router.message(ComplaintForm.waiting_for_proof)
+async def process_proof(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    ok, value = validate_proof(message.text or "")
+    if not ok:
+        logger.info("Валидация доказательств от %s не прошла: %s",
+                    describe_user(message.from_user), value)
+        await message.answer(
+            f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+            reply_markup=_cancel_kb(),
+        )
+        return
+
+    await state.update_data(proof_link=value)
+    data = await state.get_data()
+    logger.debug("Шаг: получены доказательства (%d симв.). Готовлю превью.", len(value))
+
+    bb_code = build_body(
+        category_key=data["category_key"],
+        your_nickname=data["your_nickname"],
+        target_nickname=data["target_nickname"],
+        description=data["description"],
+        proof_link=data["proof_link"],
+        punishment_date=data.get("punishment_date"),
+    )
+    thread_title = build_title(data["target_nickname"], data["summary"])
+
+    await state.update_data(bb_code=bb_code, title=thread_title)
+    await state.set_state(ComplaintForm.waiting_for_confirm)
+
+    confirm_kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                types.KeyboardButton(text="✅ Отправить на форум"),
+                types.KeyboardButton(text="❌ Отмена"),
+            ]
+        ],
+        resize_keyboard=True,
+    )
+
+    # Имя аккаунта мы сохранили на старте сценария.
+    # Обычным пользователям имя аккаунта-публикатора не показываем.
+    poster = data.get("complaint_account_name") or "по текущим cookies.json"
+    poster_line = (
+        f"👤 <b>От имени:</b> {escape(str(poster))}\n"
+        if is_admin(message.from_user.id) else ""
+    )
+
+    preview_text = (
+        "🧐 <b>Проверьте корректность жалобы перед отправкой:</b>\n\n"
+        f"{poster_line}"
+        f"📍 <b>Сервер:</b> {escape(str(data.get('server_name', '?')))}\n"
+        f"📂 <b>Категория:</b> {escape(str(data.get('category_label', '?')))}\n"
+        f"📌 <b>Заголовок темы:</b> {escape(thread_title)}\n\n"
+        f"📄 <b>Текст сообщения:</b>\n"
+        f"<pre>{escape(bb_code)}</pre>\n"
+        "Все верно? Нажмите <b>Отправить на форум</b> для публикации."
+    )
+    await message.answer(preview_text, reply_markup=confirm_kb)
+
+
+@router.message(ComplaintForm.waiting_for_confirm, F.text == "✅ Отправить на форум")
+async def process_confirm(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    account_id = data.get("complaint_account_id")
+    account_name = data.get("complaint_account_name", "?")
+    owner_id = account_owner_id(message.from_user.id)
+
+    # Применим куки именно того аккаунта, который выбрали на старте
+    # (вдруг пользователь переключал аккаунт вручную между шагами).
+    if account_id:
+        from src.database import get_account
+        acc_full = await get_account(account_id)
+        if acc_full:
+            apply_account_cookies(acc_full["cookies"])
+            await set_active_account(owner_id, account_id)
+
+    logger.info(
+        "Пользователь %s подтвердил отправку жалобы. "
+        "От имени «%s», сервер «%s», категория «%s», цель «%s».",
+        describe_user(message.from_user),
+        account_name,
+        data.get("server_name", "?"),
+        data.get("category_key", "?"),
+        data.get("target_nickname", "?"),
+    )
+    status_msg = await message.answer(
+        "🚀 Публикую тему на форуме, пожалуйста, подождите...",
+        reply_markup=_menu_for(message.from_user.id),
+    )
+
+    success, result = await post_complaint(
+        section_id=data["section_id"],
+        title=data["title"],
+        message=data["bb_code"],
+    )
+
+    if success:
+        logger.info("Жалоба от %s опубликована. URL: %s",
+                    describe_user(message.from_user), result)
+
+        # Кулдаун на использованный аккаунт + сохранение свежих кук в БД
+        if account_id:
+            await set_account_cooldown(account_id, COMPLAINT_COOLDOWN_SECONDS)
+            try:
+                await update_account_cookies(account_id, load_cookies())
+            except Exception:
+                logger.debug("Не удалось обновить куки аккаунта в БД",
+                             exc_info=True)
+
+        await add_complaint(
+            telegram_id=message.from_user.id,
+            nickname=data["target_nickname"],
+            description=data["description"],
+            proof_link=data["proof_link"],
+            forum_thread_url=result,
+        )
+
+        # Подбираем следующий свободный аккаунт — для удобства следующей жалобы
+        next_acc = await find_available_account(owner_id)
+        next_info = ""
+        if next_acc:
+            if next_acc["available"]:
+                # Сразу переключаем на свободный
+                await set_active_account(owner_id, next_acc["id"])
+                apply_account_cookies(next_acc["cookies"])
+                if is_admin(message.from_user.id):
+                    next_info = (
+                        f"\n\n🔄 Активный аккаунт переключён на "
+                        f"<b>{escape(next_acc['username'])}</b> "
+                        f"— можно сразу подать следующую жалобу."
+                    )
+            else:
+                rem = _format_cooldown(next_acc["cooldown_remaining_seconds"])
+                if is_admin(message.from_user.id):
+                    next_info = (
+                        f"\n\n⏳ Все аккаунты сейчас в кулдауне.\n"
+                        f"Ближайший освободится через <b>{rem}</b> "
+                        f"(<b>{escape(next_acc['username'])}</b>)."
+                    )
+                else:
+                    next_info = (
+                        f"\n\n⏳ Следующую жалобу можно будет подать "
+                        f"через <b>{rem}</b>."
+                    )
+
+        await status_msg.delete()
+        if is_admin(message.from_user.id):
+            final_text = (
+                f"🎉 <b>Жалоба успешно опубликована!</b>\n\n"
+                f"👤 От имени: <b>{escape(account_name)}</b>\n"
+                f"🔗 <a href=\"{escape(result)}\">Открыть тему на форуме</a>\n"
+                f"⏱ Аккаунт ушёл в кулдаун на "
+                f"<b>{_format_cooldown(COMPLAINT_COOLDOWN_SECONDS)}</b>."
+                f"{next_info}"
+            )
+        else:
+            # Обычным пользователям не светим имя аккаунта-публикатора
+            final_text = (
+                f"🎉 <b>Жалоба успешно опубликована!</b>\n\n"
+                f"🔗 <a href=\"{escape(result)}\">Открыть тему на форуме</a>"
+                f"{next_info}"
+            )
+        await message.answer(
+            final_text,
+            disable_web_page_preview=False,
+            message_effect_id=EFFECT_CONFETTI,
+        )
+    else:
+        logger.error("Не удалось опубликовать жалобу от %s. Причина: %s",
+                     describe_user(message.from_user), result)
+        await status_msg.edit_text(
+            f"❌ <b>Не удалось опубликовать жалобу</b>\n\n"
+            f"Описание ошибки:\n<code>{escape(str(result))}</code>"
+        )
+
+    await state.clear()
+
+
+@router.message(ComplaintForm.waiting_for_confirm, F.text == "❌ Отмена")
+async def cancel_confirm(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Отправка жалобы отменена.",
+                         reply_markup=_menu_for(message.from_user.id))
+
+
+# ---------------- История жалоб ----------------
+
+def _complaints_list_keyboard(complaints: list[dict]) -> types.InlineKeyboardMarkup:
+    """Inline-клавиатура со списком жалоб для удаления."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    for c in complaints:
+        rows.append([types.InlineKeyboardButton(
+            text=f"🗑 #{c['id']} — {c['nickname'][:30]}",
+            callback_data=f"cmpl_del:{c['id']}",
+        )])
+    rows.append([types.InlineKeyboardButton(
+        text="🔄 Обновить", callback_data="cmpl_refresh",
+    )])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_complaints_list(complaints: list[dict]) -> str:
+    if not complaints:
+        return "📭 Вы ещё не отправляли жалоб через этого бота."
+    lines = ["📜 <b>История ваших жалоб (последние 10):</b>\n"]
+    for i, comp in enumerate(complaints[:10], 1):
+        if comp["forum_thread_url"]:
+            link = (
+                f"<a href=\"{escape(comp['forum_thread_url'])}\">тема</a>"
+            )
+        else:
+            link = "<i>не опубликована</i>"
+        st_label = status_label(comp.get("status", "pending"))
+        lines.append(
+            f"<b>#{comp['id']}</b> {st_label}\n"
+            f"   <b>Цель:</b> {escape(comp['nickname'])}\n"
+            f"   <b>Суть:</b> {escape(comp['description'][:80])}"
+            f"{'…' if len(comp['description']) > 80 else ''}\n"
+            f"   {link} • <i>{escape(str(comp['created_at']))}</i>"
+        )
+    lines.append(
+        "\n<i>Нажмите 🗑 чтобы удалить жалобу из истории. "
+        "Тема на форуме при этом не удаляется.</i>"
+    )
+    return "\n\n".join(lines)
+
+
+@router.message(F.text == "📜 Мои жалобы")
+async def show_my_complaints(message: types.Message):
+    if not check_access(message.from_user.id):
+        return
+
+    complaints = await get_user_complaints(message.from_user.id)
+    text = _format_complaints_list(complaints)
+    if complaints:
+        await message.answer(
+            text,
+            reply_markup=_complaints_list_keyboard(complaints[:10]),
+            disable_web_page_preview=True,
+        )
+    else:
+        await message.answer(text)
+
+
+@router.callback_query(F.data == "cmpl_refresh")
+async def cmpl_refresh(call: types.CallbackQuery):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    complaints = await get_user_complaints(call.from_user.id)
+    text = _format_complaints_list(complaints)
+    try:
+        if complaints:
+            await call.message.edit_text(
+                text,
+                reply_markup=_complaints_list_keyboard(complaints[:10]),
+                disable_web_page_preview=True,
+            )
+        else:
+            await call.message.edit_text(text)
+    except Exception:
+        # Если содержимое не изменилось, Telegram бросает исключение
+        pass
+    await call.answer("Обновлено")
+
+
+@router.callback_query(F.data.startswith("cmpl_del:"))
+async def cmpl_del(call: types.CallbackQuery):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    complaint_id = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(complaint_id)
+    if not comp or comp["telegram_id"] != call.from_user.id:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+    deleted = await delete_complaint(call.from_user.id, complaint_id)
+    if not deleted:
+        await call.answer("Не удалось удалить.", show_alert=True)
+        return
+
+    complaints = await get_user_complaints(call.from_user.id)
+    text = _format_complaints_list(complaints)
+    try:
+        if complaints:
+            await call.message.edit_text(
+                text,
+                reply_markup=_complaints_list_keyboard(complaints[:10]),
+                disable_web_page_preview=True,
+            )
+        else:
+            await call.message.edit_text(text)
+    except Exception:
+        pass
+    await call.answer(f"🗑 Удалена #{complaint_id}", show_alert=False)
+
+
+# ---------------- Управление пользовательскими шаблонами ----------------
+
+@router.message(Command("templates"))
+@router.message(F.text == "📋 Мои шаблоны")
+async def cmd_templates(message: types.Message):
+    """Показывает пользовательские шаблоны (по всем категориям)."""
+    if not check_access(message.from_user.id):
+        return
+    # Сейчас шаблоны только для players
+    user_tpls = await list_user_templates(message.from_user.id, "players")
+    if not user_tpls:
+        await message.answer(
+            "📋 У вас пока нет своих шаблонов.\n\n"
+            "Чтобы создать — выберите при подаче жалобы кнопку "
+            "<b>➕ Создать шаблон</b>."
+        )
+        return
+
+    rows: list[list[types.InlineKeyboardButton]] = []
+    for ut in user_tpls:
+        rows.append([types.InlineKeyboardButton(
+            text=f"🗑 {ut['name']}",
+            callback_data=f"utpl_del:{ut['id']}",
+        )])
+    kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+    lines = ["⭐ <b>Ваши шаблоны жалоб:</b>\n"]
+    for ut in user_tpls:
+        lines.append(
+            f"<b>{escape(ut['name'])}</b>\n"
+            f"   <i>Суть:</i> <code>{escape(ut['summary'])}</code>\n"
+            f"   <i>Описание:</i> {escape(ut['description'][:120])}"
+            f"{'…' if len(ut['description']) > 120 else ''}"
+        )
+    lines.append(
+        "\n<i>Нажмите на 🗑, чтобы удалить шаблон.</i>"
+    )
+    await message.answer("\n\n".join(lines), reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("utpl_del:"))
+async def utpl_del(call: types.CallbackQuery):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    tid = int(call.data.split(":", 1)[1])
+    ok = await delete_user_template(call.from_user.id, tid)
+    if not ok:
+        await call.answer("Шаблон не найден.", show_alert=True)
+        return
+
+    user_tpls = await list_user_templates(call.from_user.id, "players")
+    if not user_tpls:
+        await call.message.edit_text(
+            "📋 У вас не осталось своих шаблонов.",
+        )
+        await call.answer("🗑 Удалён", show_alert=False)
+        return
+
+    rows = [[types.InlineKeyboardButton(
+        text=f"🗑 {ut['name']}", callback_data=f"utpl_del:{ut['id']}",
+    )] for ut in user_tpls]
+    lines = ["⭐ <b>Ваши шаблоны жалоб:</b>\n"]
+    for ut in user_tpls:
+        lines.append(
+            f"<b>{escape(ut['name'])}</b>\n"
+            f"   <i>Суть:</i> <code>{escape(ut['summary'])}</code>\n"
+            f"   <i>Описание:</i> {escape(ut['description'][:120])}"
+            f"{'…' if len(ut['description']) > 120 else ''}"
+        )
+    try:
+        await call.message.edit_text(
+            "\n\n".join(lines),
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    except Exception:
+        pass
+    await call.answer("🗑 Удалён", show_alert=False)
