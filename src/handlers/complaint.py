@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from src.config import COMPLAINT_CATEGORY_LABELS
-from src.forum.xenforo import post_complaint
+from src.forum.xenforo import post_complaint, delete_thread, edit_thread_post
 from src.forum.templates import (
     RULES,
     NEEDS_DATE,
@@ -33,6 +33,8 @@ from src.database import (
     get_user_template,
     add_user_template,
     delete_user_template,
+    recent_complaint_against,
+    update_complaint_content,
 )
 from src.handlers.common import (
     check_access, main_menu_keyboard, _menu_for, is_admin, account_owner_id,
@@ -126,6 +128,13 @@ class TemplateForm(StatesGroup):
     waiting_for_name = State()
     waiting_for_summary = State()
     waiting_for_description = State()
+
+
+class EditForm(StatesGroup):
+    """FSM для редактирования уже опубликованной жалобы."""
+    waiting_for_field = State()
+    waiting_for_new_description = State()
+    waiting_for_new_proof = State()
 
 
 # ---------------- Клавиатуры ----------------
@@ -602,6 +611,28 @@ async def process_target_nickname(message: types.Message, state: FSMContext):
         )
         return
 
+    # Антиспам: запрет повторной жалобы на тот же ник в течение 30 минут
+    recent = await recent_complaint_against(
+        message.from_user.id, value, within_minutes=30,
+    )
+    if recent:
+        link = ""
+        if recent.get("forum_thread_url"):
+            link = (f"\n\n🔗 <a href=\"{escape(recent['forum_thread_url'])}\">"
+                    "Открыть предыдущую жалобу</a>")
+        await state.clear()
+        await message.answer(
+            f"⚠️ <b>Слишком частая жалоба</b>\n\n"
+            f"Вы уже подавали жалобу на <b>{escape(value)}</b> менее 30 минут "
+            f"назад (<i>{escape(str(recent['created_at']))}</i>).\n"
+            "Дождитесь рассмотрения текущей или подайте позже.{}".format(link),
+            reply_markup=_menu_for(message.from_user.id),
+            disable_web_page_preview=True,
+        )
+        logger.info("Антиспам: %s повторно жалуется на «%s» (предыдущая #%s).",
+                    describe_user(message.from_user), value, recent["id"])
+        return
+
     await state.update_data(target_nickname=value)
     data = await state.get_data()
     key = data["category_key"]
@@ -974,15 +1005,40 @@ async def cancel_confirm(message: types.Message, state: FSMContext):
 # ---------------- История жалоб ----------------
 
 def _complaints_list_keyboard(complaints: list[dict]) -> types.InlineKeyboardMarkup:
-    """Inline-клавиатура со списком жалоб для удаления."""
+    """Inline-клавиатура со списком жалоб для управления (открыть детали)."""
     rows: list[list[types.InlineKeyboardButton]] = []
     for c in complaints:
         rows.append([types.InlineKeyboardButton(
-            text=f"🗑 #{c['id']} — {c['nickname'][:30]}",
-            callback_data=f"cmpl_del:{c['id']}",
+            text=f"#{c['id']} — {c['nickname'][:30]}",
+            callback_data=f"cmpl_open:{c['id']}",
         )])
     rows.append([types.InlineKeyboardButton(
         text="🔄 Обновить", callback_data="cmpl_refresh",
+    )])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _complaint_detail_keyboard(complaint_id: int,
+                                 has_thread: bool) -> types.InlineKeyboardMarkup:
+    """Кнопки для одной конкретной жалобы."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if has_thread:
+        rows.append([types.InlineKeyboardButton(
+            text="✏️ Редактировать на форуме",
+            callback_data=f"cmpl_edit:{complaint_id}",
+        )])
+        rows.append([
+            types.InlineKeyboardButton(
+                text="🗑 Удалить с форума",
+                callback_data=f"cmpl_delf:{complaint_id}"),
+        ])
+    rows.append([types.InlineKeyboardButton(
+        text="🗂 Удалить из истории",
+        callback_data=f"cmpl_del:{complaint_id}",
+    )])
+    rows.append([types.InlineKeyboardButton(
+        text="◀️ К списку",
+        callback_data="cmpl_refresh",
     )])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1007,8 +1063,8 @@ def _format_complaints_list(complaints: list[dict]) -> str:
             f"   {link} • <i>{escape(str(comp['created_at']))}</i>"
         )
     lines.append(
-        "\n<i>Нажмите 🗑 чтобы удалить жалобу из истории. "
-        "Тема на форуме при этом не удаляется.</i>"
+        "\n<i>Нажмите на жалобу, чтобы открыть карточку — там доступны "
+        "редактирование, удаление с форума и удаление из истории.</i>"
     )
     return "\n\n".join(lines)
 
@@ -1052,8 +1108,105 @@ async def cmpl_refresh(call: types.CallbackQuery):
     await call.answer("Обновлено")
 
 
+@router.callback_query(F.data.startswith("cmpl_open:"))
+async def cmpl_open(call: types.CallbackQuery):
+    """Открывает карточку конкретной жалобы со всеми кнопками."""
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp or comp["telegram_id"] != call.from_user.id:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+
+    st_label = status_label(comp.get("status", "pending"))
+    if comp["forum_thread_url"]:
+        link = f"<a href=\"{escape(comp['forum_thread_url'])}\">Открыть тему</a>"
+    else:
+        link = "<i>тема не опубликована</i>"
+
+    text = (
+        f"<b>Жалоба #{comp['id']}</b>  {st_label}\n\n"
+        f"<b>Цель:</b> {escape(comp['nickname'])}\n"
+        f"<b>Дата:</b> {escape(str(comp['created_at']))}\n"
+        f"<b>Тема:</b> {link}\n\n"
+        f"<b>Описание:</b>\n<blockquote>{escape(comp['description'])}</blockquote>\n"
+        f"<b>Доказательства:</b> <code>{escape(comp['proof_link'])}</code>"
+    )
+    try:
+        await call.message.edit_text(
+            text,
+            reply_markup=_complaint_detail_keyboard(
+                cid, has_thread=bool(comp["forum_thread_url"])
+            ),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("cmpl_delf:"))
+async def cmpl_delete_from_forum(call: types.CallbackQuery):
+    """Удаляет тему на форуме и помечает жалобу удалённой в БД."""
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp or comp["telegram_id"] != call.from_user.id:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+    if not comp["forum_thread_url"]:
+        await call.answer("У жалобы нет ссылки на форум.", show_alert=True)
+        return
+
+    # Активируем тот аккаунт, под которым она была подана (если такой есть)
+    # Сейчас мы не храним account_id у жалобы — используем активный.
+    owner_id = account_owner_id(call.from_user.id)
+    active = await get_active_account(owner_id)
+    if active:
+        apply_account_cookies(active["cookies"])
+
+    await call.answer("⏳ Удаляю тему на форуме...")
+    try:
+        await call.message.edit_text(
+            "⏳ <b>Удаляю тему на форуме...</b>\nПодождите несколько секунд."
+        )
+    except Exception:
+        pass
+
+    success, msg = await delete_thread(comp["forum_thread_url"],
+                                         reason="Удалено автором через бота")
+
+    if success:
+        # Тоже удаляем из локальной истории
+        await delete_complaint(call.from_user.id, cid)
+        logger.info("Жалоба #%s удалена с форума пользователем %s.",
+                    cid, describe_user(call.from_user))
+        await call.message.edit_text(
+            f"🗑 <b>Жалоба #{cid} удалена с форума</b> и из истории.\n\n"
+            f"<i>{escape(msg)}</i>"
+        )
+    else:
+        logger.warning("Не удалось удалить жалобу #%s: %s", cid, msg)
+        try:
+            await call.message.edit_text(
+                f"❌ <b>Не удалось удалить тему на форуме.</b>\n\n"
+                f"<i>{escape(msg)}</i>\n\n"
+                f"Жалоба осталась в истории. Удалите вручную на форуме "
+                f"или используйте «🗂 Удалить из истории».",
+                reply_markup=_complaint_detail_keyboard(cid, has_thread=True),
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
+
 @router.callback_query(F.data.startswith("cmpl_del:"))
 async def cmpl_del(call: types.CallbackQuery):
+    """Удаляет жалобу только из локальной истории. Тема на форуме не трогается."""
     if not check_access(call.from_user.id):
         await call.answer()
         return
@@ -1080,7 +1233,7 @@ async def cmpl_del(call: types.CallbackQuery):
             await call.message.edit_text(text)
     except Exception:
         pass
-    await call.answer(f"🗑 Удалена #{complaint_id}", show_alert=False)
+    await call.answer(f"🗂 Удалена из истории #{complaint_id}", show_alert=False)
 
 
 # ---------------- Управление пользовательскими шаблонами ----------------
@@ -1161,3 +1314,202 @@ async def utpl_del(call: types.CallbackQuery):
     except Exception:
         pass
     await call.answer("🗑 Удалён", show_alert=False)
+
+
+# ---------------- Редактирование жалобы на форуме ----------------
+
+@router.callback_query(F.data.startswith("cmpl_edit:"))
+async def cmpl_edit_start(call: types.CallbackQuery, state: FSMContext):
+    """Открывает меню выбора что редактировать."""
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp or comp["telegram_id"] != call.from_user.id:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+    if not comp["forum_thread_url"]:
+        await call.answer("У жалобы нет ссылки на форум.", show_alert=True)
+        return
+
+    await state.set_state(EditForm.waiting_for_field)
+    await state.update_data(_edit_complaint_id=cid)
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text="📝 Описание", callback_data=f"cmpl_efield:desc:{cid}")],
+        [types.InlineKeyboardButton(
+            text="🔗 Доказательства", callback_data=f"cmpl_efield:proof:{cid}")],
+        [types.InlineKeyboardButton(
+            text="◀️ Отмена", callback_data=f"cmpl_open:{cid}")],
+    ])
+    await call.message.edit_text(
+        f"✏️ <b>Редактирование жалобы #{cid}</b>\n\n"
+        "Что хотите изменить?\n\n"
+        "<i>Изменение применится и в локальной истории, "
+        "и в теме на форуме (если форум разрешает редактирование автору).</i>",
+        reply_markup=kb,
+    )
+    await call.answer()
+
+
+@router.callback_query(EditForm.waiting_for_field, F.data.startswith("cmpl_efield:"))
+async def cmpl_edit_field(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    _, field, cid_str = call.data.split(":", 2)
+    cid = int(cid_str)
+    comp = await get_complaint(cid)
+    if not comp or comp["telegram_id"] != call.from_user.id:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+
+    await state.update_data(_edit_complaint_id=cid, _edit_field=field)
+
+    if field == "desc":
+        await state.set_state(EditForm.waiting_for_new_description)
+        await call.message.edit_text(
+            f"✏️ <b>Жалоба #{cid}</b> — новое описание\n\n"
+            f"<b>Текущее:</b>\n<blockquote>{escape(comp['description'])}</blockquote>\n\n"
+            "Введите новое описание (10-4000 символов):"
+        )
+        await call.message.answer(
+            "Жду новый текст:", reply_markup=_cancel_kb(),
+        )
+    elif field == "proof":
+        await state.set_state(EditForm.waiting_for_new_proof)
+        await call.message.edit_text(
+            f"✏️ <b>Жалоба #{cid}</b> — новые доказательства\n\n"
+            f"<b>Текущие:</b>\n<code>{escape(comp['proof_link'])}</code>\n\n"
+            "Введите новые ссылки:"
+        )
+        await call.message.answer(
+            "Жду ссылки (YouTube/Imgur/Yapix):", reply_markup=_cancel_kb(),
+        )
+    else:
+        await state.clear()
+        await call.answer("Неизвестное поле.", show_alert=True)
+        return
+    await call.answer()
+
+
+@router.message(EditForm.waiting_for_new_description)
+async def cmpl_edit_save_desc(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    ok, value = validate_description(message.text or "")
+    if not ok:
+        await message.answer(f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+                              reply_markup=_cancel_kb())
+        return
+
+    await _apply_edit(message, state, new_description=value)
+
+
+@router.message(EditForm.waiting_for_new_proof)
+async def cmpl_edit_save_proof(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    ok, value = validate_proof(message.text or "")
+    if not ok:
+        await message.answer(f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+                              reply_markup=_cancel_kb())
+        return
+
+    await _apply_edit(message, state, new_proof=value)
+
+
+async def _apply_edit(message: types.Message, state: FSMContext,
+                       new_description: str | None = None,
+                       new_proof: str | None = None) -> None:
+    """Применяет изменение жалобы: обновляет в БД и пересохраняет тело
+    темы на форуме (с пересборкой BB-кода)."""
+    data = await state.get_data()
+    cid = data.get("_edit_complaint_id")
+    if not cid:
+        await state.clear()
+        return
+    comp = await get_complaint(cid)
+    if not comp or comp["telegram_id"] != message.from_user.id:
+        await state.clear()
+        await message.answer("Жалоба не найдена.",
+                              reply_markup=_menu_for(message.from_user.id))
+        return
+
+    # Обновляем БД
+    description = new_description if new_description is not None else comp["description"]
+    proof_link = new_proof if new_proof is not None else comp["proof_link"]
+    await update_complaint_content(
+        cid, message.from_user.id,
+        description=description if new_description is not None else None,
+        proof_link=proof_link if new_proof is not None else None,
+    )
+
+    if not comp["forum_thread_url"]:
+        await state.clear()
+        await message.answer(
+            "✅ Локальная запись обновлена. У жалобы нет ссылки на форум, "
+            "поэтому правки только в истории.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+        return
+
+    # Применяем активный аккаунт владельца
+    owner_id = account_owner_id(message.from_user.id)
+    active = await get_active_account(owner_id)
+    if active:
+        apply_account_cookies(active["cookies"])
+
+    status_msg = await message.answer(
+        "⏳ Обновляю тему на форуме...",
+        reply_markup=_menu_for(message.from_user.id),
+    )
+
+    # Пересобираем BB-код. Нам нужны исходные ник автора, ник цели и т.д.
+    # Они не сохранены в complaints отдельно — реконструируем из имеющихся
+    # данных. Поскольку мы не знаем ник автора без оригинала, используем
+    # заглушку «—» в строке "Ваш Nick_Name" — но обычно ребятам важнее, чтобы
+    # обновилось описание/пруфы, а заголовок и поля автора форум сохранит,
+    # если редактировать только тело сообщения.
+
+    # Минимальный безопасный путь — попробуем взять описание-as-is
+    # и проигнорируем регенерацию полей "Ваш ник/ник цели" (для этого
+    # нам надо хранить их в БД отдельно — TODO).
+    new_body = (
+        f"Описание (обновлено): {description}\n\n"
+        f"Доказательство: {proof_link}"
+    )
+
+    success, msg = await edit_thread_post(
+        comp["forum_thread_url"], new_message=new_body,
+    )
+
+    await state.clear()
+    if success:
+        logger.info("Жалоба #%s отредактирована на форуме пользователем %s.",
+                    cid, describe_user(message.from_user))
+        try:
+            await status_msg.edit_text(
+                f"✅ <b>Жалоба #{cid} обновлена</b> и в истории, и на форуме."
+            )
+        except Exception:
+            await message.answer(f"✅ Жалоба #{cid} обновлена.")
+    else:
+        logger.warning("Не удалось отредактировать жалобу #%s: %s", cid, msg)
+        try:
+            await status_msg.edit_text(
+                f"⚠️ <b>В истории обновлено, но форум отказал.</b>\n\n"
+                f"<i>{escape(msg)}</i>\n\n"
+                f"Возможно, истёк срок редактирования или нет прав. "
+                f"Попробуйте отредактировать вручную."
+            )
+        except Exception:
+            pass

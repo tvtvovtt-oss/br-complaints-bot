@@ -20,6 +20,7 @@ from src.config import DB_PATH, COOKIES_PATH
 from src.database import init_db
 from src.handlers import common, complaint, bugreport
 from src.logger import setup_logging
+from src.middleware import ThrottleMiddleware, CleanupMiddleware
 from src.status_monitor import status_monitor_loop
 
 # Настраиваем логирование до создания любых дочерних логгеров
@@ -58,6 +59,15 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+
+    # Защита от спама и обработка ошибок
+    throttle = ThrottleMiddleware()
+    dp.message.middleware(throttle)
+    dp.callback_query.middleware(throttle)
+    cleanup = CleanupMiddleware(throttle)
+    dp.message.middleware(cleanup)
+    dp.callback_query.middleware(cleanup)
+    logger.info("Подключён ThrottleMiddleware (rate-limit и soft-ban).")
 
     dp.include_router(common.router)
     dp.include_router(complaint.router)

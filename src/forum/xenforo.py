@@ -1240,3 +1240,216 @@ async def fetch_complaint_status(thread_url: str) -> tuple[str | None, str | Non
         except Exception as e:
             logger.exception("Ошибка проверки статуса темы %s: %s", thread_url, e)
             return None, None
+
+
+# ---------------- Удаление и редактирование тем на форуме ----------------
+
+# Регулярки для извлечения id темы и id первого поста
+_THREAD_ID_RE = re.compile(r"/threads/(?:[^/]+\.)?(\d+)/?")
+_POST_ID_RE = re.compile(r"data-content=\"post-(\d+)\"")
+_FIRST_POST_ID_RE = re.compile(
+    r"<article[^>]*\bdata-content=\"post-(\d+)\"", re.IGNORECASE
+)
+
+
+def _extract_thread_id(thread_url: str) -> int | None:
+    """Извлекает числовой id темы из URL вида /threads/some-name.123456/."""
+    m = _THREAD_ID_RE.search(thread_url or "")
+    return int(m.group(1)) if m else None
+
+
+async def _get_first_post_id(client: httpx.AsyncClient,
+                              thread_url: str) -> int | None:
+    """Открывает страницу темы и берёт id первого поста."""
+    r = await client.get(thread_url)
+    if r.status_code != 200:
+        logger.warning("Тема %s — HTTP %s, post_id не получен.",
+                       thread_url, r.status_code)
+        return None
+    html = r.text
+    if "vddosw3data.js" in html or "slowAES" in html:
+        fresh = await _solve_ddos_guard()
+        if fresh:
+            client.cookies.set("R3ACTLB", fresh,
+                                domain="forum.blackrussia.online", path="/")
+            r = await client.get(thread_url)
+            html = r.text
+    m = _FIRST_POST_ID_RE.search(html)
+    return int(m.group(1)) if m else None
+
+
+async def delete_thread(thread_url: str,
+                         reason: str = "Удалено автором") -> tuple[bool, str]:
+    """Удаляет тему на форуме (мягкое удаление в XenForo).
+
+    Возвращает (успех, сообщение). Удалить может только автор темы или модератор.
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return False, "Нет кук — невозможно удалить тему."
+
+    thread_id = _extract_thread_id(thread_url)
+    if not thread_id:
+        return False, f"Не удалось извлечь id темы из URL: {thread_url}"
+
+    delete_url = f"{FORUM_URL}/threads/{thread_id}/delete"
+    logger.info("Удаляю тему #%s на форуме (%s).", thread_id, thread_url)
+
+    async with _session() as client:
+        try:
+            # 1. Открываем страницу подтверждения удаления — получаем CSRF
+            r = await client.get(delete_url)
+            if r.status_code != 200:
+                if r.status_code == 403:
+                    return False, ("Доступ запрещён (HTTP 403). Тема не принадлежит "
+                                   "активному аккаунту, или окно удаления закрыто "
+                                   "правилами форума.")
+                return False, f"HTTP {r.status_code} при открытии формы удаления."
+
+            html = r.text
+            if "vddosw3data.js" in html or "slowAES" in html:
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain="forum.blackrussia.online", path="/")
+                    r = await client.get(delete_url)
+                    html = r.text
+
+            csrf = _extract_csrf(html)
+            if not csrf:
+                return False, "Не удалось получить CSRF-токен для удаления."
+
+            # 2. Шлём подтверждение
+            payload = {
+                "reason": reason,
+                "hard_delete": "0",  # soft delete (можно восстановить модератору)
+                "_xfToken": csrf,
+                "_xfRequestUri": f"/threads/{thread_id}/delete",
+                "_xfWithData": "1",
+                "_xfResponseType": "json",
+            }
+            ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
+                    "Referer": delete_url}
+            r2 = await client.post(delete_url, data=payload, headers=ajax)
+
+            try:
+                resp_json = r2.json()
+            except ValueError:
+                snippet = r2.text[:200].replace("\n", " ")
+                return False, f"Форум вернул не-JSON: {snippet}"
+
+            errors = resp_json.get("errors")
+            if errors:
+                msg = "; ".join(errors) if isinstance(errors, list) else str(errors)
+                logger.warning("Форум отказал в удалении темы #%s: %s",
+                               thread_id, msg)
+                return False, f"Форум отказал: {msg}"
+
+            logger.info("Тема #%s успешно удалена.", thread_id)
+            return True, "Тема удалена с форума."
+
+        except httpx.RequestError as e:
+            logger.error("Сетевая ошибка при удалении темы: %s", e)
+            return False, f"Ошибка сети: {e}"
+        except Exception as e:
+            logger.exception("Непредвиденная ошибка удаления темы")
+            return False, f"Ошибка: {e}"
+
+
+async def edit_thread_post(thread_url: str, new_message: str,
+                             new_title: str | None = None) -> tuple[bool, str]:
+    """Редактирует первый пост темы (тело жалобы).
+
+    Если new_title задан — попутно меняет заголовок темы (метод XenForo
+    разный, поэтому делаем двумя запросами).
+
+    Возвращает (успех, сообщение).
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return False, "Нет кук — невозможно отредактировать."
+
+    thread_id = _extract_thread_id(thread_url)
+    if not thread_id:
+        return False, f"Не удалось извлечь id темы из URL: {thread_url}"
+
+    logger.info("Редактирую тему #%s.", thread_id)
+
+    async with _session() as client:
+        try:
+            # 1. Получаем post_id первого поста
+            post_id = await _get_first_post_id(client, thread_url)
+            if not post_id:
+                return False, "Не удалось получить id первого поста темы."
+
+            # 2. Открываем форму редактирования поста — для CSRF
+            edit_url = f"{FORUM_URL}/posts/{post_id}/edit"
+            r = await client.get(edit_url)
+            if r.status_code != 200:
+                if r.status_code == 403:
+                    return False, ("Доступ запрещён (HTTP 403). Тему может "
+                                   "редактировать только автор, и не позже срока, "
+                                   "установленного администрацией форума.")
+                return False, f"HTTP {r.status_code} при открытии формы редактирования."
+            csrf = _extract_csrf(r.text)
+            if not csrf:
+                return False, "Не удалось получить CSRF-токен."
+
+            # 3. Сохраняем новое тело сообщения
+            payload = {
+                "message": new_message,
+                "_xfToken": csrf,
+                "_xfRequestUri": f"/posts/{post_id}/edit",
+                "_xfWithData": "1",
+                "_xfResponseType": "json",
+            }
+            ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
+                    "Referer": edit_url}
+            r2 = await client.post(f"{FORUM_URL}/posts/{post_id}/save",
+                                     data=payload, headers=ajax)
+            try:
+                resp_json = r2.json()
+            except ValueError:
+                snippet = r2.text[:200].replace("\n", " ")
+                return False, f"Форум вернул не-JSON: {snippet}"
+
+            errors = resp_json.get("errors")
+            if errors:
+                msg = "; ".join(errors) if isinstance(errors, list) else str(errors)
+                return False, f"Форум отказал: {msg}"
+
+            # 4. (Опционально) меняем заголовок темы
+            if new_title:
+                edit_thread_url = f"{FORUM_URL}/threads/{thread_id}/edit"
+                rt = await client.get(edit_thread_url)
+                if rt.status_code == 200:
+                    csrf2 = _extract_csrf(rt.text) or csrf
+                    title_payload = {
+                        "title": new_title,
+                        "_xfToken": csrf2,
+                        "_xfRequestUri": f"/threads/{thread_id}/edit",
+                        "_xfWithData": "1",
+                        "_xfResponseType": "json",
+                    }
+                    ajax_t = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
+                              "Referer": edit_thread_url}
+                    rt2 = await client.post(edit_thread_url, data=title_payload,
+                                              headers=ajax_t)
+                    try:
+                        rj = rt2.json()
+                        if rj.get("errors"):
+                            logger.warning("Не удалось обновить заголовок темы #%s: %s",
+                                           thread_id, rj["errors"])
+                    except ValueError:
+                        logger.debug("Заголовок темы изменён, но ответ не JSON.")
+
+            logger.info("Тема #%s (post_id=%s) успешно отредактирована.",
+                        thread_id, post_id)
+            return True, "Тема обновлена на форуме."
+
+        except httpx.RequestError as e:
+            logger.error("Сетевая ошибка при редактировании темы: %s", e)
+            return False, f"Ошибка сети: {e}"
+        except Exception as e:
+            logger.exception("Непредвиденная ошибка редактирования темы")
+            return False, f"Ошибка: {e}"

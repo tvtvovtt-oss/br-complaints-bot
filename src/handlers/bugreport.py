@@ -22,6 +22,7 @@ from src.database import (
     get_bug_report,
     list_bug_reports,
     set_bug_report_status,
+    count_recent_bug_reports,
 )
 from src.handlers.common import (
     check_access, _menu_for, is_admin,
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 # Лимиты
 MAX_TEXT_LEN = 1500
 MIN_TEXT_LEN = 10
+
+# Антиспам: не больше 3 баг-репортов в час и 10 в сутки от одного пользователя
+HOURLY_LIMIT = 3
+DAILY_LIMIT = 10
 
 
 class BugForm(StatesGroup):
@@ -86,6 +91,29 @@ def _admin_actions_kb(report_id: int) -> types.InlineKeyboardMarkup:
 async def bug_start(message: types.Message, state: FSMContext):
     if not check_access(message.from_user.id):
         return
+
+    # Антиспам по лимитам
+    hour_count = await count_recent_bug_reports(message.from_user.id, 60)
+    if hour_count >= HOURLY_LIMIT:
+        logger.info("Лимит баг-репортов (час) для %s превышен.",
+                    describe_user(message.from_user))
+        await message.answer(
+            f"⚠️ Вы уже отправили {hour_count} баг-репорта за последний час. "
+            f"Лимит — {HOURLY_LIMIT}/час. Попробуйте позже.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+        return
+    day_count = await count_recent_bug_reports(message.from_user.id, 60 * 24)
+    if day_count >= DAILY_LIMIT:
+        logger.info("Лимит баг-репортов (сутки) для %s превышен.",
+                    describe_user(message.from_user))
+        await message.answer(
+            f"⚠️ Дневной лимит баг-репортов исчерпан "
+            f"({day_count}/{DAILY_LIMIT}). Попробуйте завтра.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+        return
+
     logger.info("Пользователь %s начал отправку баг-репорта.",
                 describe_user(message.from_user))
     await state.set_state(BugForm.waiting_for_text)

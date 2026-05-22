@@ -755,3 +755,68 @@ async def set_bug_report_status(report_id: int, status: str,
             )
         await db.commit()
     logger.info("Баг-репорт #%s: статус → %s", report_id, status)
+
+
+async def recent_complaint_against(telegram_id: int, target_nickname: str,
+                                     within_minutes: int = 30) -> dict | None:
+    """Возвращает последнюю жалобу пользователя на тот же ник, поданную не
+    более `within_minutes` минут назад. Используется для антиспама — нельзя
+    жаловаться на одного и того же игрока дважды подряд."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT id, created_at, forum_thread_url
+            FROM complaints
+            WHERE telegram_id = ?
+              AND LOWER(nickname) = LOWER(?)
+              AND created_at >= datetime('now', ? || ' minutes')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (telegram_id, target_nickname, f"-{int(within_minutes)}"),
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {"id": row[0], "created_at": row[1],
+                    "forum_thread_url": row[2]}
+
+
+async def count_recent_bug_reports(telegram_id: int, within_minutes: int) -> int:
+    """Сколько баг-репортов от пользователя за последние N минут."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT COUNT(*) FROM bug_reports
+            WHERE telegram_id = ?
+              AND created_at >= datetime('now', ? || ' minutes')
+            """,
+            (telegram_id, f"-{int(within_minutes)}"),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def update_complaint_content(complaint_id: int, telegram_id: int,
+                                     description: str | None = None,
+                                     proof_link: str | None = None) -> bool:
+    """Обновляет описание и/или доказательства локальной записи о жалобе.
+    Возвращает True если что-то обновилось."""
+    fields = []
+    values: list = []
+    if description is not None:
+        fields.append("description = ?")
+        values.append(description)
+    if proof_link is not None:
+        fields.append("proof_link = ?")
+        values.append(proof_link)
+    if not fields:
+        return False
+    values.extend([complaint_id, telegram_id])
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            f"UPDATE complaints SET {', '.join(fields)} "
+            "WHERE id = ? AND telegram_id = ?",
+            values,
+        )
+        await db.commit()
+        return cur.rowcount > 0
