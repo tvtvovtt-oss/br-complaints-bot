@@ -1,6 +1,16 @@
 import asyncio
 import logging
 import platform
+import sys
+from pathlib import Path
+
+# Чтобы запуск работал и через `python -m src.bot`, и через `python src/bot.py`
+# (некоторые хостинги стартуют именно так), добавляем корень проекта в sys.path,
+# если его там ещё нет.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
