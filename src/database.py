@@ -112,6 +112,22 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_user_templates_owner
                 ON user_templates(telegram_id, category_key)
         """)
+
+        # Баг-репорты от пользователей
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                text TEXT NOT NULL,
+                photo_file_id TEXT,
+                status TEXT NOT NULL DEFAULT 'new',
+                admin_reply TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                replied_at TIMESTAMP
+            )
+        """)
         await db.commit()
     logger.info("База данных готова. Таблицы: complaints, servers, "
                 "complaint_categories, accounts.")
@@ -652,3 +668,90 @@ async def delete_user_template(telegram_id: int, template_id: int) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+# ---------- Баг-репорты ----------
+
+async def add_bug_report(telegram_id: int, username: str | None,
+                          full_name: str | None, text: str,
+                          photo_file_id: str | None = None) -> int:
+    """Сохраняет баг-репорт. Возвращает id."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO bug_reports
+                (telegram_id, username, full_name, text, photo_file_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (telegram_id, username, full_name, text, photo_file_id),
+        )
+        bid = cur.lastrowid
+        await db.commit()
+    logger.info("Баг-репорт #%s от telegram_id=%s сохранён.", bid, telegram_id)
+    return bid
+
+
+async def get_bug_report(report_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT id, telegram_id, username, full_name, text, photo_file_id,
+                   status, admin_reply, created_at, replied_at
+            FROM bug_reports WHERE id = ?
+            """,
+            (report_id,),
+        ) as cur:
+            r = await cur.fetchone()
+            if not r:
+                return None
+            return {
+                "id": r[0], "telegram_id": r[1], "username": r[2],
+                "full_name": r[3], "text": r[4], "photo_file_id": r[5],
+                "status": r[6], "admin_reply": r[7],
+                "created_at": r[8], "replied_at": r[9],
+            }
+
+
+async def list_bug_reports(only_open: bool = False, limit: int = 20) -> list[dict]:
+    """Возвращает последние N баг-репортов. only_open — только в статусах
+    new/in_progress."""
+    where = "WHERE status IN ('new', 'in_progress')" if only_open else ""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"""
+            SELECT id, telegram_id, username, full_name, text, status, created_at
+            FROM bug_reports
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id": r[0], "telegram_id": r[1], "username": r[2],
+                    "full_name": r[3], "text": r[4], "status": r[5],
+                    "created_at": r[6],
+                }
+                for r in rows
+            ]
+
+
+async def set_bug_report_status(report_id: int, status: str,
+                                  admin_reply: str | None = None) -> None:
+    """Обновляет статус и опционально текст ответа админа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if admin_reply is not None:
+            await db.execute(
+                "UPDATE bug_reports SET status = ?, admin_reply = ?, "
+                "replied_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, admin_reply, report_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE bug_reports SET status = ? WHERE id = ?",
+                (status, report_id),
+            )
+        await db.commit()
+    logger.info("Баг-репорт #%s: статус → %s", report_id, status)

@@ -18,7 +18,7 @@ from aiogram.enums import ParseMode
 from src.config import BOT_TOKEN, ADMIN_IDS, FORUM_URL
 from src.config import DB_PATH, COOKIES_PATH
 from src.database import init_db
-from src.handlers import common, complaint
+from src.handlers import common, complaint, bugreport
 from src.logger import setup_logging
 from src.status_monitor import status_monitor_loop
 
@@ -61,7 +61,8 @@ async def main():
 
     dp.include_router(common.router)
     dp.include_router(complaint.router)
-    logger.info("Подключены роутеры: common, complaint.")
+    dp.include_router(bugreport.router)
+    logger.info("Подключены роутеры: common, complaint, bugreport.")
 
     try:
         bot_info = await bot.get_me()

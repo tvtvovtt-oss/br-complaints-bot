@@ -79,6 +79,7 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
             ],
             [
                 types.KeyboardButton(text="🔐 Войти по паролю"),
+                types.KeyboardButton(text="🐞 Баг-репорты"),
             ],
         ]
     else:
@@ -89,6 +90,7 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
             ],
             [
                 types.KeyboardButton(text="📋 Мои шаблоны"),
+                types.KeyboardButton(text="🐞 Сообщить о баге"),
             ],
         ]
     return types.ReplyKeyboardMarkup(
@@ -373,14 +375,17 @@ async def cmd_help(message: types.Message):
             "сервера и подразделы жалоб.\n"
             "5. <b>📝 Подать жалобу</b> или <code>/new_complaint</code> — пошаговый сценарий публикации.\n"
             "6. <b>🔍 Проверить статус форума</b> — проверка всех аккаунтов админа.\n"
-            "7. <b>📜 Мои жалобы</b> — история отправленных жалоб."
+            "7. <b>📜 Мои жалобы</b> — история отправленных жалоб.\n"
+            "8. <b>🐞 Баг-репорты</b> или <code>/bugs</code> — поступившие сообщения от пользователей."
         )
     else:
         help_text = (
             "📖 <b>Справка:</b>\n\n"
             "• <b>📝 Подать жалобу</b> — пошагово заполните форму, бот опубликует тему "
             "на форуме от имени общего аккаунта.\n"
-            "• <b>📜 Мои жалобы</b> — ваши прошлые жалобы со ссылками на темы."
+            "• <b>📜 Мои жалобы</b> — ваши прошлые жалобы со ссылками на темы.\n"
+            "• <b>📋 Мои шаблоны</b> — личные шаблоны для быстрой подачи.\n"
+            "• <b>🐞 Сообщить о баге</b> — если что-то не работает, напишите нам."
         )
     await message.answer(help_text)
 
