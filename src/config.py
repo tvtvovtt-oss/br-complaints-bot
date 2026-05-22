@@ -16,8 +16,27 @@ COOKIES_PATH = BASE_DIR / "cookies.json"
 # ID раздела форума по умолчанию (используется только как fallback)
 DEFAULT_FORUM_SECTION_ID = int(os.getenv("DEFAULT_FORUM_SECTION_ID", "0"))
 
+def _parse_admin_ids(raw: str | None) -> list[int]:
+    """Парсит ADMIN_IDS из строки переменной окружения. Принимает разделители
+    `,` `;` `space`, игнорирует кавычки и BOM, оставляет только цифровые id."""
+    if not raw:
+        return []
+    # Убираем кавычки/BOM/прочую невидимую дрянь, которой богаты UI-формы хостингов
+    cleaned = raw.replace("\ufeff", "").replace("'", "").replace('"', "").strip()
+    # Разбиваем по любому из разделителей
+    import re as _re
+    parts = _re.split(r"[,;\s]+", cleaned)
+    result: list[int] = []
+    for p in parts:
+        p = p.strip()
+        if p.isdigit():
+            result.append(int(p))
+    return result
+
+
 # Список разрешенных Telegram ID для администрирования/пользования ботом
-ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+_ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = _parse_admin_ids(_ADMIN_IDS_RAW)
 
 # User-Agent для прохождения защиты DDoS-Guard (должен совпадать с браузером пользователя)
 USER_AGENT = os.getenv(
