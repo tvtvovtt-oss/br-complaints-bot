@@ -10,8 +10,27 @@ load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 FORUM_URL = os.getenv("FORUM_URL", "https://forum.blackrussia.online").rstrip("/")
-DB_PATH = BASE_DIR / os.getenv("DB_PATH", "bot_database.db")
-COOKIES_PATH = BASE_DIR / "cookies.json"
+
+
+def _resolve_path(env_value: str | None, default_name: str) -> Path:
+    """Превращает значение из .env (или дефолт) в Path. Если путь
+    относительный — считаем его относительно BASE_DIR. Абсолютные пути
+    (например, /app/shared/...) принимаются как есть."""
+    raw = (env_value or default_name).strip()
+    p = Path(raw)
+    if p.is_absolute():
+        return p
+    return BASE_DIR / p
+
+
+# Пути к файлам данных. Можно переопределить через переменные окружения,
+# чтобы хранить базу и куки в /app/shared (общем хранилище хостинга).
+DB_PATH = _resolve_path(os.getenv("DB_PATH"), "bot_database.db")
+COOKIES_PATH = _resolve_path(os.getenv("COOKIES_PATH"), "cookies.json")
+
+# Создаём родительскую папку, если её нет (актуально для /app/shared/sub/...)
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # ID раздела форума по умолчанию (используется только как fallback)
 DEFAULT_FORUM_SECTION_ID = int(os.getenv("DEFAULT_FORUM_SECTION_ID", "0"))

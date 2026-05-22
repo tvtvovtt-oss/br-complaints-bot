@@ -16,6 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from src.config import BOT_TOKEN, ADMIN_IDS, FORUM_URL
+from src.config import DB_PATH, COOKIES_PATH
 from src.database import init_db
 from src.handlers import common, complaint
 from src.logger import setup_logging
@@ -31,6 +32,8 @@ async def main():
     logger.info("Запуск бота для подачи жалоб на форум Black Russia")
     logger.info("Python %s, платформа: %s", platform.python_version(), platform.platform())
     logger.info("Адрес форума: %s", FORUM_URL)
+    logger.info("Путь к БД:   %s", DB_PATH)
+    logger.info("Путь к кукам: %s", COOKIES_PATH)
     if ADMIN_IDS:
         logger.info("Доступ ограничен пользователями: %s", ", ".join(map(str, ADMIN_IDS)))
     else:
