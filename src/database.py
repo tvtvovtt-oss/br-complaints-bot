@@ -550,49 +550,59 @@ async def find_available_account(telegram_id: int) -> dict | None:
 
     Если все аккаунты в кулдауне — возвращает тот, у которого ближайшее
     окончание кулдауна (с полем cooldown_remaining_seconds).
+
+    Использует BEGIN IMMEDIATE чтобы исключить гонку при параллельной
+    подаче нескольких жалоб разными пользователями.
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        # Сначала ищем свободный (cooldown_until IS NULL ИЛИ уже истёк)
-        async with db.execute(
-            """
-            SELECT id, username, login, cookies_json, cooldown_until,
-                   CAST((julianday(cooldown_until) - julianday('now')) * 86400 AS INTEGER)
-                   AS remaining
-            FROM accounts
-            WHERE telegram_id = ?
-              AND (cooldown_until IS NULL
-                   OR cooldown_until <= datetime('now'))
-            ORDER BY updated_at ASC
-            LIMIT 1
-            """,
-            (telegram_id,),
-        ) as cur:
-            row = await cur.fetchone()
-            if row:
-                return {
-                    "id": row[0],
-                    "username": row[1],
-                    "login": row[2],
-                    "cookies": _json.loads(row[3]),
-                    "cooldown_until": row[4],
-                    "cooldown_remaining_seconds": 0,
-                    "available": True,
-                }
+        # Эксклюзивная транзакция — гарантирует, что между SELECT и решением
+        # не вмешается другой коннект и не выберет тот же аккаунт.
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            async with db.execute(
+                """
+                SELECT id, username, login, cookies_json, cooldown_until,
+                       CAST((julianday(cooldown_until) - julianday('now')) * 86400 AS INTEGER)
+                       AS remaining
+                FROM accounts
+                WHERE telegram_id = ?
+                  AND (cooldown_until IS NULL
+                       OR cooldown_until <= datetime('now'))
+                ORDER BY updated_at ASC
+                LIMIT 1
+                """,
+                (telegram_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    result = {
+                        "id": row[0],
+                        "username": row[1],
+                        "login": row[2],
+                        "cookies": _json.loads(row[3]),
+                        "cooldown_until": row[4],
+                        "cooldown_remaining_seconds": 0,
+                        "available": True,
+                    }
+                    await db.commit()
+                    return result
 
-        # Все аккаунты в кулдауне — возвращаем с минимальным остатком
-        async with db.execute(
-            """
-            SELECT id, username, login, cookies_json, cooldown_until,
-                   CAST((julianday(cooldown_until) - julianday('now')) * 86400 AS INTEGER)
-                   AS remaining
-            FROM accounts
-            WHERE telegram_id = ?
-            ORDER BY cooldown_until ASC
-            LIMIT 1
-            """,
-            (telegram_id,),
-        ) as cur:
-            row = await cur.fetchone()
+            # Все аккаунты в кулдауне — возвращаем с минимальным остатком
+            async with db.execute(
+                """
+                SELECT id, username, login, cookies_json, cooldown_until,
+                       CAST((julianday(cooldown_until) - julianday('now')) * 86400 AS INTEGER)
+                       AS remaining
+                FROM accounts
+                WHERE telegram_id = ?
+                ORDER BY cooldown_until ASC
+                LIMIT 1
+                """,
+                (telegram_id,),
+            ) as cur:
+                row = await cur.fetchone()
+
+            await db.commit()
             if not row:
                 return None
             return {
@@ -604,6 +614,9 @@ async def find_available_account(telegram_id: int) -> dict | None:
                 "cooldown_remaining_seconds": max(0, row[5] or 0),
                 "available": False,
             }
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # ---------- Пользовательские шаблоны жалоб ----------
@@ -800,23 +813,88 @@ async def update_complaint_content(complaint_id: int, telegram_id: int,
                                      description: str | None = None,
                                      proof_link: str | None = None) -> bool:
     """Обновляет описание и/или доказательства локальной записи о жалобе.
-    Возвращает True если что-то обновилось."""
-    fields = []
-    values: list = []
-    if description is not None:
-        fields.append("description = ?")
-        values.append(description)
-    if proof_link is not None:
-        fields.append("proof_link = ?")
-        values.append(proof_link)
-    if not fields:
+
+    Имена столбцов — фиксированные литералы, без склеивания через f-строку,
+    чтобы исключить даже теоретическую возможность SQL-инъекции при будущих
+    изменениях кода.
+    """
+    if description is None and proof_link is None:
         return False
-    values.extend([complaint_id, telegram_id])
+
+    if description is not None and proof_link is not None:
+        sql = ("UPDATE complaints SET description = ?, proof_link = ? "
+               "WHERE id = ? AND telegram_id = ?")
+        params: tuple = (description, proof_link, complaint_id, telegram_id)
+    elif description is not None:
+        sql = "UPDATE complaints SET description = ? WHERE id = ? AND telegram_id = ?"
+        params = (description, complaint_id, telegram_id)
+    else:
+        sql = "UPDATE complaints SET proof_link = ? WHERE id = ? AND telegram_id = ?"
+        params = (proof_link, complaint_id, telegram_id)
+
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            f"UPDATE complaints SET {', '.join(fields)} "
-            "WHERE id = ? AND telegram_id = ?",
-            values,
-        )
+        cur = await db.execute(sql, params)
         await db.commit()
         return cur.rowcount > 0
+
+
+async def claim_available_account(telegram_id: int,
+                                    cooldown_seconds: int) -> dict | None:
+    """Атомарно «забронировать» свободный аккаунт под публикацию.
+
+    UPDATE с RETURNING делает выбор и постановку кулдауна одним запросом,
+    исключая гонку: даже если две жалобы запустятся в одну миллисекунду,
+    каждая получит свой аккаунт (или None если свободных не осталось).
+
+    Если свободных нет — возвращает None и НЕ ставит кулдаун.
+
+    SQLite 3.35+ требуется для RETURNING.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            async with db.execute(
+                """
+                UPDATE accounts
+                SET cooldown_until = datetime('now', ? || ' seconds'),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = (
+                    SELECT id FROM accounts
+                    WHERE telegram_id = ?
+                      AND (cooldown_until IS NULL
+                           OR cooldown_until <= datetime('now'))
+                    ORDER BY updated_at ASC
+                    LIMIT 1
+                )
+                RETURNING id, username, login, cookies_json
+                """,
+                (f"+{int(cooldown_seconds)}", telegram_id),
+            ) as cur:
+                row = await cur.fetchone()
+            await db.commit()
+            if not row:
+                return None
+            logger.info("Аккаунт id=%s «забронирован» с кулдауном %d с.",
+                        row[0], cooldown_seconds)
+            return {
+                "id": row[0],
+                "username": row[1],
+                "login": row[2],
+                "cookies": _json.loads(row[3]),
+                "available": True,
+            }
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def release_account_cooldown(account_id: int) -> None:
+    """Сбрасывает кулдаун аккаунта (если публикация провалилась —
+    возвращаем аккаунт в пул сразу, не ждём 180 сек)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE accounts SET cooldown_until = NULL WHERE id = ?",
+            (account_id,),
+        )
+        await db.commit()
+    logger.info("Кулдаун аккаунта id=%s сброшен.", account_id)

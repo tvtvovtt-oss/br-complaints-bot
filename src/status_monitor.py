@@ -156,9 +156,15 @@ async def status_monitor_loop(bot: Bot) -> None:
                 "(интервал %d сек).", CHECK_INTERVAL_SECONDS)
     # Стартовая задержка чтобы не дублировать с авто-импортом и sync на старте
     await asyncio.sleep(60)
+    # Жёсткий потолок: один цикл проверки не должен идти дольше 5 минут.
+    # Если сеть зависнет, не блокируем мониторинг навсегда.
+    cycle_timeout = 5 * 60
     while True:
         try:
-            await _check_once(bot)
+            await asyncio.wait_for(_check_once(bot), timeout=cycle_timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Цикл мониторинга статусов превысил %d сек — прерван.",
+                           cycle_timeout)
         except asyncio.CancelledError:
             logger.info("Мониторинг статусов остановлен.")
             raise

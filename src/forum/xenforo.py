@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import logging
 import re
@@ -12,6 +12,10 @@ from bs4 import BeautifulSoup
 from src.config import COOKIES_PATH, FORUM_URL, USER_AGENT
 
 logger = logging.getLogger(__name__)
+
+# Хост форума, вычисленный из FORUM_URL — нужен для установки кук на правильный
+# домен. Раньше было захардкожено "forum.blackrussia.online" в нескольких местах.
+FORUM_HOST = httpx.URL(FORUM_URL).host
 
 # Регулярка для извлечения node_id из ссылки на форум XenForo
 # /forums/some-name.123/  или  /forums/123/  или  /categories/some-name.123/
@@ -62,19 +66,36 @@ def _soup(html: str) -> BeautifulSoup:
 # Сбрасывается через invalidate_cookies_cache() после загрузки нового cookies.json.
 _cookies_cache: Optional[dict] = None
 _cookies_mtime: float = 0.0
+# Защита от гонки при одновременном чтении/записи из разных корутин.
+# Используем asyncio.Lock; все обращения к кэшу проходят через него.
+_cookies_lock = asyncio.Lock()
 
 
 def load_cookies(use_cache: bool = True) -> dict:
-    """Загрузка кук из cookies.json. Кэширует результат до изменения файла."""
+    """Загрузка кук из cookies.json. Кэширует результат до изменения файла.
+
+    Метод синхронный — берёт snapshot кэша. Запись (save_cookies)
+    атомарно обновляет и файл, и кэш под Lock'ом, поэтому коллизий нет.
+    """
     global _cookies_cache, _cookies_mtime
 
     if not COOKIES_PATH.exists():
         logger.warning("Файл с куками не найден по пути: %s", COOKIES_PATH)
         return {}
 
-    mtime = COOKIES_PATH.stat().st_mtime
-    if use_cache and _cookies_cache is not None and mtime == _cookies_mtime:
-        return _cookies_cache
+    try:
+        mtime = COOKIES_PATH.stat().st_mtime
+    except OSError as e:
+        logger.warning("Не удалось получить mtime cookies.json: %s", e)
+        mtime = 0.0
+
+    # snapshot кэша без блокировки — для чтения это безопасно (dict-ссылка
+    # атомарна в CPython). Если данные стали невалидны — следующий вызов
+    # возьмёт новые. Запись идёт под Lock, так что сам dict не пересобирается.
+    cached = _cookies_cache
+    cached_mtime = _cookies_mtime
+    if use_cache and cached is not None and mtime == cached_mtime:
+        return dict(cached)  # копия чтобы вызывающий не мог модифицировать кэш
 
     try:
         with open(COOKIES_PATH, "r", encoding="utf-8") as f:
@@ -91,7 +112,7 @@ def load_cookies(use_cache: bool = True) -> dict:
         _cookies_cache = cookies_dict
         _cookies_mtime = mtime
         logger.debug("Загружено %d кук из %s.", len(cookies_dict), COOKIES_PATH.name)
-        return cookies_dict
+        return dict(cookies_dict)
     except json.JSONDecodeError as e:
         logger.error("Файл cookies.json содержит некорректный JSON: %s", e)
         return {}
@@ -100,8 +121,24 @@ def load_cookies(use_cache: bool = True) -> dict:
         return {}
 
 
+async def save_cookies_async(cookies_dict: dict) -> None:
+    """Асинхронная запись кук в файл и обновление кэша под Lock."""
+    global _cookies_cache, _cookies_mtime
+    async with _cookies_lock:
+        try:
+            with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+                json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
+            _cookies_cache = dict(cookies_dict)
+            _cookies_mtime = COOKIES_PATH.stat().st_mtime
+            logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))
+        except Exception as e:
+            logger.exception("Не удалось сохранить куки в файл: %s", e)
+
+
 def save_cookies(cookies_dict: dict) -> None:
-    """Сохранение кук обратно в файл cookies.json."""
+    """Синхронная обёртка над save_cookies_async для обратной совместимости.
+    Если вызывается из async-контекста — лучше использовать save_cookies_async.
+    """
     global _cookies_cache, _cookies_mtime
     try:
         with open(COOKIES_PATH, "w", encoding="utf-8") as f:
@@ -218,7 +255,7 @@ async def _resolve_username(client: httpx.AsyncClient) -> str:
             fresh = await _solve_ddos_guard()
             if fresh:
                 client.cookies.set("R3ACTLB", fresh,
-                                    domain="forum.blackrussia.online", path="/")
+                                    domain=FORUM_HOST, path="/")
                 r = await client.get(FORUM_URL)
         soup = _soup(r.text)
         if _extract_user_id(r.text) > 0:
@@ -348,7 +385,7 @@ async def forum_login(login: str, password: str) -> dict:
             fresh = await _solve_ddos_guard()
             if fresh:
                 client.cookies.set("R3ACTLB", fresh,
-                                    domain="forum.blackrussia.online", path="/")
+                                    domain=FORUM_HOST, path="/")
                 r = await client.get(LOGIN_URL)
             if "vddosw3data.js" in r.text or "slowAES" in r.text:
                 logger.error("DDoS-Guard заглушка остаётся даже после нового R3ACTLB.")
@@ -385,7 +422,7 @@ async def forum_login(login: str, password: str) -> dict:
 
         try:
             resp_json = r2.json()
-        except ValueError:
+        except (ValueError, json.JSONDecodeError):
             resp_json = None
 
         if resp_json:
@@ -589,7 +626,7 @@ async def forum_submit_2fa(state: dict, code: str,
 
         try:
             resp_json = r.json()
-        except ValueError:
+        except (ValueError, json.JSONDecodeError):
             resp_json = None
 
         # XenForo на правильный 2FA-код возвращает JSON с пустым errors и
@@ -633,7 +670,7 @@ async def forum_submit_2fa(state: dict, code: str,
             fresh = await _solve_ddos_guard()
             if fresh:
                 client.cookies.set("R3ACTLB", fresh,
-                                    domain="forum.blackrussia.online", path="/")
+                                    domain=FORUM_HOST, path="/")
                 final = await client.get(FORUM_URL)
 
         if _extract_user_id(final.text):
@@ -709,7 +746,7 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
                 fresh = await _solve_ddos_guard()
                 if fresh:
                     client.cookies.set("R3ACTLB", fresh,
-                                        domain="forum.blackrussia.online", path="/")
+                                        domain=FORUM_HOST, path="/")
                     response = await client.get(FORUM_URL)
                     html = response.text
                     # Обновим cookies.json со свежим R3ACTLB
@@ -846,7 +883,7 @@ async def post_complaint(section_id: int, title: str, message: str) -> tuple[boo
                 fresh = await _solve_ddos_guard()
                 if fresh:
                     client.cookies.set("R3ACTLB", fresh,
-                                        domain="forum.blackrussia.online", path="/")
+                                        domain=FORUM_HOST, path="/")
                     save_cookies({**cookies, "R3ACTLB": fresh})
                     get_response = await client.get(post_url)
 
@@ -898,7 +935,7 @@ async def post_complaint(section_id: int, title: str, message: str) -> tuple[boo
 
             try:
                 result_json = post_response.json()
-            except ValueError:
+            except (ValueError, json.JSONDecodeError):
                 snippet = post_response.text[:200].replace("\n", " ")
                 logger.error("Форум вернул не-JSON ответ. Начало: %s", snippet)
                 return False, f"Форум вернул некорректный ответ (не JSON): {snippet}"
@@ -979,7 +1016,7 @@ async def discover_servers() -> tuple[bool, list[tuple[str, int]] | str]:
                 fresh = await _solve_ddos_guard()
                 if fresh:
                     client.cookies.set("R3ACTLB", fresh,
-                                        domain="forum.blackrussia.online", path="/")
+                                        domain=FORUM_HOST, path="/")
                     cookies = load_cookies()
                     save_cookies({**cookies, "R3ACTLB": fresh})
                     response = await client.get(FORUM_URL)
@@ -1196,7 +1233,7 @@ async def fetch_complaint_status(thread_url: str) -> tuple[str | None, str | Non
                 fresh = await _solve_ddos_guard()
                 if fresh:
                     client.cookies.set("R3ACTLB", fresh,
-                                        domain="forum.blackrussia.online", path="/")
+                                        domain=FORUM_HOST, path="/")
                     r = await client.get(thread_url)
                     html = r.text
 
@@ -1271,7 +1308,7 @@ async def _get_first_post_id(client: httpx.AsyncClient,
         fresh = await _solve_ddos_guard()
         if fresh:
             client.cookies.set("R3ACTLB", fresh,
-                                domain="forum.blackrussia.online", path="/")
+                                domain=FORUM_HOST, path="/")
             r = await client.get(thread_url)
             html = r.text
     m = _FIRST_POST_ID_RE.search(html)
@@ -1311,7 +1348,7 @@ async def delete_thread(thread_url: str,
                 fresh = await _solve_ddos_guard()
                 if fresh:
                     client.cookies.set("R3ACTLB", fresh,
-                                        domain="forum.blackrussia.online", path="/")
+                                        domain=FORUM_HOST, path="/")
                     r = await client.get(delete_url)
                     html = r.text
 
@@ -1334,7 +1371,7 @@ async def delete_thread(thread_url: str,
 
             try:
                 resp_json = r2.json()
-            except ValueError:
+            except (ValueError, json.JSONDecodeError):
                 snippet = r2.text[:200].replace("\n", " ")
                 return False, f"Форум вернул не-JSON: {snippet}"
 
@@ -1409,7 +1446,7 @@ async def edit_thread_post(thread_url: str, new_message: str,
                                      data=payload, headers=ajax)
             try:
                 resp_json = r2.json()
-            except ValueError:
+            except (ValueError, json.JSONDecodeError):
                 snippet = r2.text[:200].replace("\n", " ")
                 return False, f"Форум вернул не-JSON: {snippet}"
 
@@ -1440,7 +1477,7 @@ async def edit_thread_post(thread_url: str, new_message: str,
                         if rj.get("errors"):
                             logger.warning("Не удалось обновить заголовок темы #%s: %s",
                                            thread_id, rj["errors"])
-                    except ValueError:
+                    except (ValueError, json.JSONDecodeError):
                         logger.debug("Заголовок темы изменён, но ответ не JSON.")
 
             logger.info("Тема #%s (post_id=%s) успешно отредактирована.",
@@ -1453,3 +1490,5 @@ async def edit_thread_post(thread_url: str, new_message: str,
         except Exception as e:
             logger.exception("Непредвиденная ошибка редактирования темы")
             return False, f"Ошибка: {e}"
+
+

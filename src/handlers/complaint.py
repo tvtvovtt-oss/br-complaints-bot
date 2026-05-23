@@ -26,6 +26,8 @@ from src.database import (
     get_active_account,
     update_account_cookies,
     find_available_account,
+    claim_available_account,
+    release_account_cooldown,
     set_account_cooldown,
     set_active_account,
     list_accounts,

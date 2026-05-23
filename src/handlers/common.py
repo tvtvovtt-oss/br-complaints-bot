@@ -184,11 +184,30 @@ async def login_step_password(message: types.Message, state: FSMContext, bot: Bo
         return
 
     password = message.text or ""
-    # Удаляем сообщение с паролем сразу
+    # Удаляем сообщение с паролем сразу. Если по какой-то причине не вышло —
+    # пробуем ещё раз через 0.5 сек (Telegram иногда даёт RetryAfter), и
+    # явно ругаемся в лог. Сам пароль в state мы не пишем — только логин.
     try:
         await bot.delete_message(message.chat.id, message.message_id)
-    except Exception:
-        pass
+    except Exception as first_err:
+        logger.warning("Не удалось удалить сообщение с паролем (1-я попытка): %s",
+                       first_err)
+        try:
+            import asyncio as _aio
+            await _aio.sleep(0.5)
+            await bot.delete_message(message.chat.id, message.message_id)
+        except Exception as second_err:
+            logger.error("Не удалось удалить сообщение с паролем (2-я попытка): %s. "
+                         "ВНИМАНИЕ: пароль остался в чате — попросите пользователя "
+                         "удалить его вручную.", second_err)
+            try:
+                await message.answer(
+                    "⚠️ <b>Не смог автоматически удалить ваш пароль из чата.</b>\n"
+                    "Удалите его вручную как можно скорее (тапните по сообщению "
+                    "и выберите «Удалить»)."
+                )
+            except Exception:
+                pass
 
     data = await state.get_data()
     login_value = data.get("login", "")

@@ -177,7 +177,9 @@ class CleanupMiddleware(BaseMiddleware):
         async with self._throttle._lock:
             for store in (self._throttle._last_message,
                           self._throttle._last_callback):
-                stale = [uid for uid, t in store.items() if now - t > cutoff]
+                # list(store.items()) — обязательно, иначе RuntimeError при
+                # модификации dict во время итерации в pop().
+                stale = [uid for uid, t in list(store.items()) if now - t > cutoff]
                 for uid in stale:
                     store.pop(uid, None)
             for uid, t in list(self._throttle._soft_ban_until.items()):
