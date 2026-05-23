@@ -240,19 +240,47 @@ async def cmd_force_check(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     from src.status_monitor import _check_once
+    from src.database import list_complaints_for_status_check
     status_msg = await message.answer("⏳ Запускаю проверку статусов жалоб...")
     try:
         await asyncio.wait_for(_check_once(message.bot), timeout=300)
-        await status_msg.edit_text(
-            "✅ Проверка статусов завершена. Подробности — в логах бота."
-        )
     except asyncio.TimeoutError:
         await status_msg.edit_text(
             "⏱ Проверка прервана по таймауту (5 мин). Проверьте логи."
         )
+        return
     except Exception as e:
         logger.exception("Ошибка ручной проверки статусов")
         await status_msg.edit_text(f"❌ Ошибка: {escape(str(e))}")
+        return
+
+    # После прогона показываем сводку — какие жалобы в каком статусе
+    from src.database import get_user_complaints
+    complaints = await get_user_complaints(message.from_user.id)
+
+    pending_n = sum(1 for c in complaints if c["status"] == "pending")
+    accepted_n = sum(1 for c in complaints if c["status"] == "accepted")
+    rejected_n = sum(1 for c in complaints if c["status"] == "rejected")
+    closed_n = sum(1 for c in complaints if c["status"] == "closed")
+
+    lines = [
+        "✅ <b>Проверка статусов завершена</b>\n",
+        f"⏳ Ожидание: <b>{pending_n}</b>",
+        f"✅ Принято: <b>{accepted_n}</b>",
+        f"❌ Отклонено: <b>{rejected_n}</b>",
+        f"🔒 Закрыто: <b>{closed_n}</b>",
+    ]
+
+    if complaints:
+        lines.append("\n<b>Последние 10 жалоб:</b>")
+        for c in complaints[:10]:
+            from src.status_monitor import status_label
+            lbl = status_label(c["status"])
+            lines.append(
+                f"   <code>#{c['id']}</code> {lbl} • <b>{escape(c['nickname'])}</b>"
+            )
+
+    await status_msg.edit_text("\n".join(lines))
 
 
 @router.message(Command("checkurl"))
