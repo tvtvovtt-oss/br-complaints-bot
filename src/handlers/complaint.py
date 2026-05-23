@@ -932,8 +932,11 @@ async def process_proof(message: types.Message, state: FSMContext):
         keyboard=[
             [
                 types.KeyboardButton(text="✅ Отправить на форум"),
+            ],
+            [
+                types.KeyboardButton(text="📦 В очередь"),
                 types.KeyboardButton(text="❌ Отмена"),
-            ]
+            ],
         ],
         resize_keyboard=True,
     )
@@ -941,22 +944,52 @@ async def process_proof(message: types.Message, state: FSMContext):
     # Имя аккаунта мы сохранили на старте сценария.
     # Обычным пользователям имя аккаунта-публикатора не показываем.
     poster = data.get("complaint_account_name") or "по текущим cookies.json"
-    poster_line = (
+    poster_line_admin = (
         f"👤 <b>От имени:</b> {escape(str(poster))}\n"
         if is_admin(message.from_user.id) else ""
     )
 
     preview_text = (
         "🧐 <b>Проверьте корректность жалобы перед отправкой:</b>\n\n"
-        f"{poster_line}"
+        f"{poster_line_admin}"
         f"📍 <b>Сервер:</b> {escape(str(data.get('server_name', '?')))}\n"
         f"📂 <b>Категория:</b> {escape(str(data.get('category_label', '?')))}\n"
         f"📌 <b>Заголовок темы:</b> {escape(thread_title)}\n\n"
         f"📄 <b>Текст сообщения:</b>\n"
         f"<pre>{escape(bb_code)}</pre>\n"
-        "Все верно? Нажмите <b>Отправить на форум</b> для публикации."
+        "Нажмите <b>✅ Отправить на форум</b> для немедленной публикации "
+        "или <b>📦 В очередь</b> чтобы поставить в очередь "
+        "(публикация в фоне, когда освободится аккаунт)."
     )
     await message.answer(preview_text, reply_markup=confirm_kb)
+
+
+@router.message(ComplaintForm.waiting_for_confirm, F.text == "📦 В очередь")
+async def process_enqueue(message: types.Message, state: FSMContext):
+    """Кладёт жалобу в очередь — фоновый процессор её опубликует, когда
+    освободится свободный аккаунт. Полезно когда все аккаунты в кулдауне."""
+    if not check_access(message.from_user.id):
+        return
+    from src.database import enqueue_complaint
+    data = await state.get_data()
+    qid = await enqueue_complaint(
+        telegram_id=message.from_user.id,
+        section_id=data["section_id"],
+        title=data["title"],
+        bb_code=data["bb_code"],
+        target_nickname=data["target_nickname"],
+        description=data["description"],
+        proof_link=data["proof_link"],
+    )
+    await state.clear()
+    await message.answer(
+        f"📦 <b>Жалоба #{qid} поставлена в очередь.</b>\n\n"
+        "Бот опубликует её, когда освободится свободный форумный аккаунт.\n"
+        "Вы получите ссылку в личку, как только тема будет опубликована.\n\n"
+        "Посмотреть статус: команда <code>/queue</code> (для админа) или "
+        "<code>📦 Очередь жалоб</code>.",
+        reply_markup=_menu_for(message.from_user.id),
+    )
 
 
 @router.message(ComplaintForm.waiting_for_confirm, F.text == "✅ Отправить на форум")

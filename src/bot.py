@@ -18,10 +18,11 @@ from aiogram.enums import ParseMode
 from src.config import BOT_TOKEN, ADMIN_IDS, FORUM_URL
 from src.config import DB_PATH, COOKIES_PATH
 from src.database import init_db
-from src.handlers import common, complaint, bugreport
+from src.handlers import common, complaint, bugreport, admin
 from src.logger import setup_logging
 from src.middleware import ThrottleMiddleware, CleanupMiddleware
 from src.status_monitor import status_monitor_loop
+from src.queue_processor import queue_processor_loop
 from src.storage_backup import (
     is_enabled as backup_is_enabled,
     restore_db_from_channel,
@@ -75,7 +76,8 @@ async def main():
     dp.include_router(common.router)
     dp.include_router(complaint.router)
     dp.include_router(bugreport.router)
-    logger.info("Подключены роутеры: common, complaint, bugreport.")
+    dp.include_router(admin.router)
+    logger.info("Подключены роутеры: common, complaint, bugreport, admin.")
 
     try:
         bot_info = await bot.get_me()
@@ -107,7 +109,8 @@ async def main():
 
     logger.info("Запускаю long-polling. Для остановки нажмите Ctrl+C.")
     monitor_task = asyncio.create_task(status_monitor_loop(bot))
-    logger.info("Фоновая задача мониторинга статусов жалоб запущена.")
+    queue_task = asyncio.create_task(queue_processor_loop(bot))
+    logger.info("Запущены фоновые задачи: мониторинг статусов, процессор очереди.")
     backup_task = None
     if backup_is_enabled():
         backup_task = asyncio.create_task(periodic_backup_loop(bot))
@@ -121,7 +124,7 @@ async def main():
         except Exception:
             logger.exception("Финальный бэкап не удался.")
         logger.info("Останавливаю фоновые задачи...")
-        for task in (monitor_task, backup_task):
+        for task in (monitor_task, queue_task, backup_task):
             if task is not None:
                 task.cancel()
                 try:

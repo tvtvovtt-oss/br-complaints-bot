@@ -102,6 +102,11 @@ async def init_db():
             await db.execute(
                 "ALTER TABLE accounts ADD COLUMN cooldown_until TIMESTAMP"
             )
+        if "encrypted_password" not in cols:
+            logger.info("Миграция: добавляю колонку 'encrypted_password' в accounts.")
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN encrypted_password TEXT"
+            )
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_active
                 ON accounts(telegram_id, is_active)
@@ -138,6 +143,30 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 replied_at TIMESTAMP
             )
+        """)
+
+        # Очередь жалоб для отложенной публикации
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS complaint_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                section_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                bb_code TEXT NOT NULL,
+                target_nickname TEXT NOT NULL,
+                description TEXT NOT NULL,
+                proof_link TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                processed_at TIMESTAMP,
+                forum_thread_url TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_queue_pending
+                ON complaint_queue(status, created_at)
         """)
         await db.commit()
     logger.info("База данных готова. Таблицы: complaints, servers, "
@@ -912,3 +941,268 @@ async def release_account_cooldown(account_id: int) -> None:
         )
         await db.commit()
     logger.info("Кулдаун аккаунта id=%s сброшен.", account_id)
+
+
+# ---------- Шифрованный пароль для авто-перелогина ----------
+
+async def set_account_encrypted_password(account_id: int,
+                                           encrypted_password: str | None) -> None:
+    """Сохраняет/удаляет зашифрованный пароль аккаунта."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE accounts SET encrypted_password = ? WHERE id = ?",
+            (encrypted_password, account_id),
+        )
+        await db.commit()
+    await _trigger_backup()
+
+
+async def get_account_encrypted_password(account_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT encrypted_password FROM accounts WHERE id = ?",
+            (account_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+
+async def list_accounts_with_passwords() -> list[dict]:
+    """Возвращает все аккаунты у которых есть encrypted_password.
+    Используется в авто-перелогине."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT id, telegram_id, username, login, cookies_json,
+                   encrypted_password
+            FROM accounts
+            WHERE encrypted_password IS NOT NULL AND encrypted_password != ''
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id": r[0], "telegram_id": r[1], "username": r[2],
+                    "login": r[3], "cookies": _json.loads(r[4]),
+                    "encrypted_password": r[5],
+                }
+                for r in rows
+            ]
+
+
+# ---------- Очередь жалоб (отложенная публикация) ----------
+
+async def enqueue_complaint(telegram_id: int, section_id: int, title: str,
+                              bb_code: str, target_nickname: str,
+                              description: str, proof_link: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO complaint_queue
+                (telegram_id, section_id, title, bb_code,
+                 target_nickname, description, proof_link)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (telegram_id, section_id, title, bb_code,
+             target_nickname, description, proof_link),
+        )
+        qid = cur.lastrowid
+        await db.commit()
+    logger.info("В очередь добавлена жалоба #%s (telegram_id=%s, цель=«%s»).",
+                qid, telegram_id, target_nickname)
+    await _trigger_backup()
+    return qid
+
+
+async def list_queue_pending() -> list[dict]:
+    """Возвращает все жалобы в статусе pending, отсортированные по времени."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT id, telegram_id, section_id, title, bb_code,
+                   target_nickname, description, proof_link,
+                   attempts, created_at
+            FROM complaint_queue
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id": r[0], "telegram_id": r[1], "section_id": r[2],
+                    "title": r[3], "bb_code": r[4],
+                    "target_nickname": r[5], "description": r[6],
+                    "proof_link": r[7], "attempts": r[8],
+                    "created_at": r[9],
+                }
+                for r in rows
+            ]
+
+
+async def list_user_queue(telegram_id: int) -> list[dict]:
+    """Очередь конкретного пользователя со всеми статусами."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT id, section_id, target_nickname, status, last_error,
+                   attempts, created_at, processed_at, forum_thread_url
+            FROM complaint_queue
+            WHERE telegram_id = ?
+            ORDER BY id DESC LIMIT 30
+            """,
+            (telegram_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id": r[0], "section_id": r[1],
+                    "target_nickname": r[2], "status": r[3],
+                    "last_error": r[4], "attempts": r[5],
+                    "created_at": r[6], "processed_at": r[7],
+                    "forum_thread_url": r[8],
+                }
+                for r in rows
+            ]
+
+
+async def mark_queue_done(queue_id: int, forum_thread_url: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE complaint_queue "
+            "SET status = 'done', forum_thread_url = ?, "
+            "processed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (forum_thread_url, queue_id),
+        )
+        await db.commit()
+    await _trigger_backup()
+
+
+async def mark_queue_failed(queue_id: int, error: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE complaint_queue "
+            "SET status = 'failed', last_error = ?, "
+            "processed_at = CURRENT_TIMESTAMP, attempts = attempts + 1 "
+            "WHERE id = ?",
+            (error[:500], queue_id),
+        )
+        await db.commit()
+    await _trigger_backup()
+
+
+async def increment_queue_attempt(queue_id: int, error: str | None = None) -> None:
+    """Увеличить счётчик попыток (для retry в pending)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE complaint_queue "
+            "SET attempts = attempts + 1, last_error = ? WHERE id = ?",
+            ((error or "")[:500], queue_id),
+        )
+        await db.commit()
+
+
+async def cancel_queue_item(telegram_id: int, queue_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM complaint_queue "
+            "WHERE id = ? AND telegram_id = ? AND status = 'pending'",
+            (queue_id, telegram_id),
+        )
+        await db.commit()
+        ok = cur.rowcount > 0
+    if ok:
+        await _trigger_backup()
+    return ok
+
+
+# ---------- Все пользователи бота (для рассылок) ----------
+
+async def list_all_users() -> list[int]:
+    """Возвращает уникальные telegram_id всех, кто хоть раз взаимодействовал
+    с ботом (записал жалобу, шаблон, баг-репорт, добавил аккаунт)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT telegram_id FROM complaints
+            UNION SELECT telegram_id FROM user_templates
+            UNION SELECT telegram_id FROM bug_reports
+            UNION SELECT telegram_id FROM accounts
+            UNION SELECT telegram_id FROM complaint_queue
+        """) as cur:
+            rows = await cur.fetchall()
+            return [r[0] for r in rows if r[0]]
+
+
+# ---------- Статистика ----------
+
+async def get_stats(within_days: int = 7) -> dict:
+    """Возвращает агрегированную статистику за последние N дней."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Всего пользователей
+        async with db.execute(
+            "SELECT COUNT(DISTINCT telegram_id) FROM "
+            "(SELECT telegram_id FROM complaints "
+            " UNION SELECT telegram_id FROM bug_reports)"
+        ) as cur:
+            total_users = (await cur.fetchone())[0]
+
+        # Жалобы за период
+        async with db.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) "
+            "FROM complaints WHERE created_at >= datetime('now', ?)",
+            (f"-{int(within_days)} days",),
+        ) as cur:
+            row = await cur.fetchone()
+            total = row[0] or 0
+            accepted = row[1] or 0
+            rejected = row[2] or 0
+            pending = row[3] or 0
+
+        # ТОП-5 пользователей по количеству жалоб
+        async with db.execute(
+            "SELECT telegram_id, COUNT(*) AS n FROM complaints "
+            "WHERE created_at >= datetime('now', ?) "
+            "GROUP BY telegram_id ORDER BY n DESC LIMIT 5",
+            (f"-{int(within_days)} days",),
+        ) as cur:
+            top_users = await cur.fetchall()
+
+        # ТОП-5 нарушителей (на кого больше всего жалоб)
+        async with db.execute(
+            "SELECT nickname, COUNT(*) AS n FROM complaints "
+            "WHERE created_at >= datetime('now', ?) "
+            "GROUP BY LOWER(nickname) ORDER BY n DESC LIMIT 5",
+            (f"-{int(within_days)} days",),
+        ) as cur:
+            top_targets = await cur.fetchall()
+
+        # Активность по дням (последние 7 дней)
+        async with db.execute(
+            "SELECT DATE(created_at) AS d, COUNT(*) FROM complaints "
+            "WHERE created_at >= datetime('now', ?) "
+            "GROUP BY d ORDER BY d ASC",
+            (f"-{int(within_days)} days",),
+        ) as cur:
+            by_day = await cur.fetchall()
+
+        # В очереди
+        async with db.execute(
+            "SELECT COUNT(*) FROM complaint_queue WHERE status='pending'"
+        ) as cur:
+            queue_pending = (await cur.fetchone())[0]
+
+    return {
+        "within_days": within_days,
+        "total_users": total_users,
+        "total": total,
+        "accepted": accepted,
+        "rejected": rejected,
+        "pending": pending,
+        "top_users": [(r[0], r[1]) for r in top_users],
+        "top_targets": [(r[0], r[1]) for r in top_targets],
+        "by_day": [(r[0], r[1]) for r in by_day],
+        "queue_pending": queue_pending,
+    }
