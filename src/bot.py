@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 
 from src.config import BOT_TOKEN, ADMIN_IDS, FORUM_URL
 from src.config import DB_PATH, COOKIES_PATH
@@ -23,6 +24,7 @@ from src.logger import setup_logging
 from src.middleware import ThrottleMiddleware, CleanupMiddleware
 from src.status_monitor import status_monitor_loop
 from src.queue_processor import queue_processor_loop
+from src.error_reporter import install as install_error_reporter
 from src.storage_backup import (
     is_enabled as backup_is_enabled,
     restore_db_from_channel,
@@ -90,6 +92,15 @@ async def main():
     # schedule_backup() без аргументов.
     set_backup_bot(bot)
 
+    # Подключаем отправку ошибок (ERROR/CRITICAL) в Telegram-чат админу,
+    # если настроена переменная ERROR_LOG_CHAT_ID или LOG_TO_ADMIN=1.
+    if install_error_reporter(bot):
+        logger.info("Подключён TelegramErrorHandler — все ERROR-ы будут "
+                    "приходить вам в личку.")
+    else:
+        logger.info("TelegramErrorHandler не активирован "
+                    "(ERROR_LOG_CHAT_ID/LOG_TO_ADMIN не заданы).")
+
     # Восстановление БД из канала (если включён бэкап и локальной БД нет).
     # ДО init_db, чтобы не затереть восстановленную базу пустой схемой.
     if backup_is_enabled():
@@ -106,6 +117,43 @@ async def main():
 
     logger.info("Удаляю webhook и сбрасываю накопившиеся обновления...")
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # Регистрируем команды для автокомплита в Telegram (когда юзер набирает /)
+    public_commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="new_complaint", description="📝 Подать жалобу"),
+        BotCommand(command="templates", description="📋 Мои шаблоны"),
+        BotCommand(command="bug", description="🐞 Сообщить о баге"),
+        BotCommand(command="me", description="👤 Мой профиль"),
+        BotCommand(command="cancel", description="❌ Отменить действие"),
+        BotCommand(command="help", description="📖 Справка"),
+    ]
+    admin_commands = public_commands + [
+        BotCommand(command="login", description="🔐 Войти по паролю"),
+        BotCommand(command="accounts", description="👥 Аккаунты форума"),
+        BotCommand(command="sync", description="🔄 Синхронизировать форум"),
+        BotCommand(command="check", description="🔍 Проверить статусы жалоб"),
+        BotCommand(command="checkurl", description="🔍 Проверить статус темы"),
+        BotCommand(command="stats", description="📊 Статистика"),
+        BotCommand(command="broadcast", description="📢 Рассылка"),
+        BotCommand(command="queue", description="📦 Очередь жалоб"),
+        BotCommand(command="bugs", description="🐞 Список баг-репортов"),
+        BotCommand(command="dbinfo", description="🛠 Состояние БД"),
+    ]
+    try:
+        await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.set_my_commands(
+                    admin_commands, scope=BotCommandScopeChat(chat_id=admin_id),
+                )
+            except Exception as e:
+                logger.warning("Не смог установить admin-команды для %s: %s",
+                               admin_id, e)
+        logger.info("Команды бота зарегистрированы (default: %d, admin: %d).",
+                    len(public_commands), len(admin_commands))
+    except Exception:
+        logger.exception("Ошибка регистрации команд")
 
     logger.info("Запускаю long-polling. Для остановки нажмите Ctrl+C.")
     monitor_task = asyncio.create_task(status_monitor_loop(bot))

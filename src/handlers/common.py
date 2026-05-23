@@ -3,9 +3,9 @@ import logging
 import time
 from html import escape
 from aiogram import Router, types, F, Bot
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import State, StatesGroup, any_state
 
 from src.config import ADMIN_IDS, COOKIES_PATH
 from src.crypto import is_available as crypto_available, encrypt as crypto_encrypt
@@ -381,7 +381,29 @@ async def cmd_start(message: types.Message):
             "бот сам опубликует тему на форуме от имени общего аккаунта.\n\n"
             "В <b>📜 Мои жалобы</b> можно посмотреть свою историю."
         )
-    await message.answer(welcome_text, reply_markup=main_menu_keyboard(admin))
+    # Если есть незаконченный черновик — упомянем
+    try:
+        from src.database import get_draft as _get_draft
+        draft = await _get_draft(user_id)
+        if draft:
+            welcome_text += (
+                "\n\n📝 <i>У вас есть незаконченный черновик жалобы. "
+                "Откройте его командой /draft.</i>"
+            )
+    except Exception:
+        pass
+
+    sent = await message.answer(welcome_text, reply_markup=main_menu_keyboard(admin))
+    # Закрепляем главное меню чтобы юзер всегда видел его сверху чата
+    try:
+        await message.bot.pin_chat_message(
+            chat_id=message.chat.id,
+            message_id=sent.message_id,
+            disable_notification=True,
+        )
+    except Exception:
+        # В каналах/группах pin может быть запрещён или уже занят — не критично
+        pass
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
@@ -1020,3 +1042,69 @@ async def login_save_password_choice(message: types.Message, state: FSMContext):
         await message.answer(
             "Выберите кнопку: <b>💾 Сохранить пароль</b> или <b>🚫 Не сохранять</b>."
         )
+
+
+# ---------------- Глобальная отмена ----------------
+
+@router.message(Command("cancel"))
+@router.message(StateFilter(any_state), F.text.casefold() == "отмена")
+async def global_cancel(message: types.Message, state: FSMContext):
+    """Универсальный выход из любого FSM-состояния. Чистит state и
+    возвращает в главное меню. Работает даже если пользователь застрял."""
+    current_state = await state.get_state()
+
+    # Закрываем httpx-клиент если внутри 2FA-логина
+    if current_state and "LoginForm" in str(current_state):
+        data = await state.get_data()
+        twofa = data.get("twofa")
+        if twofa and twofa.get("client"):
+            try:
+                await twofa["client"].aclose()
+            except Exception:
+                pass
+
+    if current_state:
+        logger.info("Глобальный /cancel от %s — был в состоянии %s.",
+                    describe_user(message.from_user), current_state)
+        # Затираем все возможные секреты в FSM
+        await state.update_data(
+            _save_password=None, _password_temp=None, login=None,
+        )
+        await state.clear()
+        await message.answer(
+            "❌ Действие отменено. Возвращаюсь в главное меню.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+    else:
+        await message.answer(
+            "Вы и так не находитесь ни в каком сценарии 🙂",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+
+
+@router.message(Command("me"))
+async def cmd_me(message: types.Message):
+    """Показывает информацию о пользователе и его статистику."""
+    user = message.from_user
+    from src.database import get_user_complaints
+
+    complaints = await get_user_complaints(user.id)
+    accepted = sum(1 for c in complaints if c["status"] == "accepted")
+    rejected = sum(1 for c in complaints if c["status"] == "rejected")
+    pending = sum(1 for c in complaints if c["status"] == "pending")
+
+    role = "👑 Администратор" if is_admin(user.id) else "👤 Пользователь"
+
+    text = (
+        f"<b>Ваш профиль</b>\n\n"
+        f"🆔 <code>{user.id}</code>\n"
+        f"👤 {escape(user.full_name or '—')}\n"
+        f"{f'📛 @{escape(user.username)}' if user.username else ''}\n"
+        f"🛡 Роль: {role}\n\n"
+        f"<b>📊 Ваша статистика жалоб:</b>\n"
+        f"   📝 Всего: <b>{len(complaints)}</b>\n"
+        f"   ⏳ Ожидание: <b>{pending}</b>\n"
+        f"   ✅ Принято: <b>{accepted}</b>\n"
+        f"   ❌ Отклонено: <b>{rejected}</b>"
+    )
+    await message.answer(text)

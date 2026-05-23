@@ -53,12 +53,51 @@ async def cmd_stats(message: types.Message):
         for nick, count in s["top_targets"]:
             lines.append(f"   • <b>{escape(nick)}</b> — {count}")
 
+    if s.get("top_servers"):
+        lines.append("\n🌐 <b>Топ серверов:</b>")
+        for name, count in s["top_servers"]:
+            lines.append(f"   • <b>{escape(name)}</b> — {count}")
+
     if s["by_day"]:
         lines.append("\n📅 <b>По дням:</b>")
         for d, count in s["by_day"]:
             lines.append(f"   {escape(str(d))}: {count}")
 
     await message.answer("\n".join(lines))
+
+    # Графики — три картинки одна за одной
+    try:
+        from src.charts import (
+            render_complaints_by_day,
+            render_status_pie,
+            render_top_servers,
+        )
+        from aiogram.types import BufferedInputFile
+
+        if s.get("by_day"):
+            png = await render_complaints_by_day(s["by_day"])
+            await message.answer_photo(
+                BufferedInputFile(png, filename="by_day.png"),
+                caption="📅 Жалобы по дням",
+            )
+
+        if s["total"]:
+            png = await render_status_pie(
+                s["accepted"], s["rejected"], s["pending"],
+            )
+            await message.answer_photo(
+                BufferedInputFile(png, filename="status_pie.png"),
+                caption="📊 Распределение по статусам",
+            )
+
+        if s.get("top_servers"):
+            png = await render_top_servers(s["top_servers"])
+            await message.answer_photo(
+                BufferedInputFile(png, filename="top_servers.png"),
+                caption="🌐 Топ серверов",
+            )
+    except Exception:
+        logger.exception("Не удалось сгенерировать графики статистики")
 
 
 # ---------------- Рассылка ----------------

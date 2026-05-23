@@ -37,6 +37,9 @@ from src.database import (
     delete_user_template,
     recent_complaint_against,
     update_complaint_content,
+    save_draft,
+    get_draft,
+    delete_draft,
 )
 from src.handlers.common import (
     check_access, main_menu_keyboard, _menu_for, is_admin, account_owner_id,
@@ -617,6 +620,7 @@ async def process_target_nickname(message: types.Message, state: FSMContext):
     data = await state.get_data()
     key = data["category_key"]
     logger.debug("Шаг: получен ник цели «%s» (категория %s).", value, key)
+    await _autosave_draft(state, message.from_user.id)
 
     if key in NEEDS_DATE:
         await state.set_state(ComplaintForm.waiting_for_punishment_date)
@@ -720,6 +724,7 @@ async def process_summary(message: types.Message, state: FSMContext):
     await state.update_data(summary=value)
     await state.set_state(ComplaintForm.waiting_for_description)
     logger.debug("Шаг: получена краткая суть «%s».", value)
+    await _autosave_draft(state, message.from_user.id)
 
     template_description = data.get("template_description")
     if data["category_key"] == "appeals":
@@ -782,6 +787,7 @@ async def process_description(message: types.Message, state: FSMContext):
     await state.update_data(description=value)
     await state.set_state(ComplaintForm.waiting_for_proof)
     logger.debug("Шаг: получено описание (%d симв.).", len(value))
+    await _autosave_draft(state, message.from_user.id)
 
     from src.uploader import has_uploader
     if has_uploader():
@@ -1055,7 +1061,11 @@ async def process_confirm(message: types.Message, state: FSMContext):
             summary=data.get("summary"),
             category_key=data.get("category_key"),
             punishment_date=data.get("punishment_date"),
+            server_node_id=data.get("server_node_id"),
+            server_name=data.get("server_name"),
         )
+        # Жалоба отправлена — можно удалить черновик
+        await delete_draft(message.from_user.id)
 
         # Подбираем следующий свободный аккаунт — для удобства следующей жалобы
         next_acc = await find_available_account(owner_id)
@@ -1689,3 +1699,133 @@ async def _apply_edit(message: types.Message, state: FSMContext,
             )
         except Exception:
             pass
+
+
+# ---------------- Черновики жалоб ----------------
+
+async def _autosave_draft(state: FSMContext, telegram_id: int) -> None:
+    """Сохраняет текущее FSM-состояние как черновик в БД. Игнорирует ошибки."""
+    try:
+        data = await state.get_data()
+        current = await state.get_state()
+        await save_draft(telegram_id, data, str(current) if current else None)
+    except Exception:
+        logger.debug("autosave_draft failed", exc_info=True)
+
+
+@router.message(Command("draft"))
+async def cmd_draft(message: types.Message, state: FSMContext):
+    """Показывает черновик жалобы и предлагает продолжить или удалить."""
+    if not check_access(message.from_user.id):
+        return
+    draft = await get_draft(message.from_user.id)
+    if not draft:
+        await message.answer(
+            "📝 У вас нет сохранённого черновика жалобы.\n"
+            "Черновик создаётся автоматически при подаче — если случайно "
+            "закроете бота на середине, потом сможете продолжить."
+        )
+        return
+
+    data = draft.get("state_data", {})
+    step = draft.get("step", "")
+    target = data.get("target_nickname", "—")
+    server = data.get("server_name", "—")
+    summary = data.get("summary", "—")
+    description = (data.get("description", "") or "")[:120]
+    your_nick = data.get("your_nickname", "—")
+
+    # Какой следующий шаг — для подсказки
+    step_label = "?"
+    if "your_nickname" in step:
+        step_label = "ввод вашего ника"
+    elif "target_nickname" in step:
+        step_label = "ввод ника цели"
+    elif "punishment_date" in step:
+        step_label = "ввод даты наказания"
+    elif "summary" in step:
+        step_label = "ввод сути"
+    elif "description" in step:
+        step_label = "ввод описания"
+    elif "proof" in step:
+        step_label = "ввод доказательств"
+    elif "confirm" in step:
+        step_label = "подтверждение"
+    elif "category" in step:
+        step_label = "выбор категории"
+    elif "server" in step:
+        step_label = "выбор сервера"
+
+    text = (
+        f"📝 <b>Сохранён черновик жалобы</b>\n\n"
+        f"🕐 Обновлён: <code>{escape(str(draft.get('updated_at', '')))}</code>\n"
+        f"📍 Шаг: <i>{escape(step_label)}</i>\n\n"
+        f"<b>Сервер:</b> {escape(server)}\n"
+        f"<b>Ваш ник:</b> {escape(str(your_nick))}\n"
+        f"<b>Цель:</b> {escape(str(target))}\n"
+        f"<b>Суть:</b> {escape(str(summary))}\n"
+        f"<b>Описание:</b> {escape(description)}{'…' if len(data.get('description', '') or '') > 120 else ''}"
+    )
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text="📝 Продолжить с этого шага",
+            callback_data="draft_resume",
+        )],
+        [types.InlineKeyboardButton(
+            text="🗑 Удалить черновик",
+            callback_data="draft_delete",
+        )],
+    ])
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "draft_resume")
+async def draft_resume(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    draft = await get_draft(call.from_user.id)
+    if not draft:
+        await call.answer("Черновик не найден.", show_alert=True)
+        return
+
+    # Восстанавливаем state и переход на сохранённый шаг
+    await state.update_data(**draft["state_data"])
+    step = draft.get("step", "")
+    # Маппинг строки состояния обратно в State
+    state_map = {
+        "ComplaintForm:choosing_server": ComplaintForm.choosing_server,
+        "ComplaintForm:choosing_category": ComplaintForm.choosing_category,
+        "ComplaintForm:choosing_template": ComplaintForm.choosing_template,
+        "ComplaintForm:waiting_for_your_nickname": ComplaintForm.waiting_for_your_nickname,
+        "ComplaintForm:waiting_for_target_nickname": ComplaintForm.waiting_for_target_nickname,
+        "ComplaintForm:waiting_for_punishment_date": ComplaintForm.waiting_for_punishment_date,
+        "ComplaintForm:waiting_for_summary": ComplaintForm.waiting_for_summary,
+        "ComplaintForm:waiting_for_description": ComplaintForm.waiting_for_description,
+        "ComplaintForm:waiting_for_proof": ComplaintForm.waiting_for_proof,
+        "ComplaintForm:waiting_for_confirm": ComplaintForm.waiting_for_confirm,
+    }
+    target_state = state_map.get(step)
+    if not target_state:
+        await call.answer("Не удалось определить шаг черновика.", show_alert=True)
+        await delete_draft(call.from_user.id)
+        return
+    await state.set_state(target_state)
+    await call.answer("✅ Восстановлено")
+    await call.message.answer(
+        f"📝 Продолжаем с того же места. Введите данные для текущего шага.",
+        reply_markup=_cancel_kb(),
+    )
+
+
+@router.callback_query(F.data == "draft_delete")
+async def draft_del(call: types.CallbackQuery):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    await delete_draft(call.from_user.id)
+    try:
+        await call.message.edit_text("🗑 Черновик удалён.")
+    except Exception:
+        pass
+    await call.answer("Удалено")

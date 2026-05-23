@@ -48,6 +48,8 @@ async def init_db():
             ("summary", "ALTER TABLE complaints ADD COLUMN summary TEXT"),
             ("category_key", "ALTER TABLE complaints ADD COLUMN category_key TEXT"),
             ("punishment_date", "ALTER TABLE complaints ADD COLUMN punishment_date TEXT"),
+            ("server_node_id", "ALTER TABLE complaints ADD COLUMN server_node_id INTEGER"),
+            ("server_name", "ALTER TABLE complaints ADD COLUMN server_name TEXT"),
         ]:
             if col not in cols:
                 logger.info("Миграция: добавляю колонку '%s' в complaints.", col)
@@ -174,6 +176,17 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_queue_pending
                 ON complaint_queue(status, created_at)
         """)
+
+        # Черновики жалоб — снимок FSM-состояния, чтобы пользователь мог
+        # вернуться к незаконченной жалобе после рестарта бота.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS drafts (
+                telegram_id INTEGER PRIMARY KEY,
+                state_data TEXT NOT NULL,
+                step TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.commit()
     logger.info("База данных готова. Таблицы: complaints, servers, "
                 "complaint_categories, accounts.")
@@ -187,12 +200,15 @@ async def add_complaint(telegram_id: int, nickname: str, description: str,
                           your_nickname: str | None = None,
                           summary: str | None = None,
                           category_key: str | None = None,
-                          punishment_date: str | None = None) -> int:
+                          punishment_date: str | None = None,
+                          server_node_id: int | None = None,
+                          server_name: str | None = None) -> int:
     """Добавление записи о поданной жалобе. Возвращает id записи.
 
     Дополнительные поля (`your_nickname`, `summary`, `category_key`,
-    `punishment_date`) нужны чтобы при редактировании жалобы можно было
-    пересобрать корректный BB-код и заголовок.
+    `punishment_date`, `server_*`) нужны чтобы при редактировании жалобы
+    можно было пересобрать корректный BB-код и заголовок, а также для
+    статистики по серверам.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -200,19 +216,20 @@ async def add_complaint(telegram_id: int, nickname: str, description: str,
             INSERT INTO complaints
                 (telegram_id, nickname, description, proof_link,
                  forum_thread_url, status, notified_status, account_id,
-                 your_nickname, summary, category_key, punishment_date)
-            VALUES (?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?, ?)
+                 your_nickname, summary, category_key, punishment_date,
+                 server_node_id, server_name)
+            VALUES (?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?, ?, ?, ?)
             """,
             (telegram_id, nickname, description, proof_link,
              forum_thread_url, account_id, your_nickname, summary,
-             category_key, punishment_date),
+             category_key, punishment_date, server_node_id, server_name),
         )
         complaint_id = cur.lastrowid
         await db.commit()
     logger.info("Сохранил жалобу в БД: id=%s, telegram_id=%s, цель=«%s», "
-                "account_id=%s, ссылка: %s",
-                complaint_id, telegram_id, nickname, account_id,
-                forum_thread_url or "—")
+                "сервер=«%s», account_id=%s, ссылка: %s",
+                complaint_id, telegram_id, nickname, server_name or "—",
+                account_id, forum_thread_url or "—")
     await _trigger_backup()
     return complaint_id
 
@@ -1217,6 +1234,19 @@ async def get_stats(within_days: int = 7) -> dict:
         ) as cur:
             top_targets = await cur.fetchall()
 
+        # Топ-5 серверов по количеству жалоб (за период)
+        async with db.execute(
+            "SELECT server_name, COUNT(*) AS n FROM complaints "
+            "WHERE created_at >= datetime('now', ?) "
+            "AND server_name IS NOT NULL AND server_name != '' "
+            "GROUP BY server_name ORDER BY n DESC LIMIT 5",
+            (f"-{int(within_days)} days",),
+        ) as cur:
+            top_servers_rows = await cur.fetchall()
+        top_servers: list[tuple[str, int]] = [
+            (r[0], r[1]) for r in top_servers_rows
+        ]
+
         # Активность по дням (последние 7 дней)
         async with db.execute(
             "SELECT DATE(created_at) AS d, COUNT(*) FROM complaints "
@@ -1241,6 +1271,7 @@ async def get_stats(within_days: int = 7) -> dict:
         "pending": pending,
         "top_users": [(r[0], r[1]) for r in top_users],
         "top_targets": [(r[0], r[1]) for r in top_targets],
+        "top_servers": top_servers,
         "by_day": [(r[0], r[1]) for r in by_day],
         "queue_pending": queue_pending,
     }
@@ -1278,3 +1309,62 @@ async def count_complaints_by_status() -> dict:
         ) as cur:
             rows = await cur.fetchall()
             return {row[0]: row[1] for row in rows}
+
+
+# ---------- Черновики жалоб ----------
+
+async def save_draft(telegram_id: int, state_data: dict, step: str | None = None) -> None:
+    """Сохраняет/обновляет черновик жалобы пользователя."""
+    # Из state удаляем то, что не сериализуется (httpx clients и т.д.)
+    safe_data = {}
+    for k, v in (state_data or {}).items():
+        if k.startswith("_"):
+            continue
+        if k in ("twofa", "client", "_save_password", "_password_temp",
+                  "_creating_template_category", "_tpl_name", "_tpl_summary"):
+            continue
+        try:
+            _json.dumps(v)
+            safe_data[k] = v
+        except (TypeError, ValueError):
+            pass
+
+    payload = _json.dumps(safe_data, ensure_ascii=False)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO drafts (telegram_id, state_data, step, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                state_data = excluded.state_data,
+                step = excluded.step,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (telegram_id, payload, step),
+        )
+        await db.commit()
+
+
+async def get_draft(telegram_id: int) -> dict | None:
+    """Возвращает черновик пользователя {state_data, step, updated_at} или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT state_data, step, updated_at FROM drafts WHERE telegram_id = ?",
+            (telegram_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            try:
+                data = _json.loads(row[0])
+            except Exception:
+                return None
+            return {"state_data": data, "step": row[1], "updated_at": row[2]}
+
+
+async def delete_draft(telegram_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM drafts WHERE telegram_id = ?", (telegram_id,)
+        )
+        await db.commit()
