@@ -1215,7 +1215,7 @@ _STATUS_KEYWORDS = {
     ),
     "rejected": (
         "отклонен", "отклонён", "отклонено", "отклонена",
-        "отказ", "отказано",
+        "отказ", "отказано", "отказана",
         "не принят",
         "недостаточно",
         "истёк срок", "истек срок",
@@ -1225,8 +1225,11 @@ _STATUS_KEYWORDS = {
         "архив",
     ),
     "pending":  (
-        "ожидание", "ожидан", "новая", "новое",
-        "в работе", "рассматривается",
+        "ожидание", "ожидан",
+        "новая", "новое",
+        "в работе",
+        "рассматривается", "рассмотрении",
+        "на рассмотрении",
     ),
 }
 
@@ -1286,15 +1289,32 @@ async def fetch_complaint_status(
 
                 soup = _soup(html)
 
+                # Список фраз, которые гарантированно не являются префиксом
+                # темы (это плейсхолдеры/служебные подписи XenForo).
+                BLACKLIST = (
+                    "искать только в заголовках",
+                    "поиск",
+                    "filter by",
+                    "title only",
+                )
+
+                def _is_real_prefix(text: str) -> bool:
+                    if not text:
+                        return False
+                    if not (2 <= len(text) <= 40):
+                        return False
+                    lowered = text.lower().strip()
+                    return not any(b in lowered for b in BLACKLIST)
+
                 # XenForo пишет префикс ВНУТРИ заголовка темы:
                 #   <h1 class="p-title-value">
                 #     <a class="labelLink"><span class="label label--Red">Принято</span></a>
                 #     Bruce_Banner | nRP Drive
                 #   </h1>
-                # Поэтому ищем именно в .p-title-value, а не по всей странице,
-                # чтобы не зацепить плейсхолдеры формы поиска ("Искать только
-                # в заголовках") и другие label-элементы.
+                # Поэтому ищем именно в .p-title-value, а не по всей странице.
                 prefix_text = None
+                source = None  # для отладки откуда взяли префикс
+
                 title_block = soup.find(class_="p-title-value")
                 if title_block is None:
                     title_block = soup.find("h1", class_=re.compile(r"p-title|title"))
@@ -1307,8 +1327,9 @@ async def fetch_complaint_status(
                         "span", class_=re.compile(r"\blabel\b")
                     ):
                         text = span.get_text(strip=True)
-                        if text and 2 <= len(text) <= 40:
+                        if _is_real_prefix(text):
                             prefix_text = text
+                            source = "title.span.label"
                             break
 
                     # 2. <a class="labelLink"><span>...</span></a>
@@ -1317,32 +1338,39 @@ async def fetch_complaint_status(
                             "a", class_=re.compile(r"label")
                         ):
                             text = a.get_text(strip=True)
-                            if text and 2 <= len(text) <= 40:
+                            if _is_real_prefix(text):
                                 prefix_text = text
+                                source = "title.a.label"
                                 break
 
                     # 3. data-prefix-id у элементов внутри заголовка
                     if not prefix_text:
                         for el in title_block.find_all(attrs={"data-prefix-id": True}):
                             text = el.get_text(strip=True)
-                            if text and 2 <= len(text) <= 40:
+                            if _is_real_prefix(text):
                                 prefix_text = text
+                                source = "title.data-prefix-id"
                                 break
 
-                # 4. Запасной путь — meta og:title или window.__data
+                # 4. Запасной путь — meta og:title (XenForo туда тоже префикс
+                # пишет: <meta property="og:title" content="Принято - Bruce | DM">)
                 if not prefix_text:
                     og = soup.find("meta", attrs={"property": "og:title"})
                     if og and og.get("content"):
                         og_title = og["content"]
-                        # Префикс часто идёт первым словом в скобках/перед двоеточием
-                        m = re.match(r"^\s*\[?([А-Яа-яЁё]{3,30})\]?\s*[\|:—]",
-                                     og_title)
+                        # Префикс часто идёт первым словом перед разделителем
+                        m = re.match(
+                            r"^\s*([А-Яа-яЁё][А-Яа-яЁё\s]{2,30}?)\s*[\-—\|:]",
+                            og_title,
+                        )
                         if m:
                             candidate = m.group(1).strip()
-                            if 2 <= len(candidate) <= 40:
+                            if _is_real_prefix(candidate):
                                 prefix_text = candidate
+                                source = "og:title"
 
-                logger.debug("Тема %s: префикс=%r", thread_url, prefix_text)
+                logger.info("Тема %s: префикс=%r (источник: %s)",
+                             thread_url, prefix_text, source)
 
                 if prefix_text:
                     lowered = prefix_text.lower()
