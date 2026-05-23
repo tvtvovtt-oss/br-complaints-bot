@@ -45,7 +45,8 @@ def status_label(status: str) -> str:
     return STATUS_LABELS.get(status, f"❔ {status}")
 
 
-async def _notify_user(bot: Bot, complaint: dict, new_status: str) -> bool:
+async def _notify_user(bot: Bot, complaint: dict, new_status: str,
+                        admin_comment: str | None = None) -> bool:
     """Шлёт уведомление автору жалобы. Возвращает True если доставлено."""
     label = status_label(new_status)
     nickname = escape(complaint.get("nickname", "?"))
@@ -54,30 +55,40 @@ async def _notify_user(bot: Bot, complaint: dict, new_status: str) -> bool:
         f"\n🔗 <a href=\"{escape(url)}\">Открыть тему</a>" if url else ""
     )
 
+    comment_part = ""
+    if admin_comment:
+        comment_part = (
+            f"\n\n📝 <b>Комментарий администратора:</b>\n"
+            f"<blockquote>{escape(admin_comment)}</blockquote>"
+        )
+
     if new_status == "accepted":
         text = (
             f"🎉 <b>Ваша жалоба на «{nickname}» принята!</b>\n\n"
-            f"Статус: <b>{label}</b>{link_part}"
+            f"Статус: <b>{label}</b>{link_part}{comment_part}"
         )
         effect = EFFECT_CONFETTI
     elif new_status == "rejected":
         text = (
             f"😔 <b>Жалоба на «{nickname}» отклонена.</b>\n\n"
-            f"Статус: <b>{label}</b>{link_part}\n\n"
-            "<i>Возможные причины: недостаточно доказательств, "
-            "истёк срок подачи, нарушены правила оформления.</i>"
+            f"Статус: <b>{label}</b>{link_part}{comment_part}"
         )
+        if not admin_comment:
+            text += (
+                "\n\n<i>Возможные причины: недостаточно доказательств, "
+                "истёк срок подачи, нарушены правила оформления.</i>"
+            )
         effect = None
     elif new_status == "closed":
         text = (
             f"🔒 <b>Тема жалобы на «{nickname}» закрыта.</b>\n\n"
-            f"Статус: <b>{label}</b>{link_part}"
+            f"Статус: <b>{label}</b>{link_part}{comment_part}"
         )
         effect = None
     else:
         text = (
             f"ℹ️ <b>Изменился статус жалобы на «{nickname}».</b>\n\n"
-            f"Статус: <b>{label}</b>{link_part}"
+            f"Статус: <b>{label}</b>{link_part}{comment_part}"
         )
         effect = None
 
@@ -115,6 +126,7 @@ async def _check_once(bot: Bot) -> None:
     for i, comp in enumerate(complaints):
         new_status = None
         prefix_text = None
+        admin_comment = None
         try:
             cookies_to_try: list[dict | None] = []
 
@@ -139,24 +151,26 @@ async def _check_once(bot: Bot) -> None:
                 cookies_to_try.append(None)
 
             # Перебираем аккаунты до тех пор, пока не найдём такой, под
-            # которым форум вернул префикс. Если все аккаунты вернули
-            # фолбэчный pending без префикса — оставляем pending.
+            # которым форум вернул префикс.
             for cookies in cookies_to_try:
-                status_attempt, prefix_attempt = await fetch_complaint_status(
-                    comp["forum_thread_url"], cookies=cookies,
+                status_attempt, prefix_attempt, comment_attempt = (
+                    await fetch_complaint_status(
+                        comp["forum_thread_url"], cookies=cookies,
+                    )
                 )
-                # Если получили префикс — это автор/админ темы, доверяем.
                 if prefix_attempt:
-                    new_status, prefix_text = status_attempt, prefix_attempt
+                    new_status = status_attempt
+                    prefix_text = prefix_attempt
+                    admin_comment = comment_attempt
                     break
-                # Если получили статус, но без префикса (например, "closed"
-                # из-за lock-icon) — тоже принимаем.
                 if status_attempt and status_attempt != "pending":
-                    new_status, prefix_text = status_attempt, prefix_attempt
+                    new_status = status_attempt
+                    prefix_text = prefix_attempt
+                    admin_comment = comment_attempt
                     break
-                # Запоминаем хоть что-то на случай если ни один аккаунт
-                # не дал префикс — оставим последнее значение.
-                new_status, prefix_text = status_attempt, prefix_attempt
+                new_status = status_attempt
+                prefix_text = prefix_attempt
+                admin_comment = comment_attempt
 
         except Exception:
             logger.exception("Ошибка при проверке жалобы id=%s", comp["id"])
@@ -177,7 +191,7 @@ async def _check_once(bot: Bot) -> None:
         # Шлём уведомление если статус финальный и пользователь о нём ещё не знал
         notified_status = comp.get("notified_status") or "pending"
         if new_status != notified_status and new_status in ("accepted", "rejected", "closed"):
-            ok = await _notify_user(bot, comp, new_status)
+            ok = await _notify_user(bot, comp, new_status, admin_comment)
             if ok:
                 await mark_complaint_notified(comp["id"], new_status)
                 notified += 1

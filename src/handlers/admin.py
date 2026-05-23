@@ -373,7 +373,7 @@ async def cmd_check_url(message: types.Message):
 
     # Сначала «как обычно» — через нашу функцию
     try:
-        status, prefix = await fetch_complaint_status(url, cookies=cookies)
+        status, prefix, comment = await fetch_complaint_status(url, cookies=cookies)
     except Exception as e:
         logger.exception("checkurl failed")
         await status_msg.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>")
@@ -430,12 +430,22 @@ async def cmd_check_url(message: types.Message):
         raw_info.append(f"raw fetch error: {escape(str(e))}")
 
     raw_block = "\n".join(raw_info) if raw_info else "—"
+    comment_block = ""
+    if comment:
+        # Обрезаем чтобы влезло в Telegram
+        preview = comment if len(comment) <= 500 else comment[:500] + "..."
+        comment_block = (
+            f"\n\n💬 <b>Комментарий админа:</b>\n"
+            f"<blockquote>{escape(preview)}</blockquote>"
+        )
+
     await status_msg.edit_text(
         f"🔍 <b>Результат:</b>\n\n"
         f"URL: <code>{escape(url)}</code>\n"
         f"От имени: <b>{escape(used_acc_name)}</b>\n"
         f"Префикс на форуме: <code>{escape(str(prefix or '—'))}</code>\n"
-        f"Распознанный статус: <code>{escape(str(status or '—'))}</code>\n\n"
+        f"Распознанный статус: <code>{escape(str(status or '—'))}</code>"
+        f"{comment_block}\n\n"
         f"<b>RAW диагностика:</b>\n{raw_block}"
     )
 

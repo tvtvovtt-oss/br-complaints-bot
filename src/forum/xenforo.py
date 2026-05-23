@@ -981,6 +981,40 @@ def _extract_node_id(href: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
+def _extract_last_admin_comment(soup) -> Optional[str]:
+    """Извлекает текст последнего поста в теме.
+
+    На XenForo после вердикта админ обычно пишет ответ типа «Жалоба
+    одобрена/отклонена потому что...». Это последняя
+    <article class="message"> в списке постов; тело — в
+    <div class="bbWrapper">.
+
+    Если в теме всего один пост (только сам OP), комментария админа нет —
+    возвращаем None.
+    """
+    try:
+        articles = soup.find_all("article", class_=re.compile(r"\bmessage\b"))
+        if not articles or len(articles) <= 1:
+            return None
+
+        last = articles[-1]
+        body = last.find("div", class_=re.compile(r"bbWrapper"))
+        if not body:
+            return None
+
+        text = body.get_text(" ", strip=True)
+        if not text:
+            return None
+
+        # Обрезаем чтобы не лопнуть лимит Telegram-сообщения
+        if len(text) > 1500:
+            text = text[:1500] + "..."
+        return text
+    except Exception:
+        logger.exception("Ошибка извлечения комментария админа")
+        return None
+
+
 def _classify_category(text: str) -> Optional[str]:
     """Классифицирует название подраздела жалоб по ключевым словам."""
     lower = text.lower()
@@ -1236,18 +1270,21 @@ _STATUS_KEYWORDS = {
 async def fetch_complaint_status(
     thread_url: str,
     cookies: dict | None = None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     """Заходит на страницу темы и определяет её статус.
 
     Если передан `cookies` — использует именно их (актуально когда жалобу
     подавал не активный аккаунт; на BR темы видят только автор и модераторы).
     Иначе берёт активные куки из cookies.json.
 
-    Возвращает (status, prefix_text). Status — один из 'pending'/'accepted'/
-    'rejected'/'closed' или None если не удалось определить.
+    Возвращает (status, prefix_text, admin_comment).
+    - status: 'pending'/'accepted'/'rejected'/'closed' или None
+    - prefix_text: текст префикса с форума (для логов)
+    - admin_comment: текст последнего ответа админа в теме (если статус
+      финальный) — будет показан в уведомлении пользователю.
     """
     if not thread_url:
-        return None, None
+        return None, None, None
 
     # Создаём клиент: либо со специальными куками, либо стандартный
     if cookies is not None:
@@ -1267,10 +1304,10 @@ async def fetch_complaint_status(
                 if r.status_code == 403:
                     logger.info("Тема %s — HTTP 403 (нет прав видеть тему).",
                                 thread_url)
-                    return None, None
+                    return None, None, None
                 if r.status_code != 200:
                     logger.debug("Тема %s — HTTP %s.", thread_url, r.status_code)
-                    return None, None
+                    return None, None, None
                 html = r.text
                 if "vddosw3data.js" in html or "slowAES" in html:
                     fresh = await _solve_ddos_guard()
@@ -1284,7 +1321,7 @@ async def fetch_complaint_status(
                 if "/login/" in str(r.url) or "log-in" in html.lower()[:5000]:
                     logger.info("Тема %s — куки не пускают (редирект на login).",
                                 thread_url)
-                    return None, None
+                    return None, None, None
 
                 soup = _soup(html)
 
@@ -1371,28 +1408,35 @@ async def fetch_complaint_status(
                 logger.info("Тема %s: префикс=%r (источник: %s)",
                              thread_url, prefix_text, source)
 
+                # Достаём последний пост (если он от админа/модератора —
+                # это комментарий по жалобе, его и пришлём пользователю).
+                admin_comment = _extract_last_admin_comment(soup)
+
                 if prefix_text:
                     lowered = prefix_text.lower()
                     for status, keywords in _STATUS_KEYWORDS.items():
                         if any(k in lowered for k in keywords):
-                            return status, prefix_text
+                            # Для нефинальных статусов (pending) комментарий
+                            # не нужен — нечего пользователю слать
+                            comment = admin_comment if status != "pending" else None
+                            return status, prefix_text, comment
                     logger.info("Тема %s: префикс «%s» не распознан, считаю pending.",
                                  thread_url, prefix_text)
-                    return "pending", prefix_text
+                    return "pending", prefix_text, None
 
                 # Префикса нет — может тема уже закрыта (lock-icon)
                 if soup.find(class_=re.compile(r"is-locked|threadClosed|locked")):
-                    return "closed", None
+                    return "closed", None, admin_comment
 
-                return "pending", None
+                return "pending", None, None
 
             except httpx.RequestError as e:
                 logger.warning("Сетевая ошибка при проверке статуса темы %s: %s",
                                thread_url, e)
-                return None, None
+                return None, None, None
             except Exception as e:
                 logger.exception("Ошибка проверки статуса темы %s: %s", thread_url, e)
-                return None, None
+                return None, None, None
     finally:
         if is_owned_session:
             # _session() сам вызывает aclose, для своего клиента — вручную
@@ -1613,5 +1657,6 @@ async def edit_thread_post(thread_url: str, new_message: str,
         except Exception as e:
             logger.exception("Непредвиденная ошибка редактирования темы")
             return False, f"Ошибка: {e}"
+
 
 
