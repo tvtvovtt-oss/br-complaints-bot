@@ -1423,21 +1423,37 @@ async def utpl_del(call: types.CallbackQuery):
         await call.answer("Шаблон не найден.", show_alert=True)
         return
 
-    user_tpls = await list_user_templates(call.from_user.id, "players")
+    # Перебираем все категории, как в cmd_templates — иначе при удалении
+    # шаблона из admins/leaders/appeals список после обновления был бы пуст
+    # или показывал бы только players.
+    all_categories = ["players", "admins", "leaders", "appeals"]
+    user_tpls: list[dict] = []
+    for cat in all_categories:
+        for ut in await list_user_templates(call.from_user.id, cat):
+            ut["category_key"] = cat
+            user_tpls.append(ut)
+
     if not user_tpls:
-        await call.message.edit_text(
-            "📋 У вас не осталось своих шаблонов.",
-        )
+        try:
+            await call.message.edit_text("📋 У вас не осталось своих шаблонов.")
+        except Exception:
+            pass
         await call.answer("🗑 Удалён", show_alert=False)
         return
 
     rows = [[types.InlineKeyboardButton(
         text=f"🗑 {ut['name']}", callback_data=f"utpl_del:{ut['id']}",
     )] for ut in user_tpls]
+
+    cat_label = {
+        "players": "🎮 игроки", "admins": "🛡 админы",
+        "leaders": "👑 лидеры", "appeals": "⚖️ обжалования",
+    }
     lines = ["⭐ <b>Ваши шаблоны жалоб:</b>\n"]
     for ut in user_tpls:
         lines.append(
-            f"<b>{escape(ut['name'])}</b>\n"
+            f"<b>{escape(ut['name'])}</b> "
+            f"<i>({cat_label.get(ut.get('category_key'), '?')})</i>\n"
             f"   <i>Суть:</i> <code>{escape(ut['summary'])}</code>\n"
             f"   <i>Описание:</i> {escape(ut['description'][:120])}"
             f"{'…' if len(ut['description']) > 120 else ''}"
