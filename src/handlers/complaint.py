@@ -802,10 +802,97 @@ async def process_description(message: types.Message, state: FSMContext):
     await state.update_data(description=value)
     await state.set_state(ComplaintForm.waiting_for_proof)
     logger.debug("Шаг: получено описание (%d симв.).", len(value))
+
+    from src.uploader import has_uploader
+    if has_uploader():
+        proof_hint = (
+            "🔗 <b>Доказательства</b>\n\n"
+            "📸 <b>Можно прислать скриншот картинкой</b> — бот сам зальёт его "
+            "на imgbb.com и подставит ссылку.\n\n"
+            "Либо вставьте ссылки на YouTube/Imgur/Yapix через пробел или запятую.\n\n"
+            "<i>Загрузка в ВКонтакте/Одноклассники запрещена правилами форума.</i>"
+        )
+    else:
+        proof_hint = (
+            "🔗 <b>Доказательства</b> (ссылки на YouTube/Imgur/Yapix и т.д. через пробел или запятую):\n\n"
+            "<i>Загрузка в ВКонтакте/Одноклассники запрещена правилами форума.</i>"
+        )
+    await message.answer(proof_hint, reply_markup=_cancel_kb())
+
+
+@router.message(ComplaintForm.waiting_for_proof, F.photo)
+async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bot):
+    """Принимает скриншот, автозагружает на imgbb и подставляет ссылку."""
+    if not check_access(message.from_user.id):
+        return
+
+    from src.uploader import has_uploader, upload_image
+    if not has_uploader():
+        await message.answer(
+            "📷 Картинки автозагружаются только если задан "
+            "<code>IMGBB_API_KEY</code>. Сейчас он не настроен — "
+            "пришлите ссылку текстом.",
+            reply_markup=_cancel_kb(),
+        )
+        return
+
+    status_msg = await message.answer("⏳ Загружаю скриншот на imgbb...")
+
+    try:
+        # Берём самое большое фото из присланных миниатюр
+        file_id = message.photo[-1].file_id
+        file_info = await bot.get_file(file_id)
+        file_bytes_io = await bot.download_file(file_info.file_path)
+        image_bytes = file_bytes_io.read()
+    except Exception as e:
+        logger.exception("Не удалось скачать фото из Telegram: %s", e)
+        await status_msg.edit_text(
+            "❌ Не удалось скачать скриншот из Telegram. "
+            "Попробуйте ещё раз или пришлите ссылку текстом."
+        )
+        return
+
+    if len(image_bytes) > 32 * 1024 * 1024:
+        await status_msg.edit_text(
+            "❌ Файл больше 32 МБ — imgbb не примет. "
+            "Пришлите файл меньше или вставьте ссылку текстом."
+        )
+        return
+
+    ok, result = await upload_image(image_bytes, filename=f"proof_{message.from_user.id}.jpg")
+    if not ok:
+        logger.warning("Загрузка на imgbb не удалась: %s", result)
+        await status_msg.edit_text(
+            f"❌ <b>Не удалось загрузить скриншот.</b>\n"
+            f"<i>{escape(str(result))}</i>\n\n"
+            "Попробуйте ещё раз или вставьте ссылку текстом."
+        )
+        return
+
+    # Сохраняем накопленные ссылки. Если присылают несколько фото подряд —
+    # просто склеиваем через пробел.
+    data = await state.get_data()
+    existing = (data.get("_uploaded_links") or "").strip()
+    new_value = (existing + " " + result).strip() if existing else result
+    await state.update_data(_uploaded_links=new_value)
+
+    await status_msg.edit_text(
+        f"✅ Загружено: <a href=\"{escape(result)}\">{escape(result)}</a>\n\n"
+        "Можете прислать ещё скриншот, либо нажмите кнопку «✅ Использовать загруженное» "
+        "или пришлите дополнительные ссылки текстом.",
+        disable_web_page_preview=True,
+    )
+
+    use_kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="✅ Использовать загруженное")],
+            [types.KeyboardButton(text="❌ Отмена")],
+        ],
+        resize_keyboard=True,
+    )
     await message.answer(
-        "🔗 <b>Доказательства</b> (ссылки на YouTube/Imgur/Yapix и т.д. через пробел или запятую):\n\n"
-        "<i>Загрузка в ВКонтакте/Одноклассники запрещена правилами форума.</i>",
-        reply_markup=_cancel_kb(),
+        f"<b>Накоплено ссылок:</b> <code>{escape(new_value)}</code>",
+        reply_markup=use_kb,
     )
 
 
@@ -816,18 +903,36 @@ async def process_proof(message: types.Message, state: FSMContext):
     if await _cancel_via_text(message, state):
         return
 
-    ok, value = validate_proof(message.text or "")
-    if not ok:
-        logger.info("Валидация доказательств от %s не прошла: %s",
-                    describe_user(message.from_user), value)
-        await message.answer(
-            f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
-            reply_markup=_cancel_kb(),
-        )
-        return
+    text = (message.text or "").strip()
+    data = await state.get_data()
+
+    # Если пользователь нажал кнопку "✅ Использовать загруженное" — берём
+    # накопленные ссылки из state
+    if text == "✅ Использовать загруженное":
+        accumulated = (data.get("_uploaded_links") or "").strip()
+        if not accumulated:
+            await message.answer(
+                "Сначала пришлите хотя бы один скриншот картинкой.",
+                reply_markup=_cancel_kb(),
+            )
+            return
+        value = accumulated
+    else:
+        # Если в state уже накоплены загруженные ссылки — добавим к новым
+        accumulated = (data.get("_uploaded_links") or "").strip()
+        combined = (accumulated + " " + text).strip() if accumulated else text
+
+        ok, value = validate_proof(combined)
+        if not ok:
+            logger.info("Валидация доказательств от %s не прошла: %s",
+                        describe_user(message.from_user), value)
+            await message.answer(
+                f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+                reply_markup=_cancel_kb(),
+            )
+            return
 
     await state.update_data(proof_link=value)
-    data = await state.get_data()
     logger.debug("Шаг: получены доказательства (%d симв.). Готовлю превью.", len(value))
 
     bb_code = build_body(
