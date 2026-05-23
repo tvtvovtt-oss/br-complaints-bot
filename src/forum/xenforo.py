@@ -1286,51 +1286,60 @@ async def fetch_complaint_status(
 
                 soup = _soup(html)
 
-                # Несколько способов найти текст префикса — XenForo на разных
-                # форумах рендерит его по-разному.
+                # XenForo пишет префикс ВНУТРИ заголовка темы:
+                #   <h1 class="p-title-value">
+                #     <a class="labelLink"><span class="label label--Red">Принято</span></a>
+                #     Bruce_Banner | nRP Drive
+                #   </h1>
+                # Поэтому ищем именно в .p-title-value, а не по всей странице,
+                # чтобы не зацепить плейсхолдеры формы поиска ("Искать только
+                # в заголовках") и другие label-элементы.
                 prefix_text = None
+                title_block = soup.find(class_="p-title-value")
+                if title_block is None:
+                    title_block = soup.find("h1", class_=re.compile(r"p-title|title"))
+                if title_block is None:
+                    title_block = soup.find("h1")
 
-                # 1. Стандартный <span class="label labelLink">...</span>
-                for span in soup.find_all("span", class_=re.compile(r"\blabel\b")):
-                    text = span.get_text(strip=True)
-                    if text and 2 <= len(text) <= 40:
-                        prefix_text = text
-                        break
-
-                # 2. <a class="labelLink"><span class="label">...</span></a>
-                if not prefix_text:
-                    for a in soup.find_all("a", class_=re.compile(r"label")):
-                        text = a.get_text(strip=True)
+                if title_block is not None:
+                    # 1. <span class="label ...">префикс</span> внутри h1
+                    for span in title_block.find_all(
+                        "span", class_=re.compile(r"\blabel\b")
+                    ):
+                        text = span.get_text(strip=True)
                         if text and 2 <= len(text) <= 40:
                             prefix_text = text
                             break
 
-                # 3. data-prefix-id у элементов
-                if not prefix_text:
-                    for el in soup.find_all(attrs={"data-prefix-id": True}):
-                        text = el.get_text(strip=True)
-                        if text and 2 <= len(text) <= 40:
-                            prefix_text = text
-                            break
+                    # 2. <a class="labelLink"><span>...</span></a>
+                    if not prefix_text:
+                        for a in title_block.find_all(
+                            "a", class_=re.compile(r"label")
+                        ):
+                            text = a.get_text(strip=True)
+                            if text and 2 <= len(text) <= 40:
+                                prefix_text = text
+                                break
 
-                # 4. .prefix или .prefixText
-                if not prefix_text:
-                    el = soup.find(class_=re.compile(r"\bprefix\b|prefixText"))
-                    if el:
-                        txt = el.get_text(strip=True)
-                        if txt and 2 <= len(txt) <= 40:
-                            prefix_text = txt
+                    # 3. data-prefix-id у элементов внутри заголовка
+                    if not prefix_text:
+                        for el in title_block.find_all(attrs={"data-prefix-id": True}):
+                            text = el.get_text(strip=True)
+                            if text and 2 <= len(text) <= 40:
+                                prefix_text = text
+                                break
 
-                # 5. Регекспом по тегу <title>
+                # 4. Запасной путь — meta og:title или window.__data
                 if not prefix_text:
-                    title_tag = soup.find("title")
-                    if title_tag:
-                        title_text = title_tag.get_text()
-                        m = re.match(r"^\s*\[?([^\]\|:]{2,30})[\]\|:]", title_text)
+                    og = soup.find("meta", attrs={"property": "og:title"})
+                    if og and og.get("content"):
+                        og_title = og["content"]
+                        # Префикс часто идёт первым словом в скобках/перед двоеточием
+                        m = re.match(r"^\s*\[?([А-Яа-яЁё]{3,30})\]?\s*[\|:—]",
+                                     og_title)
                         if m:
                             candidate = m.group(1).strip()
-                            if ("форум" not in candidate.lower()
-                                    and "black" not in candidate.lower()):
+                            if 2 <= len(candidate) <= 40:
                                 prefix_text = candidate
 
                 logger.debug("Тема %s: префикс=%r", thread_url, prefix_text)
