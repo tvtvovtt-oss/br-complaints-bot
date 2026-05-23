@@ -438,3 +438,49 @@ async def cmd_check_url(message: types.Message):
         f"Распознанный статус: <code>{escape(str(status or '—'))}</code>\n\n"
         f"<b>RAW диагностика:</b>\n{raw_block}"
     )
+
+
+@router.message(Command("dbinfo"))
+async def cmd_db_info(message: types.Message):
+    """Диагностика: сколько записей в каждой таблице БД."""
+    if not is_admin(message.from_user.id):
+        return
+    import aiosqlite
+    from src.config import DB_PATH
+
+    tables = [
+        "complaints", "accounts", "servers", "complaint_categories",
+        "user_templates", "bug_reports", "complaint_queue",
+    ]
+    lines = [f"📊 <b>Состояние БД</b>\n<code>{escape(str(DB_PATH))}</code>\n"]
+    async with aiosqlite.connect(DB_PATH) as db:
+        for t in tables:
+            try:
+                async with db.execute(f"SELECT COUNT(*) FROM {t}") as cur:
+                    row = await cur.fetchone()
+                    n = row[0] if row else 0
+                lines.append(f"<code>{t}</code>: <b>{n}</b>")
+            except Exception as e:
+                lines.append(f"<code>{t}</code>: ❌ {escape(str(e))}")
+
+        # Топ-5 жалоб
+        try:
+            async with db.execute(
+                "SELECT id, telegram_id, nickname, status, forum_thread_url "
+                "FROM complaints ORDER BY id DESC LIMIT 5"
+            ) as cur:
+                rows = await cur.fetchall()
+            if rows:
+                lines.append("\n<b>Последние жалобы:</b>")
+                for r in rows:
+                    has_url = "🔗" if r[4] else "—"
+                    lines.append(
+                        f"   #{r[0]} • от {r[1]} • <b>{escape(r[2])}</b> "
+                        f"• <code>{r[3]}</code> {has_url}"
+                    )
+            else:
+                lines.append("\n<i>complaints пуста</i>")
+        except Exception:
+            pass
+
+    await message.answer("\n".join(lines))
