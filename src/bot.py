@@ -22,6 +22,13 @@ from src.handlers import common, complaint, bugreport
 from src.logger import setup_logging
 from src.middleware import ThrottleMiddleware, CleanupMiddleware
 from src.status_monitor import status_monitor_loop
+from src.storage_backup import (
+    is_enabled as backup_is_enabled,
+    restore_db_from_channel,
+    force_backup,
+    set_bot as set_backup_bot,
+    periodic_backup_loop,
+)
 
 # Настраиваем логирование до создания любых дочерних логгеров
 setup_logging()
@@ -48,10 +55,6 @@ async def main():
             _ADMIN_IDS_RAW,
         )
     logger.info("=" * 60)
-
-    logger.info("Инициализирую базу данных...")
-    await init_db()
-    logger.info("База данных готова к работе.")
 
     logger.info("Создаю экземпляр бота и диспетчера aiogram...")
     bot = Bot(
@@ -81,21 +84,50 @@ async def main():
         logger.error("Не удалось авторизоваться в Telegram: %s", e)
         raise
 
+    # Регистрируем bot в модуле бэкапа — теперь хендлеры могут вызывать
+    # schedule_backup() без аргументов.
+    set_backup_bot(bot)
+
+    # Восстановление БД из канала (если включён бэкап и локальной БД нет).
+    # ДО init_db, чтобы не затереть восстановленную базу пустой схемой.
+    if backup_is_enabled():
+        try:
+            await restore_db_from_channel(bot)
+        except Exception:
+            logger.exception("Ошибка при восстановлении БД из канала — продолжаю без.")
+    else:
+        logger.info("Бэкап в Telegram-канал не настроен (STORAGE_CHANNEL_ID пуст).")
+
+    logger.info("Инициализирую базу данных...")
+    await init_db()
+    logger.info("База данных готова к работе.")
+
     logger.info("Удаляю webhook и сбрасываю накопившиеся обновления...")
     await bot.delete_webhook(drop_pending_updates=True)
 
     logger.info("Запускаю long-polling. Для остановки нажмите Ctrl+C.")
     monitor_task = asyncio.create_task(status_monitor_loop(bot))
     logger.info("Фоновая задача мониторинга статусов жалоб запущена.")
+    backup_task = None
+    if backup_is_enabled():
+        backup_task = asyncio.create_task(periodic_backup_loop(bot))
+        logger.info("Фоновая задача периодического бэкапа БД запущена.")
     try:
         await dp.start_polling(bot)
     finally:
-        logger.info("Останавливаю фоновый мониторинг...")
-        monitor_task.cancel()
+        logger.info("Делаю финальный бэкап БД перед остановкой...")
         try:
-            await monitor_task
-        except (asyncio.CancelledError, Exception):
-            pass
+            await force_backup(bot)
+        except Exception:
+            logger.exception("Финальный бэкап не удался.")
+        logger.info("Останавливаю фоновые задачи...")
+        for task in (monitor_task, backup_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         logger.info("Закрываю HTTP-сессию бота...")
         await bot.session.close()
         logger.info("Сессия закрыта. Завершение работы.")

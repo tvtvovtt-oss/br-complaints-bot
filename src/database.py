@@ -5,6 +5,17 @@ from src.config import DB_PATH
 logger = logging.getLogger(__name__)
 
 
+# Триггер фонового бэкапа в Telegram-канал. Импортируется лениво, чтобы
+# избежать циклического импорта (storage_backup → aiogram → ...).
+async def _trigger_backup() -> None:
+    try:
+        from src.storage_backup import schedule_backup
+        await schedule_backup()
+    except Exception:
+        # Бэкап не должен ломать основные операции — глушим всё
+        logger.debug("trigger_backup failed", exc_info=True)
+
+
 async def init_db():
     """Инициализация базы данных и создание таблиц."""
     logger.info("Инициализирую SQLite-базу данных: %s", DB_PATH)
@@ -149,6 +160,7 @@ async def add_complaint(telegram_id: int, nickname: str, description: str, proof
         await db.commit()
     logger.info("Сохранил жалобу в БД: id=%s, telegram_id=%s, цель=«%s», ссылка: %s",
                 complaint_id, telegram_id, nickname, forum_thread_url or "—")
+    await _trigger_backup()
     return complaint_id
 
 
@@ -366,7 +378,9 @@ async def upsert_account(telegram_id: int, username: str, login: str | None,
             (telegram_id, username),
         ) as cur:
             row = await cur.fetchone()
-            return row[0] if row else 0
+            account_id = row[0] if row else 0
+    await _trigger_backup()
+    return account_id
 
 
 async def list_accounts(telegram_id: int) -> list[dict]:
