@@ -37,7 +37,7 @@ def _init_fernet() -> None:
         return
 
     try:
-        from cryptography.fernet import Fernet, InvalidToken  # noqa: F401
+        from cryptography.fernet import Fernet
     except ImportError:
         logger.error("Пакет cryptography не установлен.")
         return

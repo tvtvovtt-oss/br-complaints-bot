@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib import dates as mdates  # noqa: E402
 
 
 def _set_dark_theme() -> None:

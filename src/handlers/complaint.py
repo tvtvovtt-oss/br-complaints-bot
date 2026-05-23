@@ -24,28 +24,26 @@ from src.database import (
     get_servers,
     get_complaint_categories,
     get_active_account,
+    get_account,
     update_account_cookies,
     find_available_account,
-    claim_available_account,
-    release_account_cooldown,
     set_account_cooldown,
     set_active_account,
-    list_accounts,
     list_user_templates,
     get_user_template,
     add_user_template,
     delete_user_template,
-    recent_complaint_against,
     update_complaint_content,
     save_draft,
     get_draft,
     delete_draft,
+    enqueue_complaint,
 )
 from src.handlers.common import (
-    check_access, main_menu_keyboard, _menu_for, is_admin, account_owner_id,
+    check_access, _menu_for, is_admin, account_owner_id,
 )
 from src.logger import describe_user
-from src.effects import EFFECT_CONFETTI, EFFECT_HEART
+from src.effects import EFFECT_CONFETTI
 from src.forum.xenforo import apply_account_cookies, load_cookies
 from src.status_monitor import status_label
 from src.validation import (
@@ -481,7 +479,7 @@ async def tpl_name(message: types.Message, state: FSMContext):
     await state.set_state(TemplateForm.waiting_for_summary)
     await message.answer(
         "Теперь введите <b>краткую суть</b> для заголовка темы "
-        "(пример: <code>nRP Drive</code>):",
+        "(пример: <code>DM</code>):",
         reply_markup=_cancel_kb(),
     )
 
@@ -653,7 +651,7 @@ async def _ask_summary(message: types.Message, key: str, state: FSMContext):
     else:
         prompt = (
             "🏷 <b>Краткая суть жалобы</b> (для заголовка темы)\n"
-            "Например: <code>nRP Drive</code>"
+            "Например: <code>DM</code>"
         )
 
     if template_summary:
@@ -976,7 +974,6 @@ async def process_enqueue(message: types.Message, state: FSMContext):
     освободится свободный аккаунт. Полезно когда все аккаунты в кулдауне."""
     if not check_access(message.from_user.id):
         return
-    from src.database import enqueue_complaint
     data = await state.get_data()
     qid = await enqueue_complaint(
         telegram_id=message.from_user.id,
@@ -1011,7 +1008,6 @@ async def process_confirm(message: types.Message, state: FSMContext):
     # Применим куки именно того аккаунта, который выбрали на старте
     # (вдруг пользователь переключал аккаунт вручную между шагами).
     if account_id:
-        from src.database import get_account
         acc_full = await get_account(account_id)
         if acc_full:
             apply_account_cookies(acc_full["cookies"])
@@ -1299,12 +1295,18 @@ async def cmpl_delete_from_forum(call: types.CallbackQuery):
         await call.answer("У жалобы нет ссылки на форум.", show_alert=True)
         return
 
-    # Активируем тот аккаунт, под которым она была подана (если такой есть)
-    # Сейчас мы не храним account_id у жалобы — используем активный.
+    # Активируем тот аккаунт, под которым она была подана. Если по какой-то
+    # причине account_id отсутствует — используем активный.
     owner_id = account_owner_id(call.from_user.id)
-    active = await get_active_account(owner_id)
-    if active:
-        apply_account_cookies(active["cookies"])
+    account_used = None
+    if comp.get("account_id"):
+        account_used = await get_account(comp["account_id"])
+    if account_used and account_used.get("cookies"):
+        apply_account_cookies(account_used["cookies"])
+    else:
+        active = await get_active_account(owner_id)
+        if active:
+            apply_account_cookies(active["cookies"])
 
     await call.answer("⏳ Удаляю тему на форуме...")
     try:
@@ -1628,7 +1630,6 @@ async def _apply_edit(message: types.Message, state: FSMContext,
     # иначе форум вернёт 403 (редактировать может только автор).
     account_used = None
     if comp.get("account_id"):
-        from src.database import get_account
         account_used = await get_account(comp["account_id"])
     if account_used and account_used.get("cookies"):
         apply_account_cookies(account_used["cookies"])
@@ -1813,7 +1814,7 @@ async def draft_resume(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(target_state)
     await call.answer("✅ Восстановлено")
     await call.message.answer(
-        f"📝 Продолжаем с того же места. Введите данные для текущего шага.",
+        "📝 Продолжаем с того же места. Введите данные для текущего шага.",
         reply_markup=_cancel_kb(),
     )
 

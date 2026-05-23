@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import logging
 import re
@@ -394,7 +394,6 @@ async def forum_login(login: str, password: str) -> dict:
                             "из браузера и прислать боту."
                         )}
 
-        soup = _soup(r.text)
         csrf = _extract_csrf(r.text)
         if not csrf:
             logger.error("CSRF-токен не найден на /login/.")

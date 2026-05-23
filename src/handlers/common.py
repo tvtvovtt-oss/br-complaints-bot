@@ -17,7 +17,6 @@ from src.forum.xenforo import (
     invalidate_cookies_cache,
     forum_login,
     forum_submit_2fa,
-    save_cookies,
     apply_account_cookies,
 )
 from src.database import (
@@ -1024,7 +1023,7 @@ async def login_save_password_choice(message: types.Message, state: FSMContext):
                     username, account_id)
         await state.clear()
         await message.answer(
-            f"💾 <b>Пароль сохранён</b> (зашифрован).\n\n"
+            "💾 <b>Пароль сохранён</b> (зашифрован).\n\n"
             "Теперь запустите <b>🔄 Синхронизировать форум</b>.",
             reply_markup=_menu_for(message.from_user.id),
             message_effect_id=EFFECT_LIKE,

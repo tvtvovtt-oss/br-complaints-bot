@@ -15,7 +15,6 @@ from src.database import (
     get_stats,
     list_all_users,
     list_queue_pending,
-    cancel_queue_item,
 )
 from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
@@ -283,7 +282,7 @@ async def cmd_force_check(message: types.Message):
         return
     from src.status_monitor import _check_once, status_label
     from src.database import (
-        get_user_complaints, list_all_complaints, count_complaints_by_status,
+        list_all_complaints, count_complaints_by_status,
     )
 
     status_msg = await message.answer(

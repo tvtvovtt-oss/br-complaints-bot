@@ -18,7 +18,7 @@ from src.database import (
     get_account,
 )
 from src.forum.xenforo import fetch_complaint_status
-from src.effects import EFFECT_CONFETTI, EFFECT_FIRE
+from src.effects import EFFECT_CONFETTI
 
 logger = logging.getLogger(__name__)
 
@@ -128,49 +128,57 @@ async def _check_once(bot: Bot) -> None:
         prefix_text = None
         admin_comment = None
         try:
+            # Собираем список наборов кук, которые имеет смысл попробовать.
+            # Порядок важен: сначала «родной» аккаунт жалобы, потом весь
+            # пул админа (на BR тема видна только автору и модераторам),
+            # в самом конце — активные куки cookies.json как «последний шанс».
             cookies_to_try: list[dict | None] = []
+            seen_ids: set[int] = set()
 
             if comp.get("account_id"):
                 acc = await get_account(comp["account_id"])
                 if acc and acc.get("cookies"):
                     cookies_to_try.append(acc["cookies"])
+                    seen_ids.add(acc["id"])
 
-            # Фолбэк: для старых жалоб без account_id или если конкретный
-            # аккаунт не сработал — пробуем все аккаунты владельца пула.
-            if not cookies_to_try:
-                from src.database import list_accounts
-                from src.config import ADMIN_IDS
-                owner_id = ADMIN_IDS[0] if ADMIN_IDS else comp["telegram_id"]
-                pool = await list_accounts(owner_id)
-                for acc_short in pool:
-                    full = await get_account(acc_short["id"])
-                    if full and full.get("cookies"):
-                        cookies_to_try.append(full["cookies"])
+            # Все остальные аккаунты владельца пула — как фолбэк
+            from src.database import list_accounts
+            from src.config import ADMIN_IDS
+            owner_id = ADMIN_IDS[0] if ADMIN_IDS else comp["telegram_id"]
+            pool = await list_accounts(owner_id)
+            for acc_short in pool:
+                if acc_short["id"] in seen_ids:
+                    continue
+                full = await get_account(acc_short["id"])
+                if full and full.get("cookies"):
+                    cookies_to_try.append(full["cookies"])
+                    seen_ids.add(acc_short["id"])
 
+            # Активные куки cookies.json (если ничего другого нет вообще)
             if not cookies_to_try:
                 cookies_to_try.append(None)
 
-            # Перебираем аккаунты до тех пор, пока не найдём такой, под
-            # которым форум вернул префикс.
+            # Перебираем по очереди, пока кто-то не вернёт настоящий
+            # префикс или финальный статус.
             for cookies in cookies_to_try:
                 status_attempt, prefix_attempt, comment_attempt = (
                     await fetch_complaint_status(
                         comp["forum_thread_url"], cookies=cookies,
                     )
                 )
+                # Запоминаем последний осмысленный ответ — на случай если
+                # ни один аккаунт не даст префикс, у нас будет хоть что-то.
+                if status_attempt is not None:
+                    new_status = status_attempt
+                    prefix_text = prefix_attempt
+                    admin_comment = comment_attempt
+                # Если есть префикс — это самый надёжный сигнал, выходим
                 if prefix_attempt:
-                    new_status = status_attempt
-                    prefix_text = prefix_attempt
-                    admin_comment = comment_attempt
                     break
+                # Если форум сам сказал «закрыто/принято/отклонено» без префикса,
+                # тоже считаем достоверным
                 if status_attempt and status_attempt != "pending":
-                    new_status = status_attempt
-                    prefix_text = prefix_attempt
-                    admin_comment = comment_attempt
                     break
-                new_status = status_attempt
-                prefix_text = prefix_attempt
-                admin_comment = comment_attempt
 
         except Exception:
             logger.exception("Ошибка при проверке жалобы id=%s", comp["id"])

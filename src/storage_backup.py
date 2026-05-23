@@ -17,7 +17,7 @@ from typing import Optional
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import BufferedInputFile, FSInputFile
+from aiogram.types import BufferedInputFile
 
 from src.config import DB_PATH
 

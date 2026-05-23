@@ -394,7 +394,7 @@ async def bug_reply_send(message: types.Message, state: FSMContext, bot: Bot):
         )
     else:
         await message.answer(
-            f"⚠️ Ответ сохранён в БД, но Telegram не доставил его пользователю "
-            f"(возможно, заблокировал бота).",
+            "⚠️ Ответ сохранён в БД, но Telegram не доставил его пользователю "
+            "(возможно, заблокировал бота).",
             reply_markup=_menu_for(message.from_user.id),
         )
