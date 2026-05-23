@@ -100,6 +100,7 @@ async def _process_one(bot: Bot, item: dict) -> None:
             description=item["description"],
             proof_link=item["proof_link"],
             forum_thread_url=result,
+            account_id=account["id"],
         )
         await _notify_user(bot, telegram_id,
             f"🎉 <b>Жалоба из очереди опубликована!</b>\n\n"

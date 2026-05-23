@@ -15,6 +15,7 @@ from src.database import (
     list_complaints_for_status_check,
     update_complaint_status,
     mark_complaint_notified,
+    get_account,
 )
 from src.forum.xenforo import fetch_complaint_status
 from src.effects import EFFECT_CONFETTI, EFFECT_FIRE
@@ -112,10 +113,47 @@ async def _check_once(bot: Bot) -> None:
     notified = 0
 
     for i, comp in enumerate(complaints):
+        new_status = None
+        prefix_text = None
         try:
-            new_status, prefix_text = await fetch_complaint_status(
-                comp["forum_thread_url"]
-            )
+            # Берём куки именно того аккаунта, под которым была подана жалоба.
+            # На BR темы видят только автор и администраторы — без правильных
+            # кук форум не покажет префикс/тело темы и статус останется pending.
+            cookies_to_try: list[dict | None] = []
+
+            if comp.get("account_id"):
+                acc = await get_account(comp["account_id"])
+                if acc and acc.get("cookies"):
+                    cookies_to_try.append(acc["cookies"])
+                else:
+                    logger.debug("Жалоба #%s: account_id=%s не найден в БД.",
+                                 comp["id"], comp.get("account_id"))
+
+            # Фолбэк: для жалоб без account_id (подавались до миграции) или
+            # если конкретный аккаунт не дал результата — пробуем все
+            # аккаунты владельца пула (admin pool).
+            if not cookies_to_try:
+                from src.database import list_accounts
+                from src.config import ADMIN_IDS
+                owner_id = ADMIN_IDS[0] if ADMIN_IDS else comp["telegram_id"]
+                pool = await list_accounts(owner_id)
+                for acc_short in pool:
+                    full = await get_account(acc_short["id"])
+                    if full and full.get("cookies"):
+                        cookies_to_try.append(full["cookies"])
+
+            # Если совсем нет кук — используем активные (None = active cookies.json)
+            if not cookies_to_try:
+                cookies_to_try.append(None)
+
+            for cookies in cookies_to_try:
+                new_status, prefix_text = await fetch_complaint_status(
+                    comp["forum_thread_url"], cookies=cookies,
+                )
+                # Прерываем как только получили статус (не None)
+                if new_status is not None:
+                    break
+
         except Exception:
             logger.exception("Ошибка при проверке жалобы id=%s", comp["id"])
             continue

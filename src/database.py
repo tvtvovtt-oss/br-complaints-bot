@@ -32,6 +32,7 @@ async def init_db():
                 status TEXT NOT NULL DEFAULT 'pending',
                 last_status_check TIMESTAMP,
                 notified_status TEXT,
+                account_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -42,6 +43,7 @@ async def init_db():
             ("status", "ALTER TABLE complaints ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"),
             ("last_status_check", "ALTER TABLE complaints ADD COLUMN last_status_check TIMESTAMP"),
             ("notified_status", "ALTER TABLE complaints ADD COLUMN notified_status TEXT"),
+            ("account_id", "ALTER TABLE complaints ADD COLUMN account_id INTEGER"),
         ]:
             if col not in cols:
                 logger.info("Миграция: добавляю колонку '%s' в complaints.", col)
@@ -175,20 +177,31 @@ async def init_db():
 
 # ---------- Жалобы ----------
 
-async def add_complaint(telegram_id: int, nickname: str, description: str, proof_link: str, forum_thread_url: str = None) -> int:
-    """Добавление записи о поданной жалобе. Возвращает id записи."""
+async def add_complaint(telegram_id: int, nickname: str, description: str,
+                          proof_link: str, forum_thread_url: str = None,
+                          account_id: int | None = None) -> int:
+    """Добавление записи о поданной жалобе. Возвращает id записи.
+
+    account_id — опциональный id форумного аккаунта, под которым была подана
+    жалоба. Используется для проверки статуса (тему может видеть только
+    автор и админы)."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
-            INSERT INTO complaints (telegram_id, nickname, description, proof_link, forum_thread_url, status, notified_status)
-            VALUES (?, ?, ?, ?, ?, 'pending', 'pending')
+            INSERT INTO complaints
+                (telegram_id, nickname, description, proof_link,
+                 forum_thread_url, status, notified_status, account_id)
+            VALUES (?, ?, ?, ?, ?, 'pending', 'pending', ?)
             """,
-            (telegram_id, nickname, description, proof_link, forum_thread_url)
+            (telegram_id, nickname, description, proof_link,
+             forum_thread_url, account_id),
         )
         complaint_id = cur.lastrowid
         await db.commit()
-    logger.info("Сохранил жалобу в БД: id=%s, telegram_id=%s, цель=«%s», ссылка: %s",
-                complaint_id, telegram_id, nickname, forum_thread_url or "—")
+    logger.info("Сохранил жалобу в БД: id=%s, telegram_id=%s, цель=«%s», "
+                "account_id=%s, ссылка: %s",
+                complaint_id, telegram_id, nickname, account_id,
+                forum_thread_url or "—")
     await _trigger_backup()
     return complaint_id
 
@@ -247,7 +260,8 @@ async def list_complaints_for_status_check() -> list[dict]:
     не финальный — нужно проверить состояние на форуме."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT id, telegram_id, nickname, forum_thread_url, status, notified_status "
+            "SELECT id, telegram_id, nickname, forum_thread_url, status, "
+            "notified_status, account_id "
             "FROM complaints "
             "WHERE forum_thread_url IS NOT NULL "
             "AND status IN ('pending', 'unknown')"
@@ -259,6 +273,7 @@ async def list_complaints_for_status_check() -> list[dict]:
                     "forum_thread_url": r[3],
                     "status": r[4] or "pending",
                     "notified_status": r[5],
+                    "account_id": r[6],
                 }
                 for r in rows
             ]

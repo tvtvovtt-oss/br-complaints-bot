@@ -257,23 +257,50 @@ async def cmd_force_check(message: types.Message):
 
 @router.message(Command("checkurl"))
 async def cmd_check_url(message: types.Message):
-    """Проверить статус одной конкретной темы. /checkurl <url>"""
+    """Проверить статус одной конкретной темы.
+    Использование:
+        /checkurl <url>                     — проверить под активным аккаунтом
+        /checkurl <url> <account_id>        — проверить под конкретным аккаунтом
+    """
     if not is_admin(message.from_user.id):
         return
-    args = (message.text or "").split(maxsplit=1)
+    args = (message.text or "").split()
     if len(args) < 2:
         await message.answer(
-            "Использование: <code>/checkurl https://forum.blackrussia.online/threads/...</code>"
+            "Использование:\n"
+            "<code>/checkurl https://forum.blackrussia.online/threads/...</code>\n"
+            "<code>/checkurl URL ACCOUNT_ID</code> — проверить под кук конкретного аккаунта"
         )
         return
     url = args[1].strip()
+    account_id = None
+    if len(args) >= 3:
+        try:
+            account_id = int(args[2])
+        except ValueError:
+            pass
+
+    cookies = None
+    used_acc_name = "active cookies.json"
+    if account_id is not None:
+        from src.database import get_account
+        acc = await get_account(account_id)
+        if not acc:
+            await message.answer(f"❌ Аккаунт id={account_id} не найден.")
+            return
+        cookies = acc["cookies"]
+        used_acc_name = acc["username"]
+
     from src.forum.xenforo import fetch_complaint_status
-    status_msg = await message.answer(f"⏳ Проверяю {escape(url)}...")
+    status_msg = await message.answer(
+        f"⏳ Проверяю {escape(url)} от имени <b>{escape(used_acc_name)}</b>..."
+    )
     try:
-        status, prefix = await fetch_complaint_status(url)
+        status, prefix = await fetch_complaint_status(url, cookies=cookies)
         await status_msg.edit_text(
             f"🔍 <b>Результат:</b>\n\n"
             f"URL: <code>{escape(url)}</code>\n"
+            f"От имени: <b>{escape(used_acc_name)}</b>\n"
             f"Префикс на форуме: <code>{escape(str(prefix or '—'))}</code>\n"
             f"Распознанный статус: <code>{escape(str(status or '—'))}</code>"
         )

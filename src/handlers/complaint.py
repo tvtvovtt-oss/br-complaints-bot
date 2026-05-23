@@ -1050,6 +1050,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
             description=data["description"],
             proof_link=data["proof_link"],
             forum_thread_url=result,
+            account_id=account_id,
         )
 
         # Подбираем следующий свободный аккаунт — для удобства следующей жалобы

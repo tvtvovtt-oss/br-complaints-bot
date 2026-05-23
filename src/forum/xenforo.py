@@ -1231,8 +1231,15 @@ _STATUS_KEYWORDS = {
 }
 
 
-async def fetch_complaint_status(thread_url: str) -> tuple[str | None, str | None]:
+async def fetch_complaint_status(
+    thread_url: str,
+    cookies: dict | None = None,
+) -> tuple[str | None, str | None]:
     """Заходит на страницу темы и определяет её статус.
+
+    Если передан `cookies` — использует именно их (актуально когда жалобу
+    подавал не активный аккаунт; на BR темы видят только автор и модераторы).
+    Иначе берёт активные куки из cookies.json.
 
     Возвращает (status, prefix_text). Status — один из 'pending'/'accepted'/
     'rejected'/'closed' или None если не удалось определить.
@@ -1240,98 +1247,123 @@ async def fetch_complaint_status(thread_url: str) -> tuple[str | None, str | Non
     if not thread_url:
         return None, None
 
-    async with _session(timeout=15.0) as client:
-        try:
-            r = await client.get(thread_url)
-            if r.status_code != 200:
-                logger.debug("Тема %s — HTTP %s, статус не определён.",
-                             thread_url, r.status_code)
+    # Создаём клиент: либо со специальными куками, либо стандартный
+    if cookies is not None:
+        client_ctx = httpx.AsyncClient(
+            cookies=cookies, headers=HEADERS,
+            follow_redirects=True, timeout=15.0,
+        )
+        is_owned_session = True
+    else:
+        client_ctx = _session(timeout=15.0)
+        is_owned_session = False
+
+    try:
+        async with client_ctx as client:
+            try:
+                r = await client.get(thread_url)
+                if r.status_code == 403:
+                    logger.info("Тема %s — HTTP 403 (нет прав видеть тему).",
+                                thread_url)
+                    return None, None
+                if r.status_code != 200:
+                    logger.debug("Тема %s — HTTP %s.", thread_url, r.status_code)
+                    return None, None
+                html = r.text
+                if "vddosw3data.js" in html or "slowAES" in html:
+                    fresh = await _solve_ddos_guard()
+                    if fresh:
+                        client.cookies.set("R3ACTLB", fresh,
+                                            domain=FORUM_HOST, path="/")
+                        r = await client.get(thread_url)
+                        html = r.text
+
+                # Если переадресовало в /login/ — значит куки не подходят
+                if "/login/" in str(r.url) or "log-in" in html.lower()[:5000]:
+                    logger.info("Тема %s — куки не пускают (редирект на login).",
+                                thread_url)
+                    return None, None
+
+                soup = _soup(html)
+
+                # Несколько способов найти текст префикса — XenForo на разных
+                # форумах рендерит его по-разному.
+                prefix_text = None
+
+                # 1. Стандартный <span class="label labelLink">...</span>
+                for span in soup.find_all("span", class_=re.compile(r"\blabel\b")):
+                    text = span.get_text(strip=True)
+                    if text and 2 <= len(text) <= 40:
+                        prefix_text = text
+                        break
+
+                # 2. <a class="labelLink"><span class="label">...</span></a>
+                if not prefix_text:
+                    for a in soup.find_all("a", class_=re.compile(r"label")):
+                        text = a.get_text(strip=True)
+                        if text and 2 <= len(text) <= 40:
+                            prefix_text = text
+                            break
+
+                # 3. data-prefix-id у элементов
+                if not prefix_text:
+                    for el in soup.find_all(attrs={"data-prefix-id": True}):
+                        text = el.get_text(strip=True)
+                        if text and 2 <= len(text) <= 40:
+                            prefix_text = text
+                            break
+
+                # 4. .prefix или .prefixText
+                if not prefix_text:
+                    el = soup.find(class_=re.compile(r"\bprefix\b|prefixText"))
+                    if el:
+                        txt = el.get_text(strip=True)
+                        if txt and 2 <= len(txt) <= 40:
+                            prefix_text = txt
+
+                # 5. Регекспом по тегу <title>
+                if not prefix_text:
+                    title_tag = soup.find("title")
+                    if title_tag:
+                        title_text = title_tag.get_text()
+                        m = re.match(r"^\s*\[?([^\]\|:]{2,30})[\]\|:]", title_text)
+                        if m:
+                            candidate = m.group(1).strip()
+                            if ("форум" not in candidate.lower()
+                                    and "black" not in candidate.lower()):
+                                prefix_text = candidate
+
+                logger.debug("Тема %s: префикс=%r", thread_url, prefix_text)
+
+                if prefix_text:
+                    lowered = prefix_text.lower()
+                    for status, keywords in _STATUS_KEYWORDS.items():
+                        if any(k in lowered for k in keywords):
+                            return status, prefix_text
+                    logger.info("Тема %s: префикс «%s» не распознан, считаю pending.",
+                                 thread_url, prefix_text)
+                    return "pending", prefix_text
+
+                # Префикса нет — может тема уже закрыта (lock-icon)
+                if soup.find(class_=re.compile(r"is-locked|threadClosed|locked")):
+                    return "closed", None
+
+                return "pending", None
+
+            except httpx.RequestError as e:
+                logger.warning("Сетевая ошибка при проверке статуса темы %s: %s",
+                               thread_url, e)
                 return None, None
-            html = r.text
-            if "vddosw3data.js" in html or "slowAES" in html:
-                fresh = await _solve_ddos_guard()
-                if fresh:
-                    client.cookies.set("R3ACTLB", fresh,
-                                        domain=FORUM_HOST, path="/")
-                    r = await client.get(thread_url)
-                    html = r.text
-
-            soup = _soup(html)
-
-            # Несколько способов найти текст префикса — XenForo на разных
-            # форумах рендерит его по-разному.
-            prefix_text = None
-
-            # 1. Стандартный <span class="label labelLink">...</span> в заголовке
-            for span in soup.find_all("span", class_=re.compile(r"\blabel\b")):
-                text = span.get_text(strip=True)
-                if text and 2 <= len(text) <= 40:
-                    prefix_text = text
-                    break
-
-            # 2. <a class="labelLink"><span class="label">...</span></a>
-            if not prefix_text:
-                for a in soup.find_all("a", class_=re.compile(r"label")):
-                    text = a.get_text(strip=True)
-                    if text and 2 <= len(text) <= 40:
-                        prefix_text = text
-                        break
-
-            # 3. data-prefix-id у элементов
-            if not prefix_text:
-                for el in soup.find_all(attrs={"data-prefix-id": True}):
-                    text = el.get_text(strip=True)
-                    if text and 2 <= len(text) <= 40:
-                        prefix_text = text
-                        break
-
-            # 4. .prefix или .prefixText
-            if not prefix_text:
-                el = soup.find(class_=re.compile(r"\bprefix\b|prefixText"))
-                if el:
-                    txt = el.get_text(strip=True)
-                    if txt and 2 <= len(txt) <= 40:
-                        prefix_text = txt
-
-            # 5. Регекспом по тегу <title> — XenForo иногда префикс пишет туда
-            if not prefix_text:
-                title_tag = soup.find("title")
-                if title_tag:
-                    title_text = title_tag.get_text()
-                    # Префикс обычно идёт в скобках или с двоеточием в начале
-                    m = re.match(r"^\s*\[?([^\]\|:]{2,30})[\]\|:]", title_text)
-                    if m:
-                        candidate = m.group(1).strip()
-                        # Не берём название форума как префикс
-                        if "форум" not in candidate.lower() and "black" not in candidate.lower():
-                            prefix_text = candidate
-
-            logger.debug("Тема %s: префикс=%r", thread_url, prefix_text)
-
-            if prefix_text:
-                lowered = prefix_text.lower()
-                for status, keywords in _STATUS_KEYWORDS.items():
-                    if any(k in lowered for k in keywords):
-                        return status, prefix_text
-                # Префикс есть, но ни один ключ не подошёл — возвращаем
-                # как pending с указанием префикса в логе
-                logger.info("Тема %s: префикс «%s» не распознан, считаю pending.",
-                             thread_url, prefix_text)
-                return "pending", prefix_text
-
-            # Префикса нет — может тема уже закрыта (lock-icon)
-            if soup.find(class_=re.compile(r"is-locked|threadClosed|locked")):
-                return "closed", None
-
-            return "pending", None
-
-        except httpx.RequestError as e:
-            logger.warning("Сетевая ошибка при проверке статуса темы %s: %s",
-                           thread_url, e)
-            return None, None
-        except Exception as e:
-            logger.exception("Ошибка проверки статуса темы %s: %s", thread_url, e)
-            return None, None
+            except Exception as e:
+                logger.exception("Ошибка проверки статуса темы %s: %s", thread_url, e)
+                return None, None
+    finally:
+        if is_owned_session:
+            # _session() сам вызывает aclose, для своего клиента — вручную
+            try:
+                await client_ctx.aclose()  # type: ignore[union-attr]
+            except Exception:
+                pass
 
 
 # ---------------- Удаление и редактирование тем на форуме ----------------
