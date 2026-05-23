@@ -132,6 +132,18 @@ async def _send_backup_now(bot: Bot) -> None:
         logger.debug("Бэкап пропущен: БД пуста или не существует.")
         return
 
+    # SQLite в WAL-режиме держит часть данных в .db-wal/.db-shm. Чтобы
+    # снимок .db был согласован, делаем checkpoint(TRUNCATE) перед чтением.
+    try:
+        import sqlite3
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception:
+        # Не страшно если PRAGMA упала — checkpoint всё равно происходит
+        # автоматически при закрытии последнего соединения. В худшем случае
+        # бэкап будет немного устаревшим.
+        logger.debug("WAL checkpoint перед бэкапом не удался", exc_info=True)
+
     try:
         # SQLite может писать в файл прямо сейчас. Чтобы не получить
         # повреждённую копию, читаем содержимое и шлём как BufferedInputFile.

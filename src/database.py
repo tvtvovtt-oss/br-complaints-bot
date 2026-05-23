@@ -44,6 +44,10 @@ async def init_db():
             ("last_status_check", "ALTER TABLE complaints ADD COLUMN last_status_check TIMESTAMP"),
             ("notified_status", "ALTER TABLE complaints ADD COLUMN notified_status TEXT"),
             ("account_id", "ALTER TABLE complaints ADD COLUMN account_id INTEGER"),
+            ("your_nickname", "ALTER TABLE complaints ADD COLUMN your_nickname TEXT"),
+            ("summary", "ALTER TABLE complaints ADD COLUMN summary TEXT"),
+            ("category_key", "ALTER TABLE complaints ADD COLUMN category_key TEXT"),
+            ("punishment_date", "ALTER TABLE complaints ADD COLUMN punishment_date TEXT"),
         ]:
             if col not in cols:
                 logger.info("Миграция: добавляю колонку '%s' в complaints.", col)
@@ -179,22 +183,29 @@ async def init_db():
 
 async def add_complaint(telegram_id: int, nickname: str, description: str,
                           proof_link: str, forum_thread_url: str = None,
-                          account_id: int | None = None) -> int:
+                          account_id: int | None = None,
+                          your_nickname: str | None = None,
+                          summary: str | None = None,
+                          category_key: str | None = None,
+                          punishment_date: str | None = None) -> int:
     """Добавление записи о поданной жалобе. Возвращает id записи.
 
-    account_id — опциональный id форумного аккаунта, под которым была подана
-    жалоба. Используется для проверки статуса (тему может видеть только
-    автор и админы)."""
+    Дополнительные поля (`your_nickname`, `summary`, `category_key`,
+    `punishment_date`) нужны чтобы при редактировании жалобы можно было
+    пересобрать корректный BB-код и заголовок.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
             INSERT INTO complaints
                 (telegram_id, nickname, description, proof_link,
-                 forum_thread_url, status, notified_status, account_id)
-            VALUES (?, ?, ?, ?, ?, 'pending', 'pending', ?)
+                 forum_thread_url, status, notified_status, account_id,
+                 your_nickname, summary, category_key, punishment_date)
+            VALUES (?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?, ?)
             """,
             (telegram_id, nickname, description, proof_link,
-             forum_thread_url, account_id),
+             forum_thread_url, account_id, your_nickname, summary,
+             category_key, punishment_date),
         )
         complaint_id = cur.lastrowid
         await db.commit()
@@ -211,7 +222,7 @@ async def get_user_complaints(telegram_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT id, nickname, description, proof_link, forum_thread_url, "
-            "status, created_at "
+            "status, created_at, summary "
             "FROM complaints WHERE telegram_id = ? ORDER BY id DESC",
             (telegram_id,)
         ) as cursor:
@@ -225,6 +236,7 @@ async def get_user_complaints(telegram_id: int):
                     "forum_thread_url": row[4],
                     "status": row[5] or "pending",
                     "created_at": row[6],
+                    "summary": row[7],
                 }
                 for row in rows
             ]
@@ -235,7 +247,8 @@ async def get_complaint(complaint_id: int) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT id, telegram_id, nickname, description, proof_link, "
-            "forum_thread_url, status, notified_status, created_at "
+            "forum_thread_url, status, notified_status, created_at, "
+            "account_id, your_nickname, summary, category_key, punishment_date "
             "FROM complaints WHERE id = ?",
             (complaint_id,),
         ) as cur:
@@ -252,6 +265,11 @@ async def get_complaint(complaint_id: int) -> dict | None:
                 "status": row[6] or "pending",
                 "notified_status": row[7],
                 "created_at": row[8],
+                "account_id": row[9],
+                "your_nickname": row[10],
+                "summary": row[11],
+                "category_key": row[12],
+                "punishment_date": row[13],
             }
 
 
@@ -390,33 +408,38 @@ async def upsert_account(telegram_id: int, username: str, login: str | None,
     Если make_active=True (по умолчанию), аккаунт становится активным,
     а все остальные аккаунты этого пользователя помечаются неактивными.
 
+    Атомарно через BEGIN IMMEDIATE — без транзакции при одновременных
+    логинах могло бы получиться, что is_active у всех = 0.
+
     Возвращает id записи в таблице accounts.
     """
     cookies_str = _json.dumps(cookies, ensure_ascii=False)
     async with aiosqlite.connect(DB_PATH) as db:
-        # Сбрасываем активность у других аккаунтов этого пользователя
-        if make_active:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            if make_active:
+                await db.execute(
+                    "UPDATE accounts SET is_active = 0 WHERE telegram_id = ?",
+                    (telegram_id,),
+                )
+
             await db.execute(
-                "UPDATE accounts SET is_active = 0 WHERE telegram_id = ?",
-                (telegram_id,),
+                """
+                INSERT INTO accounts (telegram_id, username, login, cookies_json, is_active)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_id, username) DO UPDATE SET
+                    login = excluded.login,
+                    cookies_json = excluded.cookies_json,
+                    is_active = excluded.is_active,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (telegram_id, username, login, cookies_str, 1 if make_active else 0),
             )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
-        # UPSERT по (telegram_id, username)
-        await db.execute(
-            """
-            INSERT INTO accounts (telegram_id, username, login, cookies_json, is_active)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(telegram_id, username) DO UPDATE SET
-                login = excluded.login,
-                cookies_json = excluded.cookies_json,
-                is_active = excluded.is_active,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (telegram_id, username, login, cookies_str, 1 if make_active else 0),
-        )
-        await db.commit()
-
-        # Возвращаем id вставленной/обновлённой записи
         async with db.execute(
             "SELECT id FROM accounts WHERE telegram_id = ? AND username = ?",
             (telegram_id, username),

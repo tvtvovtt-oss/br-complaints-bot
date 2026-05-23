@@ -162,6 +162,12 @@ async def _login_cancel(message: types.Message, state: FSMContext) -> bool:
                 await twofa["client"].aclose()
             except Exception:
                 pass
+        # Затираем все возможные временные пароли из FSM
+        await state.update_data(
+            _save_password=None,
+            _password_temp=None,
+            login=None,
+        )
         await state.clear()
         await message.answer("❌ Вход отменён.", reply_markup=_menu_for(message.from_user.id))
         return True
@@ -611,11 +617,30 @@ async def handle_cookies_upload(message: types.Message, bot: Bot):
         cookies_count = len(data) if isinstance(data, (list, dict)) else 0
         logger.info("Файл успешно прочитан, найдено %s записей.", cookies_count)
 
-        # Сохраняем куки на диск
+        # Нормализуем формат: расширения вроде Cookie-Editor выдают список
+        # вида [{"name":..., "value":...}, ...]. В БД нам нужен dict.
+        normalized: dict = {}
+        if isinstance(data, list):
+            for cookie in data:
+                if isinstance(cookie, dict) and "name" in cookie and "value" in cookie:
+                    normalized[cookie["name"]] = cookie["value"]
+        elif isinstance(data, dict):
+            normalized = {str(k): str(v) for k, v in data.items()}
+
+        if not normalized:
+            await status_msg.edit_text(
+                "❌ Файл не содержит распознаваемых кук. Ожидается dict "
+                "<code>{\"name\": \"value\"}</code> или список "
+                "<code>[{\"name\": ..., \"value\": ...}]</code>."
+            )
+            return
+
+        # Сохраняем нормализованный dict на диск
         with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+            json.dump(normalized, f, indent=4, ensure_ascii=False)
         invalidate_cookies_cache()  # сбрасываем кэш, чтобы новый файл прочитался
-        logger.info("Куки сохранены в %s.", COOKIES_PATH)
+        logger.info("Куки сохранены в %s (%d записей).",
+                    COOKIES_PATH, len(normalized))
 
         await status_msg.edit_text("💾 Файл сохранён! Проверяю подключение к форуму...")
 
@@ -628,7 +653,7 @@ async def handle_cookies_upload(message: types.Message, bot: Bot):
                 telegram_id=message.from_user.id,
                 username=result,
                 login=None,
-                cookies=data,
+                cookies=normalized,
                 make_active=True,
             )
             await status_msg.delete()
@@ -762,28 +787,30 @@ async def cmd_accounts(message: types.Message):
 
 async def _try_import_existing_session(telegram_id: int) -> bool:
     """Если в cookies.json лежит рабочая сессия, добавляет её как новый
-    активный аккаунт. Возвращает True если импорт удался."""
-    import json as _json
+    активный аккаунт. Возвращает True если импорт удался.
+
+    Использует тот же `load_cookies()` что и сам форумный модуль —
+    гарантирует, что в БД попадёт ровно тот же словарь кук, который
+    проверял check_auth (никаких гонок при одновременной перезаписи).
+    """
     if not COOKIES_PATH.exists():
         logger.info("Авто-импорт пропущен: cookies.json не существует.")
         return False
-    try:
-        data = _json.loads(COOKIES_PATH.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning("Авто-импорт: не удалось прочитать cookies.json: %s", e)
-        return False
-    if not isinstance(data, dict):
-        logger.info("Авто-импорт пропущен: cookies.json не объект (тип %s).", type(data).__name__)
+
+    # Сбрасываем кэш чтобы прочитать свежий файл, и затем берём один и тот
+    # же snapshot и для проверки, и для записи в БД.
+    invalidate_cookies_cache()
+    from src.forum.xenforo import load_cookies
+    data = load_cookies()
+    if not data:
+        logger.info("Авто-импорт пропущен: cookies.json пуст.")
         return False
     if "xf_user" not in data:
         logger.info("Авто-импорт пропущен: в cookies.json нет xf_user. Ключи: %s",
                     ", ".join(data.keys()) or "—")
         return False
 
-    logger.info("Авто-импорт: пробую проверить сессию для telegram_id=%s ...", telegram_id)
-    # Сбрасываем кэш чтобы check_auth прочитал свежий cookies.json
-    invalidate_cookies_cache()
-
+    logger.info("Авто-импорт: проверяю сессию для telegram_id=%s ...", telegram_id)
     success, result = await check_auth()
     if not success:
         logger.warning("Авто-импорт отменён: check_auth вернул ошибку: %s",
@@ -957,6 +984,8 @@ async def login_save_password_choice(message: types.Message, state: FSMContext):
             )
             return
         encrypted = crypto_encrypt(password)
+        # Очищаем пароль из FSM сразу после шифрования — больше он не нужен.
+        await state.update_data(_save_password=None, _password_temp=None)
         if not encrypted:
             logger.error("Не удалось зашифровать пароль для аккаунта id=%s.",
                          account_id)
@@ -978,6 +1007,8 @@ async def login_save_password_choice(message: types.Message, state: FSMContext):
             message_effect_id=EFFECT_LIKE,
         )
     elif text == "🚫 Не сохранять":
+        # Пароль никуда не сохраняем и явно затираем из FSM
+        await state.update_data(_save_password=None, _password_temp=None)
         await state.clear()
         await message.answer(
             "👌 Пароль не сохранён.\n\n"

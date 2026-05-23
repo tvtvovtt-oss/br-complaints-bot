@@ -257,10 +257,7 @@ async def _resolve_username(client: httpx.AsyncClient) -> str:
                 client.cookies.set("R3ACTLB", fresh,
                                     domain=FORUM_HOST, path="/")
                 r = await client.get(FORUM_URL)
-        soup = _soup(r.text)
-        if _extract_user_id(r.text) > 0:
-            return _extract_username(soup)
-        return _extract_username(soup)
+        return _extract_username(_soup(r.text))
     except httpx.RequestError as e:
         logger.debug("Не удалось получить имя пользователя: %s", e)
         return "Авторизован"
@@ -1292,11 +1289,10 @@ async def fetch_complaint_status(
             cookies=cookies, headers=HEADERS,
             follow_redirects=True, timeout=15.0,
         )
-        is_owned_session = True
     else:
         client_ctx = _session(timeout=15.0)
-        is_owned_session = False
 
+    # async with сам закроет клиент в __aexit__ — повторный aclose не нужен.
     try:
         async with client_ctx as client:
             try:
@@ -1437,13 +1433,11 @@ async def fetch_complaint_status(
             except Exception as e:
                 logger.exception("Ошибка проверки статуса темы %s: %s", thread_url, e)
                 return None, None, None
-    finally:
-        if is_owned_session:
-            # _session() сам вызывает aclose, для своего клиента — вручную
-            try:
-                await client_ctx.aclose()  # type: ignore[union-attr]
-            except Exception:
-                pass
+    except Exception:
+        # Защита от непредвиденных ошибок при создании/закрытии клиента
+        logger.exception("Ошибка работы клиента при проверке статуса темы %s",
+                         thread_url)
+        return None, None, None
 
 
 # ---------------- Удаление и редактирование тем на форуме ----------------

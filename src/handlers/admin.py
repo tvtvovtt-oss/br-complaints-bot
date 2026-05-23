@@ -156,7 +156,8 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
     delivered = 0
     blocked = 0
     failed = 0
-    last_edit = asyncio.get_event_loop().time()
+    import time as _time
+    last_edit = _time.monotonic()
 
     for i, uid in enumerate(users, 1):
         try:
@@ -180,7 +181,7 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
         await asyncio.sleep(0.05)
 
         # Прогресс не чаще раза в 2 секунды
-        now = asyncio.get_event_loop().time()
+        now = _time.monotonic()
         if now - last_edit > 2 or i == len(users):
             try:
                 await status.edit_text(

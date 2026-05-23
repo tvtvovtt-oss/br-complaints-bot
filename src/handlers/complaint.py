@@ -1051,6 +1051,10 @@ async def process_confirm(message: types.Message, state: FSMContext):
             proof_link=data["proof_link"],
             forum_thread_url=result,
             account_id=account_id,
+            your_nickname=data.get("your_nickname"),
+            summary=data.get("summary"),
+            category_key=data.get("category_key"),
+            punishment_date=data.get("punishment_date"),
         )
 
         # Подбираем следующий свободный аккаунт — для удобства следующей жалобы
@@ -1174,11 +1178,15 @@ def _format_complaints_list(complaints: list[dict]) -> str:
         else:
             link = "<i>не опубликована</i>"
         st_label = status_label(comp.get("status", "pending"))
+        # Используем summary (заголовок), а не description, чтобы пользователь
+        # видел понятный заголовок жалобы. Для старых жалоб без summary —
+        # fallback на description.
+        summary_or_desc = comp.get("summary") or comp["description"]
         lines.append(
             f"<b>#{comp['id']}</b> {st_label}\n"
             f"   <b>Цель:</b> {escape(comp['nickname'])}\n"
-            f"   <b>Суть:</b> {escape(comp['description'][:80])}"
-            f"{'…' if len(comp['description']) > 80 else ''}\n"
+            f"   <b>Суть:</b> {escape(summary_or_desc[:80])}"
+            f"{'…' if len(summary_or_desc) > 80 else ''}\n"
             f"   {link} • <i>{escape(str(comp['created_at']))}</i>"
         )
     lines.append(
@@ -1363,8 +1371,14 @@ async def cmd_templates(message: types.Message):
     """Показывает пользовательские шаблоны (по всем категориям)."""
     if not check_access(message.from_user.id):
         return
-    # Сейчас шаблоны только для players
-    user_tpls = await list_user_templates(message.from_user.id, "players")
+    # Собираем шаблоны из всех категорий
+    all_categories = ["players", "admins", "leaders", "appeals"]
+    user_tpls: list[dict] = []
+    for cat in all_categories:
+        for ut in await list_user_templates(message.from_user.id, cat):
+            ut["category_key"] = cat
+            user_tpls.append(ut)
+
     if not user_tpls:
         await message.answer(
             "📋 У вас пока нет своих шаблонов.\n\n"
@@ -1381,17 +1395,20 @@ async def cmd_templates(message: types.Message):
         )])
     kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
 
+    cat_label = {
+        "players": "🎮 игроки", "admins": "🛡 админы",
+        "leaders": "👑 лидеры", "appeals": "⚖️ обжалования",
+    }
     lines = ["⭐ <b>Ваши шаблоны жалоб:</b>\n"]
     for ut in user_tpls:
         lines.append(
-            f"<b>{escape(ut['name'])}</b>\n"
+            f"<b>{escape(ut['name'])}</b> "
+            f"<i>({cat_label.get(ut.get('category_key'), '?')})</i>\n"
             f"   <i>Суть:</i> <code>{escape(ut['summary'])}</code>\n"
             f"   <i>Описание:</i> {escape(ut['description'][:120])}"
             f"{'…' if len(ut['description']) > 120 else ''}"
         )
-    lines.append(
-        "\n<i>Нажмите на 🗑, чтобы удалить шаблон.</i>"
-    )
+    lines.append("\n<i>Нажмите на 🗑, чтобы удалить шаблон.</i>")
     await message.answer("\n\n".join(lines), reply_markup=kb)
 
 
@@ -1550,7 +1567,7 @@ async def _apply_edit(message: types.Message, state: FSMContext,
                        new_description: str | None = None,
                        new_proof: str | None = None) -> None:
     """Применяет изменение жалобы: обновляет в БД и пересохраняет тело
-    темы на форуме (с пересборкой BB-кода)."""
+    темы на форуме (с пересборкой настоящего BB-кода)."""
     data = await state.get_data()
     cid = data.get("_edit_complaint_id")
     if not cid:
@@ -1581,34 +1598,58 @@ async def _apply_edit(message: types.Message, state: FSMContext,
         )
         return
 
-    # Применяем активный аккаунт владельца
-    owner_id = account_owner_id(message.from_user.id)
-    active = await get_active_account(owner_id)
-    if active:
-        apply_account_cookies(active["cookies"])
+    # Применяем куки именно того аккаунта, под которым жалоба была подана —
+    # иначе форум вернёт 403 (редактировать может только автор).
+    account_used = None
+    if comp.get("account_id"):
+        from src.database import get_account
+        account_used = await get_account(comp["account_id"])
+    if account_used and account_used.get("cookies"):
+        apply_account_cookies(account_used["cookies"])
+    else:
+        # Фолбэк: используем активный, но скорее всего форум откажет
+        owner_id = account_owner_id(message.from_user.id)
+        active = await get_active_account(owner_id)
+        if active:
+            apply_account_cookies(active["cookies"])
 
     status_msg = await message.answer(
         "⏳ Обновляю тему на форуме...",
         reply_markup=_menu_for(message.from_user.id),
     )
 
-    # Пересобираем BB-код. Нам нужны исходные ник автора, ник цели и т.д.
-    # Они не сохранены в complaints отдельно — реконструируем из имеющихся
-    # данных. Поскольку мы не знаем ник автора без оригинала, используем
-    # заглушку «—» в строке "Ваш Nick_Name" — но обычно ребятам важнее, чтобы
-    # обновилось описание/пруфы, а заголовок и поля автора форум сохранит,
-    # если редактировать только тело сообщения.
+    # Пересобираем настоящий BB-код по сохранённым полям. Если каких-то
+    # полей нет в БД (старые жалобы до миграции) — fallback на простой
+    # формат, чтобы тема не превращалась в мусор.
+    cat_key = comp.get("category_key")
+    your_nick = comp.get("your_nickname")
+    if cat_key and your_nick:
+        new_body = build_body(
+            category_key=cat_key,
+            your_nickname=your_nick,
+            target_nickname=comp["nickname"],
+            description=description,
+            proof_link=proof_link,
+            punishment_date=comp.get("punishment_date"),
+        )
+    else:
+        # Старая жалоба без полей — оставляем человекочитаемый формат,
+        # чтобы не уничтожить тему.
+        new_body = (
+            f"1. Ваш Nick_Name: —\n"
+            f"2. Nick_Name цели: [COLOR=rgb(235, 10, 10)]{comp['nickname']}[/COLOR]\n"
+            f"3. Суть: {description}\n"
+            f"4. Доказательство: {proof_link}"
+        )
 
-    # Минимальный безопасный путь — попробуем взять описание-as-is
-    # и проигнорируем регенерацию полей "Ваш ник/ник цели" (для этого
-    # нам надо хранить их в БД отдельно — TODO).
-    new_body = (
-        f"Описание (обновлено): {description}\n\n"
-        f"Доказательство: {proof_link}"
-    )
+    # Заголовок при возможности тоже пересобираем
+    new_title = None
+    if comp.get("summary"):
+        new_title = build_title(comp["nickname"], comp["summary"])
 
     success, msg = await edit_thread_post(
         comp["forum_thread_url"], new_message=new_body,
+        new_title=new_title,
     )
 
     await state.clear()

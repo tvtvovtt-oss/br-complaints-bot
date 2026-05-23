@@ -107,10 +107,14 @@ async def _process_one(bot: Bot, item: dict) -> None:
             f"🎯 Цель: <b>{escape(target)}</b>\n"
             f"🔗 <a href=\"{escape(result)}\">Открыть тему на форуме</a>")
     else:
+        # increment_queue_attempt поднимает attempts на 1.
+        # После инкремента у нас будет item["attempts"] + 1 попытка.
+        # Если это последняя — помечаем failed.
         await increment_queue_attempt(qid, error=str(result))
-        logger.warning("Жалоба #%s провалила попытку: %s", qid, result)
-        # На последней попытке помечаем failed
-        if item["attempts"] + 1 >= MAX_ATTEMPTS:
+        new_attempts = item["attempts"] + 1
+        logger.warning("Жалоба #%s провалила попытку %d/%d: %s",
+                       qid, new_attempts, MAX_ATTEMPTS, result)
+        if new_attempts >= MAX_ATTEMPTS:
             await mark_queue_failed(qid, str(result))
             await _notify_user(bot, telegram_id,
                 f"❌ <b>Жалоба из очереди не опубликована</b>\n\n"
