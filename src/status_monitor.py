@@ -116,22 +116,15 @@ async def _check_once(bot: Bot) -> None:
         new_status = None
         prefix_text = None
         try:
-            # Берём куки именно того аккаунта, под которым была подана жалоба.
-            # На BR темы видят только автор и администраторы — без правильных
-            # кук форум не покажет префикс/тело темы и статус останется pending.
             cookies_to_try: list[dict | None] = []
 
             if comp.get("account_id"):
                 acc = await get_account(comp["account_id"])
                 if acc and acc.get("cookies"):
                     cookies_to_try.append(acc["cookies"])
-                else:
-                    logger.debug("Жалоба #%s: account_id=%s не найден в БД.",
-                                 comp["id"], comp.get("account_id"))
 
-            # Фолбэк: для жалоб без account_id (подавались до миграции) или
-            # если конкретный аккаунт не дал результата — пробуем все
-            # аккаунты владельца пула (admin pool).
+            # Фолбэк: для старых жалоб без account_id или если конкретный
+            # аккаунт не сработал — пробуем все аккаунты владельца пула.
             if not cookies_to_try:
                 from src.database import list_accounts
                 from src.config import ADMIN_IDS
@@ -142,17 +135,28 @@ async def _check_once(bot: Bot) -> None:
                     if full and full.get("cookies"):
                         cookies_to_try.append(full["cookies"])
 
-            # Если совсем нет кук — используем активные (None = active cookies.json)
             if not cookies_to_try:
                 cookies_to_try.append(None)
 
+            # Перебираем аккаунты до тех пор, пока не найдём такой, под
+            # которым форум вернул префикс. Если все аккаунты вернули
+            # фолбэчный pending без префикса — оставляем pending.
             for cookies in cookies_to_try:
-                new_status, prefix_text = await fetch_complaint_status(
+                status_attempt, prefix_attempt = await fetch_complaint_status(
                     comp["forum_thread_url"], cookies=cookies,
                 )
-                # Прерываем как только получили статус (не None)
-                if new_status is not None:
+                # Если получили префикс — это автор/админ темы, доверяем.
+                if prefix_attempt:
+                    new_status, prefix_text = status_attempt, prefix_attempt
                     break
+                # Если получили статус, но без префикса (например, "closed"
+                # из-за lock-icon) — тоже принимаем.
+                if status_attempt and status_attempt != "pending":
+                    new_status, prefix_text = status_attempt, prefix_attempt
+                    break
+                # Запоминаем хоть что-то на случай если ни один аккаунт
+                # не дал префикс — оставим последнее значение.
+                new_status, prefix_text = status_attempt, prefix_attempt
 
         except Exception:
             logger.exception("Ошибка при проверке жалобы id=%s", comp["id"])
