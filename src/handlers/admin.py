@@ -534,3 +534,107 @@ async def cmd_db_info(message: types.Message):
             pass
 
     await message.answer("\n".join(lines))
+
+
+# ---------------- Режим обслуживания ----------------
+
+@router.message(Command("maintenance"))
+@router.message(F.text == "🔒 Режим обслуживания")
+async def cmd_maintenance(message: types.Message):
+    """Переключатель режима обслуживания.
+    /maintenance        — показать текущий статус и кнопки переключения
+    /maintenance on     — включить
+    /maintenance off    — выключить
+    """
+    if not is_admin(message.from_user.id):
+        return
+
+    from src.maintenance import is_enabled, enable, disable
+
+    args = (message.text or "").split(maxsplit=1)
+    arg = args[1].strip().lower() if len(args) >= 2 else ""
+
+    if arg == "on":
+        await enable()
+        await message.answer(
+            "🔒 <b>Режим обслуживания включён.</b>\n\n"
+            "Все обычные пользователи получат сообщение «бот на техработах». "
+            "Админы продолжают работать как обычно.\n\n"
+            "Выключить: <code>/maintenance off</code>"
+        )
+        return
+    if arg == "off":
+        await disable()
+        await message.answer(
+            "🔓 <b>Режим обслуживания выключен.</b>\n\n"
+            "Бот снова доступен всем пользователям."
+        )
+        return
+
+    # Без аргумента — показываем статус и кнопки
+    enabled = await is_enabled()
+    status_emoji = "🔒" if enabled else "🔓"
+    status_text = "ВКЛЮЧЕНО" if enabled else "выключено"
+
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if enabled:
+        rows.append([types.InlineKeyboardButton(
+            text="🔓 Выключить (открыть бот для всех)",
+            callback_data="maint_off",
+        )])
+    else:
+        rows.append([types.InlineKeyboardButton(
+            text="🔒 Включить (закрыть для не-админов)",
+            callback_data="maint_on",
+        )])
+    kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+    await message.answer(
+        f"{status_emoji} <b>Режим обслуживания:</b> {status_text}\n\n"
+        "Когда включён, бот для обычных пользователей блокируется и шлёт "
+        "пояснение. Админы продолжают работать без ограничений.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "maint_on")
+async def maint_on(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    from src.maintenance import enable
+    await enable()
+    try:
+        await call.message.edit_text(
+            "🔒 <b>Режим обслуживания включён.</b>\n\n"
+            "Все обычные пользователи теперь получат «бот на техработах».\n\n"
+            "Выключить: <code>/maintenance off</code> или кнопкой ниже.",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(
+                    text="🔓 Выключить", callback_data="maint_off")],
+            ]),
+        )
+    except Exception:
+        pass
+    await call.answer("🔒 Включено")
+
+
+@router.callback_query(F.data == "maint_off")
+async def maint_off(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    from src.maintenance import disable
+    await disable()
+    try:
+        await call.message.edit_text(
+            "🔓 <b>Режим обслуживания выключен.</b>\n\n"
+            "Бот снова доступен всем пользователям.",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(
+                    text="🔒 Включить", callback_data="maint_on")],
+            ]),
+        )
+    except Exception:
+        pass
+    await call.answer("🔓 Выключено")

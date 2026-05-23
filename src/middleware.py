@@ -189,3 +189,51 @@ class CleanupMiddleware(BaseMiddleware):
                 if not vlist or now - max(vlist) > 60:
                     self._throttle._violations.pop(uid, None)
         logger.debug("Throttle cache очищен.")
+
+
+class MaintenanceMiddleware(BaseMiddleware):
+    """Если включён режим обслуживания — пропускаем только админов.
+    Остальным шлём короткое сообщение «бот на техработах».
+
+    Подключать ПОСЛЕ ThrottleMiddleware (троттлинг должен сработать первым,
+    чтобы не было спама). Не блокирует команду /start (там админ может
+    включать/выключать режим).
+    """
+
+    async def __call__(self, handler, event, data):
+        from src.maintenance import is_enabled
+        from src.config import ADMIN_IDS
+
+        user = data.get("event_from_user")
+        if user is None:
+            return await handler(event, data)
+
+        # Админ всегда проходит
+        if ADMIN_IDS and user.id in ADMIN_IDS:
+            return await handler(event, data)
+        # Если ADMIN_IDS пуст — все админы (для отладки), пропускаем
+        if not ADMIN_IDS:
+            return await handler(event, data)
+
+        if not await is_enabled():
+            return await handler(event, data)
+
+        # Режим обслуживания включён, пользователь не админ — отказ.
+        from aiogram.types import Message, CallbackQuery
+        text = (
+            "🔒 <b>Бот временно на техработах.</b>\n\n"
+            "Подача жалоб приостановлена. Зайдите чуть позже — мы скоро "
+            "снова откроем доступ. Спасибо за понимание!"
+        )
+        try:
+            if isinstance(event, Message):
+                await event.answer(text)
+            elif isinstance(event, CallbackQuery):
+                await event.answer(
+                    "🔒 Бот на техработах. Попробуйте позже.",
+                    show_alert=True,
+                )
+        except Exception:
+            pass
+        # Не зовём handler — событие игнорируется
+        return None

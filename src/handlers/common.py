@@ -89,6 +89,7 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
             ],
             [
                 types.KeyboardButton(text="🐞 Баг-репорты"),
+                types.KeyboardButton(text="🔒 Режим обслуживания"),
             ],
         ]
     else:

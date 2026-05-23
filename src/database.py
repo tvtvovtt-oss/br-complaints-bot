@@ -1368,3 +1368,44 @@ async def delete_draft(telegram_id: int) -> None:
             "DELETE FROM drafts WHERE telegram_id = ?", (telegram_id,)
         )
         await db.commit()
+
+
+# ---------- Настройки бота (key/value) ----------
+
+async def _ensure_settings_table(db: aiosqlite.Connection) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+async def get_setting(key: str, default: str | None = None) -> str | None:
+    """Получает значение настройки бота. None если не задано."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_settings_table(db)
+        async with db.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else default
+
+
+async def set_setting(key: str, value: str) -> None:
+    """Устанавливает значение настройки бота."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_settings_table(db)
+        await db.execute(
+            """
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
+        await db.commit()
+    await _trigger_backup()
