@@ -725,13 +725,16 @@ def _format_accounts_list(accounts: list[dict]) -> str:
             except Exception:
                 pass
 
-        lines.append(f"{marker}<b>{escape(acc['username'])}</b>{login}")
+        lines.append(f"{marker}<b>{escape(acc['username'])}</b> "
+                     f"<code>id={acc['id']}</code>{login}")
         if cd_str:
             lines.append(cd_str)
         lines.append(f"   <i>обновлён: {escape(str(acc['updated_at']))}</i>")
     lines.append(
         "\n✅ — активный. ⏳ — кулдаун после публикации жалобы (180с).\n"
-        "При подаче жалобы бот сам выберет первый свободный аккаунт."
+        "При подаче жалобы бот сам выберет первый свободный аккаунт.\n"
+        "<i>Чтобы проверить статус темы под конкретным аккаунтом:</i>\n"
+        "<code>/checkurl https://forum... ID</code>"
     )
     return "\n".join(lines)
 

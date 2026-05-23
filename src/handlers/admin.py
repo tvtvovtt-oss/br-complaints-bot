@@ -291,19 +291,82 @@ async def cmd_check_url(message: types.Message):
         cookies = acc["cookies"]
         used_acc_name = acc["username"]
 
-    from src.forum.xenforo import fetch_complaint_status
+    from src.forum.xenforo import (
+        fetch_complaint_status,
+        HEADERS, FORUM_HOST, _solve_ddos_guard,
+    )
+    import httpx
+    from bs4 import BeautifulSoup as _BS
+    import re as _re
+
     status_msg = await message.answer(
         f"⏳ Проверяю {escape(url)} от имени <b>{escape(used_acc_name)}</b>..."
     )
+
+    # Сначала «как обычно» — через нашу функцию
     try:
         status, prefix = await fetch_complaint_status(url, cookies=cookies)
-        await status_msg.edit_text(
-            f"🔍 <b>Результат:</b>\n\n"
-            f"URL: <code>{escape(url)}</code>\n"
-            f"От имени: <b>{escape(used_acc_name)}</b>\n"
-            f"Префикс на форуме: <code>{escape(str(prefix or '—'))}</code>\n"
-            f"Распознанный статус: <code>{escape(str(status or '—'))}</code>"
-        )
     except Exception as e:
         logger.exception("checkurl failed")
         await status_msg.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>")
+        return
+
+    # Дополнительно — RAW-диагностика: что реально на странице
+    raw_info: list[str] = []
+    try:
+        async with httpx.AsyncClient(
+            cookies=cookies or {}, headers=HEADERS,
+            follow_redirects=True, timeout=15.0,
+        ) as c:
+            r = await c.get(url)
+            html = r.text
+            if "vddosw3data.js" in html or "slowAES" in html:
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    c.cookies.set("R3ACTLB", fresh, domain=FORUM_HOST, path="/")
+                    r = await c.get(url)
+                    html = r.text
+            raw_info.append(f"HTTP {r.status_code}")
+            raw_info.append(f"final URL: <code>{escape(str(r.url))[:120]}</code>")
+            raw_info.append(f"size: {len(html)} байт")
+
+            soup = _BS(html, "html.parser")
+            tt = soup.find("title")
+            raw_info.append(f"&lt;title&gt;: <code>{escape(tt.text.strip()[:120]) if tt else '—'}</code>")
+
+            og = soup.find("meta", attrs={"property": "og:title"})
+            raw_info.append(
+                f"og:title: <code>{escape(og['content'][:120]) if og and og.get('content') else '—'}</code>"
+            )
+
+            h1 = soup.find(class_="p-title-value") or soup.find("h1")
+            if h1:
+                raw_info.append(
+                    f"h1 классы: <code>{escape(' '.join(h1.get('class') or []))}</code>"
+                )
+                raw_info.append(
+                    f"h1 текст: <code>{escape(h1.get_text(' ', strip=True)[:200])}</code>"
+                )
+            else:
+                raw_info.append("h1 не найден")
+
+            # Все label-элементы с текстом
+            label_texts = []
+            for el in soup.find_all(class_=_re.compile(r"\blabel\b")):
+                t = el.get_text(strip=True)
+                if t:
+                    label_texts.append(t[:50])
+            raw_info.append(f"все .label на странице: {label_texts[:10]}")
+
+    except Exception as e:
+        raw_info.append(f"raw fetch error: {escape(str(e))}")
+
+    raw_block = "\n".join(raw_info) if raw_info else "—"
+    await status_msg.edit_text(
+        f"🔍 <b>Результат:</b>\n\n"
+        f"URL: <code>{escape(url)}</code>\n"
+        f"От имени: <b>{escape(used_acc_name)}</b>\n"
+        f"Префикс на форуме: <code>{escape(str(prefix or '—'))}</code>\n"
+        f"Распознанный статус: <code>{escape(str(status or '—'))}</code>\n\n"
+        f"<b>RAW диагностика:</b>\n{raw_block}"
+    )
