@@ -71,10 +71,19 @@ class TelegramErrorHandler(logging.Handler):
         if not TelegramErrorHandler._bot or not TelegramErrorHandler._chat_id:
             return
         # Игнорируем ошибки от самого aiogram-сетевого слоя — они часто
-        # самовосстановимы (Server disconnected) и спамят.
+        # самовосстановимы (Server disconnected, Conflict при перезапуске)
+        # и спамят.
         if record.name in ("aiogram.dispatcher", "aiogram.event"):
-            if "Server disconnected" in record.getMessage():
-                return
+            msg = record.getMessage()
+            for skip in (
+                "Server disconnected",
+                "TelegramConflictError",
+                "ServerDisconnectedError",
+                "ClientConnectorError",
+                "TelegramNetworkError",
+            ):
+                if skip in msg:
+                    return
 
         try:
             text = self.format(record)

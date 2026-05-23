@@ -122,6 +122,9 @@ async def main():
 
     logger.info("Удаляю webhook и сбрасываю накопившиеся обновления...")
     await bot.delete_webhook(drop_pending_updates=True)
+    # Небольшая пауза чтобы Telegram успел освободить полл-слот от
+    # предыдущего экземпляра (если был запущен где-то ещё).
+    await asyncio.sleep(2)
 
     # Регистрируем команды для автокомплита в Telegram (когда юзер набирает /)
     public_commands = [
