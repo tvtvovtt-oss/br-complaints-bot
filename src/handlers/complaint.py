@@ -613,28 +613,6 @@ async def process_target_nickname(message: types.Message, state: FSMContext):
         )
         return
 
-    # Антиспам: запрет повторной жалобы на тот же ник в течение 30 минут
-    recent = await recent_complaint_against(
-        message.from_user.id, value, within_minutes=30,
-    )
-    if recent:
-        link = ""
-        if recent.get("forum_thread_url"):
-            link = (f"\n\n🔗 <a href=\"{escape(recent['forum_thread_url'])}\">"
-                    "Открыть предыдущую жалобу</a>")
-        await state.clear()
-        await message.answer(
-            f"⚠️ <b>Слишком частая жалоба</b>\n\n"
-            f"Вы уже подавали жалобу на <b>{escape(value)}</b> менее 30 минут "
-            f"назад (<i>{escape(str(recent['created_at']))}</i>).\n"
-            "Дождитесь рассмотрения текущей или подайте позже.{}".format(link),
-            reply_markup=_menu_for(message.from_user.id),
-            disable_web_page_preview=True,
-        )
-        logger.info("Антиспам: %s повторно жалуется на «%s» (предыдущая #%s).",
-                    describe_user(message.from_user), value, recent["id"])
-        return
-
     await state.update_data(target_nickname=value)
     data = await state.get_data()
     key = data["category_key"]
