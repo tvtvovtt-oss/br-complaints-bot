@@ -236,51 +236,91 @@ async def cmd_queue(message: types.Message):
 
 @router.message(Command("check"))
 async def cmd_force_check(message: types.Message):
-    """Прогнать мониторинг статусов прямо сейчас, не ждать интервала."""
+    """Прогнать мониторинг статусов прямо сейчас, не ждать интервала.
+    Для админа показывает сводку по ВСЕМ жалобам в БД (всех пользователей).
+    """
     if not is_admin(message.from_user.id):
         return
-    from src.status_monitor import _check_once
-    from src.database import list_complaints_for_status_check
-    status_msg = await message.answer("⏳ Запускаю проверку статусов жалоб...")
+    from src.status_monitor import _check_once, status_label
+    from src.database import (
+        get_user_complaints, list_all_complaints, count_complaints_by_status,
+    )
+
+    status_msg = await message.answer(
+        "⏳ Запускаю проверку статусов жалоб...\n"
+        "<i>Это может занять до минуты — бот идёт на форум по каждой "
+        "жалобе.</i>"
+    )
+
+    logger.info("Ручной /check от %s — старт.", describe_user(message.from_user))
     try:
-        await asyncio.wait_for(_check_once(message.bot), timeout=300)
+        # Жёсткий потолок чтобы пользователь не висел вечно
+        await asyncio.wait_for(_check_once(message.bot), timeout=120)
+        logger.info("Ручной /check от %s — завершён.",
+                    describe_user(message.from_user))
     except asyncio.TimeoutError:
+        logger.warning("Ручной /check от %s превысил 2 мин.",
+                       describe_user(message.from_user))
         await status_msg.edit_text(
-            "⏱ Проверка прервана по таймауту (5 мин). Проверьте логи."
+            "⏱ Проверка прервана по таймауту (2 мин). Покажу что успело "
+            "проверить — посмотрите ниже."
         )
-        return
     except Exception as e:
         logger.exception("Ошибка ручной проверки статусов")
-        await status_msg.edit_text(f"❌ Ошибка: {escape(str(e))}")
+        try:
+            await status_msg.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>")
+        except Exception:
+            pass
         return
 
-    # После прогона показываем сводку — какие жалобы в каком статусе
-    from src.database import get_user_complaints
-    complaints = await get_user_complaints(message.from_user.id)
+    # Глобальная сводка — для админа по всем жалобам в БД
+    try:
+        by_status = await count_complaints_by_status()
+        all_complaints = await list_all_complaints(limit=15)
+    except Exception:
+        logger.exception("Не удалось загрузить статистику жалоб.")
+        by_status = {}
+        all_complaints = []
 
-    pending_n = sum(1 for c in complaints if c["status"] == "pending")
-    accepted_n = sum(1 for c in complaints if c["status"] == "accepted")
-    rejected_n = sum(1 for c in complaints if c["status"] == "rejected")
-    closed_n = sum(1 for c in complaints if c["status"] == "closed")
+    pending_n = by_status.get("pending", 0)
+    accepted_n = by_status.get("accepted", 0)
+    rejected_n = by_status.get("rejected", 0)
+    closed_n = by_status.get("closed", 0)
+    total_n = sum(by_status.values())
 
     lines = [
         "✅ <b>Проверка статусов завершена</b>\n",
+        f"📦 Всего жалоб в БД: <b>{total_n}</b>",
         f"⏳ Ожидание: <b>{pending_n}</b>",
         f"✅ Принято: <b>{accepted_n}</b>",
         f"❌ Отклонено: <b>{rejected_n}</b>",
         f"🔒 Закрыто: <b>{closed_n}</b>",
     ]
 
-    if complaints:
-        lines.append("\n<b>Последние 10 жалоб:</b>")
-        for c in complaints[:10]:
-            from src.status_monitor import status_label
+    if all_complaints:
+        lines.append("\n<b>Последние жалобы (всех пользователей):</b>")
+        for c in all_complaints[:15]:
             lbl = status_label(c["status"])
+            nick = c["nickname"][:25]
             lines.append(
-                f"   <code>#{c['id']}</code> {lbl} • <b>{escape(c['nickname'])}</b>"
+                f"   <code>#{c['id']}</code> {lbl} • "
+                f"<b>{escape(nick)}</b> "
+                f"<i>(автор {c['telegram_id']})</i>"
             )
+    else:
+        lines.append("\n<i>В БД пока нет ни одной жалобы.</i>")
 
-    await status_msg.edit_text("\n".join(lines))
+    text = "\n".join(lines)
+    if len(text) > 3500:
+        text = text[:3400] + "\n<i>...сводка обрезана</i>"
+
+    try:
+        await status_msg.edit_text(text)
+    except Exception:
+        try:
+            await message.answer(text)
+        except Exception:
+            logger.exception("Не удалось вывести сводку /check")
 
 
 @router.message(Command("checkurl"))

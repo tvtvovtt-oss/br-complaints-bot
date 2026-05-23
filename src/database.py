@@ -1221,3 +1221,37 @@ async def get_stats(within_days: int = 7) -> dict:
         "by_day": [(r[0], r[1]) for r in by_day],
         "queue_pending": queue_pending,
     }
+
+
+async def list_all_complaints(limit: int = 30) -> list[dict]:
+    """Возвращает последние N жалоб всех пользователей. Используется админом
+    в /check и /stats."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, telegram_id, nickname, description, proof_link, "
+            "forum_thread_url, status, created_at "
+            "FROM complaints ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "id": row[0], "telegram_id": row[1],
+                    "nickname": row[2], "description": row[3],
+                    "proof_link": row[4], "forum_thread_url": row[5],
+                    "status": row[6] or "pending",
+                    "created_at": row[7],
+                }
+                for row in rows
+            ]
+
+
+async def count_complaints_by_status() -> dict:
+    """Возвращает {status: count} по всем жалобам в БД (для админ-сводки)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(status, 'pending'), COUNT(*) "
+            "FROM complaints GROUP BY COALESCE(status, 'pending')"
+        ) as cur:
+            rows = await cur.fetchall()
+            return {row[0]: row[1] for row in rows}
