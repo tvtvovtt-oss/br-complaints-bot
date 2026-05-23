@@ -1205,10 +1205,29 @@ async def discover_all_complaint_categories(
 #   "rejected" — отклонена/отказ
 #   "closed"   — закрыта (без явного решения)
 _STATUS_KEYWORDS = {
-    "accepted": ("принят", "одобрен", "удовлетвор", "выполнен"),
-    "rejected": ("отклонен", "отклонён", "отказ", "не принят"),
-    "closed":   ("закрыт",),
-    "pending":  ("ожидание", "ожидан", "новая", "новое"),
+    "accepted": (
+        "принят", "принято", "принята",
+        "одобрен", "одобрено", "одобрена",
+        "удовлетвор",
+        "выполнен", "выполнено", "выполнена",
+        "наказан", "наказание выдано",
+        "рассмотрено",
+    ),
+    "rejected": (
+        "отклонен", "отклонён", "отклонено", "отклонена",
+        "отказ", "отказано",
+        "не принят",
+        "недостаточно",
+        "истёк срок", "истек срок",
+    ),
+    "closed":   (
+        "закрыт", "закрыто", "закрыта",
+        "архив",
+    ),
+    "pending":  (
+        "ожидание", "ожидан", "новая", "новое",
+        "в работе", "рассматривается",
+    ),
 }
 
 
@@ -1239,36 +1258,72 @@ async def fetch_complaint_status(thread_url: str) -> tuple[str | None, str | Non
 
             soup = _soup(html)
 
-            # 1. Префикс темы — обычно <span class="label" data-...> или
-            # <div class="p-title"><h1>...<span class="label">префикс</span> Тема</h1></div>
+            # Несколько способов найти текст префикса — XenForo на разных
+            # форумах рендерит его по-разному.
             prefix_text = None
+
+            # 1. Стандартный <span class="label labelLink">...</span> в заголовке
             for span in soup.find_all("span", class_=re.compile(r"\blabel\b")):
                 text = span.get_text(strip=True)
-                if text and len(text) <= 40:  # это именно префикс, не длинный текст
+                if text and 2 <= len(text) <= 40:
                     prefix_text = text
                     break
 
+            # 2. <a class="labelLink"><span class="label">...</span></a>
             if not prefix_text:
-                # запасной способ — XenForo пишет ".prefix" перед заголовком
-                el = soup.find(class_=re.compile(r"\bprefix\b"))
+                for a in soup.find_all("a", class_=re.compile(r"label")):
+                    text = a.get_text(strip=True)
+                    if text and 2 <= len(text) <= 40:
+                        prefix_text = text
+                        break
+
+            # 3. data-prefix-id у элементов
+            if not prefix_text:
+                for el in soup.find_all(attrs={"data-prefix-id": True}):
+                    text = el.get_text(strip=True)
+                    if text and 2 <= len(text) <= 40:
+                        prefix_text = text
+                        break
+
+            # 4. .prefix или .prefixText
+            if not prefix_text:
+                el = soup.find(class_=re.compile(r"\bprefix\b|prefixText"))
                 if el:
                     txt = el.get_text(strip=True)
-                    if txt and len(txt) <= 40:
+                    if txt and 2 <= len(txt) <= 40:
                         prefix_text = txt
+
+            # 5. Регекспом по тегу <title> — XenForo иногда префикс пишет туда
+            if not prefix_text:
+                title_tag = soup.find("title")
+                if title_tag:
+                    title_text = title_tag.get_text()
+                    # Префикс обычно идёт в скобках или с двоеточием в начале
+                    m = re.match(r"^\s*\[?([^\]\|:]{2,30})[\]\|:]", title_text)
+                    if m:
+                        candidate = m.group(1).strip()
+                        # Не берём название форума как префикс
+                        if "форум" not in candidate.lower() and "black" not in candidate.lower():
+                            prefix_text = candidate
+
+            logger.debug("Тема %s: префикс=%r", thread_url, prefix_text)
 
             if prefix_text:
                 lowered = prefix_text.lower()
                 for status, keywords in _STATUS_KEYWORDS.items():
                     if any(k in lowered for k in keywords):
                         return status, prefix_text
+                # Префикс есть, но ни один ключ не подошёл — возвращаем
+                # как pending с указанием префикса в логе
+                logger.info("Тема %s: префикс «%s» не распознан, считаю pending.",
+                             thread_url, prefix_text)
+                return "pending", prefix_text
 
-            # 2. Если префикса нет — может тема уже закрыта (lock-icon в шапке)
-            #    XenForo помечает закрытые темы классом 'is-locked' или иконкой
-            if soup.find(class_=re.compile(r"is-locked|threadClosed")):
-                return "closed", prefix_text
+            # Префикса нет — может тема уже закрыта (lock-icon)
+            if soup.find(class_=re.compile(r"is-locked|threadClosed|locked")):
+                return "closed", None
 
-            # Иначе считаем что в ожидании
-            return "pending", prefix_text
+            return "pending", None
 
         except httpx.RequestError as e:
             logger.warning("Сетевая ошибка при проверке статуса темы %s: %s",

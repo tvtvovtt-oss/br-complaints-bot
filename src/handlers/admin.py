@@ -230,3 +230,53 @@ async def cmd_queue(message: types.Message):
     if len(pending) > 20:
         lines.append(f"\n<i>...и ещё {len(pending) - 20} в очереди</i>")
     await message.answer("\n\n".join(lines))
+
+
+# ---------------- Принудительный прогон мониторинга ----------------
+
+@router.message(Command("check"))
+async def cmd_force_check(message: types.Message):
+    """Прогнать мониторинг статусов прямо сейчас, не ждать интервала."""
+    if not is_admin(message.from_user.id):
+        return
+    from src.status_monitor import _check_once
+    status_msg = await message.answer("⏳ Запускаю проверку статусов жалоб...")
+    try:
+        await asyncio.wait_for(_check_once(message.bot), timeout=300)
+        await status_msg.edit_text(
+            "✅ Проверка статусов завершена. Подробности — в логах бота."
+        )
+    except asyncio.TimeoutError:
+        await status_msg.edit_text(
+            "⏱ Проверка прервана по таймауту (5 мин). Проверьте логи."
+        )
+    except Exception as e:
+        logger.exception("Ошибка ручной проверки статусов")
+        await status_msg.edit_text(f"❌ Ошибка: {escape(str(e))}")
+
+
+@router.message(Command("checkurl"))
+async def cmd_check_url(message: types.Message):
+    """Проверить статус одной конкретной темы. /checkurl <url>"""
+    if not is_admin(message.from_user.id):
+        return
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "Использование: <code>/checkurl https://forum.blackrussia.online/threads/...</code>"
+        )
+        return
+    url = args[1].strip()
+    from src.forum.xenforo import fetch_complaint_status
+    status_msg = await message.answer(f"⏳ Проверяю {escape(url)}...")
+    try:
+        status, prefix = await fetch_complaint_status(url)
+        await status_msg.edit_text(
+            f"🔍 <b>Результат:</b>\n\n"
+            f"URL: <code>{escape(url)}</code>\n"
+            f"Префикс на форуме: <code>{escape(str(prefix or '—'))}</code>\n"
+            f"Распознанный статус: <code>{escape(str(status or '—'))}</code>"
+        )
+    except Exception as e:
+        logger.exception("checkurl failed")
+        await status_msg.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>")
