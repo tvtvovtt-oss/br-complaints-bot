@@ -1091,7 +1091,7 @@ async def adm_complaint_delete_forum(call: types.CallbackQuery):
     if comp.get("account_id"):
         acc_full = await get_account(comp["account_id"])
         if acc_full and acc_full.get("cookies"):
-            apply_account_cookies(acc_full["cookies"])
+            apply_account_cookies(acc_full["cookies"], account_id=acc_full["id"])
 
     success, msg = await delete_thread(
         comp["forum_thread_url"],

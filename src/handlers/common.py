@@ -252,7 +252,7 @@ async def login_step_password(message: types.Message, state: FSMContext, bot: Bo
             cookies=result["cookies"],
             make_active=True,
         )
-        apply_account_cookies(result["cookies"])
+        apply_account_cookies(result["cookies"], account_id=account_id)
         logger.info("Вход для %s успешен, аккаунт «%s» сохранён в БД и активирован.",
                     describe_user(message.from_user), username)
         await status_msg.delete()
@@ -340,7 +340,7 @@ async def login_step_2fa(message: types.Message, state: FSMContext):
         cookies=result["cookies"],
         make_active=True,
     )
-    apply_account_cookies(result["cookies"])
+    apply_account_cookies(result["cookies"], account_id=account_id)
     logger.info("Вход с 2FA для %s успешен, аккаунт «%s» сохранён в БД.",
                 describe_user(message.from_user), username)
     await status_msg.delete()
@@ -362,7 +362,7 @@ async def cmd_start(message: types.Message):
             if await _try_import_existing_session(user_id):
                 active = await get_active_account(user_id)
         if active:
-            apply_account_cookies(active["cookies"])
+            apply_account_cookies(active["cookies"], account_id=active["id"])
             logger.debug("При /start применены куки активного аккаунта «%s».",
                          active["username"])
 
@@ -872,7 +872,7 @@ async def acc_use(call: types.CallbackQuery):
         await call.answer("Не удалось переключить.", show_alert=True)
         return
 
-    apply_account_cookies(account["cookies"])
+    apply_account_cookies(account["cookies"], account_id=account_id)
     logger.info("Пользователь %s переключился на аккаунт «%s» (id=%s).",
                 describe_user(call.from_user), account["username"], account_id)
 
@@ -908,7 +908,7 @@ async def acc_del(call: types.CallbackQuery):
     # Если после удаления остался активный другой аккаунт — применяем его куки
     new_active = await get_active_account(call.from_user.id)
     if new_active:
-        apply_account_cookies(new_active["cookies"])
+        apply_account_cookies(new_active["cookies"], account_id=new_active["id"])
         logger.info("После удаления аккаунта активным стал «%s».",
                     new_active["username"])
 

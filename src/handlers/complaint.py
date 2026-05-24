@@ -107,7 +107,7 @@ async def _pick_account_for_complaint(telegram_id: int) -> tuple[dict | None, st
     # Активируем выбранный аккаунт у его владельца (админа), куки в файл —
     # тоже общие, так что подача жалобы пройдёт от имени этого аккаунта.
     await set_active_account(owner_id, candidate["id"])
-    apply_account_cookies(candidate["cookies"])
+    apply_account_cookies(candidate["cookies"], account_id=candidate["id"])
     logger.info("Жалоба будет подана от имени аккаунта «%s» (id=%s, owner=%s).",
                 candidate["username"], candidate["id"], owner_id)
     return candidate, None
@@ -622,10 +622,19 @@ async def process_target_nickname(message: types.Message, state: FSMContext):
 
     if key in NEEDS_DATE:
         await state.set_state(ComplaintForm.waiting_for_punishment_date)
+        date_kb = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="➖ Без даты")],
+                [types.KeyboardButton(text="❌ Отмена")],
+            ],
+            resize_keyboard=True,
+        )
         await message.answer(
             "📅 <b>Шаг 5: Дата выдачи/получения наказания</b> "
-            "(например: <code>15.05.2026 19:30</code>):",
-            reply_markup=_cancel_kb(),
+            "(например: <code>15.05.2026 19:30</code>).\n\n"
+            "Если дата неизвестна — нажмите <b>«➖ Без даты»</b>: "
+            "в жалобе будет прочерк.",
+            reply_markup=date_kb,
         )
     else:
         await state.set_state(ComplaintForm.waiting_for_summary)
@@ -678,15 +687,28 @@ async def process_punishment_date(message: types.Message, state: FSMContext):
     if await _cancel_via_text(message, state):
         return
 
-    ok, value = validate_date(message.text or "")
-    if not ok:
-        logger.info("Валидация даты от %s не прошла: %s",
-                    describe_user(message.from_user), value)
-        await message.answer(
-            f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
-            reply_markup=_cancel_kb(),
-        )
-        return
+    text = (message.text or "").strip()
+
+    # Кнопка «Без даты» — пишем в жалобе прочерк, дата необязательна
+    if text == "➖ Без даты":
+        value = "—"
+    else:
+        ok, value = validate_date(text)
+        if not ok:
+            logger.info("Валидация даты от %s не прошла: %s",
+                        describe_user(message.from_user), value)
+            await message.answer(
+                f"❌ {escape(value)}\n\nПопробуйте ещё раз "
+                "или нажмите «➖ Без даты»:",
+                reply_markup=types.ReplyKeyboardMarkup(
+                    keyboard=[
+                        [types.KeyboardButton(text="➖ Без даты")],
+                        [types.KeyboardButton(text="❌ Отмена")],
+                    ],
+                    resize_keyboard=True,
+                ),
+            )
+            return
 
     await state.update_data(punishment_date=value)
     data = await state.get_data()
@@ -1050,7 +1072,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
     if account_id:
         acc_full = await get_account(account_id)
         if acc_full:
-            apply_account_cookies(acc_full["cookies"])
+            apply_account_cookies(acc_full["cookies"], account_id=account_id)
             await set_active_account(owner_id, account_id)
 
     logger.info(
@@ -1110,7 +1132,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
             if next_acc["available"]:
                 # Сразу переключаем на свободный
                 await set_active_account(owner_id, next_acc["id"])
-                apply_account_cookies(next_acc["cookies"])
+                apply_account_cookies(next_acc["cookies"], account_id=next_acc["id"])
                 if is_admin(message.from_user.id):
                     next_info = (
                         f"\n\n🔄 Активный аккаунт переключён на "
@@ -1342,11 +1364,11 @@ async def cmpl_delete_from_forum(call: types.CallbackQuery):
     if comp.get("account_id"):
         account_used = await get_account(comp["account_id"])
     if account_used and account_used.get("cookies"):
-        apply_account_cookies(account_used["cookies"])
+        apply_account_cookies(account_used["cookies"], account_id=account_used["id"])
     else:
         active = await get_active_account(owner_id)
         if active:
-            apply_account_cookies(active["cookies"])
+            apply_account_cookies(active["cookies"], account_id=active["id"])
 
     await call.answer("⏳ Удаляю тему на форуме...")
     try:
@@ -1672,13 +1694,13 @@ async def _apply_edit(message: types.Message, state: FSMContext,
     if comp.get("account_id"):
         account_used = await get_account(comp["account_id"])
     if account_used and account_used.get("cookies"):
-        apply_account_cookies(account_used["cookies"])
+        apply_account_cookies(account_used["cookies"], account_id=account_used["id"])
     else:
         # Фолбэк: используем активный, но скорее всего форум откажет
         owner_id = account_owner_id(message.from_user.id)
         active = await get_active_account(owner_id)
         if active:
-            apply_account_cookies(active["cookies"])
+            apply_account_cookies(active["cookies"], account_id=active["id"])
 
     status_msg = await message.answer(
         "⏳ Обновляю тему на форуме...",

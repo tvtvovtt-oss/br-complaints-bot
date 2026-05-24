@@ -66,6 +66,13 @@ def _soup(html: str) -> BeautifulSoup:
 # Сбрасывается через invalidate_cookies_cache() после загрузки нового cookies.json.
 _cookies_cache: Optional[dict] = None
 _cookies_mtime: float = 0.0
+
+# id активного аккаунта в БД. Заполняется через apply_account_cookies(...).
+# Когда форум обновляет xf_session/xf_csrf и эти свежие куки попадают в
+# cookies.json через _persist_cookies_from_client — мы сразу зеркалим их
+# и в БД для этого account_id. Иначе после рестарта бот загрузит из БД
+# старые (просроченные) куки и упадёт на 403.
+_active_account_id: Optional[int] = None
 # Защита от гонки при одновременном чтении/записи из разных корутин.
 # Используем asyncio.Lock; все обращения к кэшу проходят через него.
 _cookies_lock = asyncio.Lock()
@@ -157,14 +164,29 @@ def invalidate_cookies_cache() -> None:
     _cookies_mtime = 0.0
 
 
-def apply_account_cookies(cookies: dict) -> None:
+def apply_account_cookies(cookies: dict, account_id: int | None = None) -> None:
     """Записывает куки в cookies.json и обновляет кэш в памяти.
     Используется при переключении между несколькими форумными аккаунтами —
-    после вызова все запросы к форуму пойдут от имени этих кук."""
+    после вызова все запросы к форуму пойдут от имени этих кук.
+
+    Если передан `account_id` — запоминаем его, чтобы свежие куки от форума
+    автоматически попадали в БД именно для этого аккаунта (через
+    `_persist_cookies_from_client`). Это критично: без этого свежие куки
+    после публикации остаются только в cookies.json, а при переключении
+    аккаунта — теряются.
+    """
+    global _active_account_id
     save_cookies(cookies)
     # save_cookies сам обновляет кэш, но для надёжности
     invalidate_cookies_cache()
     load_cookies()  # прогреть кэш
+    _active_account_id = account_id
+
+
+def get_active_account_id() -> int | None:
+    """Текущий account_id, чьи куки активны в cookies.json. None если
+    сессия загружена напрямую (импорт из cookies.json без БД)."""
+    return _active_account_id
 
 
 def _make_client(timeout: float = 20.0) -> httpx.AsyncClient:
@@ -511,16 +533,45 @@ def _flatten_cookies(client: httpx.AsyncClient) -> dict:
 
 
 def _persist_cookies_from_client(client: httpx.AsyncClient) -> None:
-    """Сливает текущее состояние jar клиента в cookies.json.
+    """Сливает текущее состояние jar клиента в cookies.json и в БД (для
+    активного аккаунта, если он установлен).
+
     Сохраняет существующие записи, обновляя/добавляя свежие. Безопасно
-    вызывать часто — на старые значения просто перезаписывает."""
+    вызывать часто — на старые значения просто перезаписывает.
+
+    Зеркалирование в БД критично: иначе после рестарта бот загрузит из БД
+    устаревшие куки и упадёт на 403, особенно когда форум ротирует
+    `xf_session` каждые несколько часов.
+    """
     fresh = _flatten_cookies(client)
     if not fresh:
         return
     existing = load_cookies()
     merged = {**existing, **fresh}
-    if merged != existing:
-        save_cookies(merged)
+    if merged == existing:
+        return
+    save_cookies(merged)
+
+    # Параллельно обновляем в БД для активного аккаунта.
+    # Делаем это «огонь и забыл» — если упадёт, пожар тушить не нужно,
+    # cookies.json уже сохранён и для текущей сессии этого достаточно.
+    aid = _active_account_id
+    if aid is not None:
+        try:
+            import asyncio as _aio
+            from src.database import update_account_cookies as _upd
+            try:
+                loop = _aio.get_running_loop()
+                loop.create_task(_upd(aid, merged))
+            except RuntimeError:
+                # Нет активного цикла (вызвано из синхронного кода) —
+                # тогда тут уже не сделать, при следующем запуске бота
+                # ситуация не критична: при загрузке из БД куки будут
+                # старее cookies.json, но cookies.json как раз свежий.
+                pass
+        except Exception:
+            logger.debug("Не удалось зеркалить свежие куки в БД",
+                         exc_info=True)
 
 
 async def _start_two_step(client: httpx.AsyncClient, redirect_url: str,

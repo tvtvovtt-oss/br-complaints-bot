@@ -82,7 +82,7 @@ async def _process_one(bot: Bot, item: dict) -> None:
 
     logger.info("Жалоба из очереди #%s публикуется от имени «%s» (попытка %d).",
                 qid, account["username"], item["attempts"] + 1)
-    apply_account_cookies(account["cookies"])
+    apply_account_cookies(account["cookies"], account_id=account["id"])
 
     success, result = await post_complaint(
         section_id=section_id,
