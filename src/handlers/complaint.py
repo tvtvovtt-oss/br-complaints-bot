@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from html import escape
 from math import ceil
@@ -1089,11 +1090,82 @@ async def process_confirm(message: types.Message, state: FSMContext):
         reply_markup=_menu_for(message.from_user.id),
     )
 
-    success, result = await post_complaint(
-        section_id=data["section_id"],
-        title=data["title"],
-        message=data["bb_code"],
-    )
+    # Пытаемся отправить с авто-перебором аккаунтов: если первый аккаунт
+    # получил 403 (нет прав в этом разделе) или другую ошибку, пробуем
+    # ещё один из пула. Лимит — 3 попытки, чтобы не зациклиться.
+    from src.database import list_accounts as _list_accounts
+
+    success = False
+    result: str = ""
+    used_account_id = account_id
+    used_account_name = account_name
+    tried_ids: set[int] = set()
+    if account_id:
+        tried_ids.add(account_id)
+
+    pool = await _list_accounts(owner_id)
+    last_error = ""
+
+    for attempt in range(1, 4):
+        success, result = await post_complaint(
+            section_id=data["section_id"],
+            title=data["title"],
+            message=data["bb_code"],
+        )
+
+        if success:
+            break
+
+        last_error = str(result)
+        logger.warning(
+            "Попытка %d отправить жалобу от %s через «%s» (id=%s) "
+            "не удалась: %s",
+            attempt, describe_user(message.from_user), used_account_name,
+            used_account_id, last_error,
+        )
+
+        # Стоит ли пробовать другой аккаунт
+        retryable_markers = ("403", "Доступ запрещён", "куки", "cookies",
+                              "не авторизован", "csrf", "сессия")
+        is_retryable = any(m.lower() in last_error.lower() for m in retryable_markers)
+        if not is_retryable:
+            break
+
+        # Ищем следующий аккаунт из пула, который ещё не пробовали
+        next_acc_full = None
+        for acc_short in pool:
+            if acc_short["id"] in tried_ids:
+                continue
+            full = await get_account(acc_short["id"])
+            if full and full.get("cookies"):
+                next_acc_full = full
+                break
+
+        if not next_acc_full:
+            logger.info("Аккаунты для перебора закончились — прекращаю ретрай.")
+            break
+
+        used_account_id = next_acc_full["id"]
+        used_account_name = next_acc_full["username"]
+        tried_ids.add(used_account_id)
+        apply_account_cookies(
+            next_acc_full["cookies"], account_id=used_account_id,
+        )
+        await set_active_account(owner_id, used_account_id)
+        logger.info("Переключился на «%s» (id=%s) для повторной попытки %d.",
+                    used_account_name, used_account_id, attempt + 1)
+        try:
+            await status_msg.edit_text(
+                f"🔁 Попытка {attempt + 1}/3: пробую через "
+                f"<b>{escape(used_account_name)}</b>..."
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(1.5)
+
+    # Сохраняем итоговый аккаунт в data — он попадёт в БД и кулдаун
+    account_id = used_account_id
+    account_name = used_account_name
 
     if success:
         logger.info("Жалоба от %s опубликована. URL: %s",
@@ -1176,11 +1248,19 @@ async def process_confirm(message: types.Message, state: FSMContext):
             message_effect_id=EFFECT_CONFETTI,
         )
     else:
-        logger.error("Не удалось опубликовать жалобу от %s. Причина: %s",
-                     describe_user(message.from_user), result)
+        logger.error("Не удалось опубликовать жалобу от %s. Причина: %s. "
+                     "Перебрано аккаунтов: %d.",
+                     describe_user(message.from_user), result, len(tried_ids))
+        tried_part = ""
+        if is_admin(message.from_user.id) and len(tried_ids) > 1:
+            tried_part = (
+                f"\n\n<i>Перебрано аккаунтов: {len(tried_ids)} — "
+                f"ни один не имеет доступа к этому разделу.</i>"
+            )
         await status_msg.edit_text(
             f"❌ <b>Не удалось опубликовать жалобу</b>\n\n"
             f"Описание ошибки:\n<code>{escape(str(result))}</code>"
+            f"{tried_part}"
         )
 
     await state.clear()

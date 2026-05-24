@@ -936,11 +936,16 @@ async def post_complaint(section_id: int, title: str, message: str) -> tuple[boo
 
             if get_response.status_code != 200:
                 if get_response.status_code == 403:
-                    logger.error("HTTP 403 при открытии формы (раздел %s). Возможно, нет прав.",
-                                 section_id)
+                    # Не критическая ошибка — логируем как WARNING, чтобы
+                    # error_reporter не дёргал админа: возможно, аккаунт
+                    # просто не имеет прав в этом разделе и хендлер сейчас
+                    # переключится на следующий из пула.
+                    logger.warning("HTTP 403 при открытии формы (раздел %s). "
+                                    "Возможно, у аккаунта нет прав.",
+                                    section_id)
                     return False, (
-                        f"Доступ запрещён (HTTP 403). Проверьте права аккаунта или куки "
-                        f"для раздела {section_id}."
+                        f"Доступ запрещён (HTTP 403). У аккаунта нет прав "
+                        f"в разделе {section_id}, или сессия истекла."
                     )
                 logger.error("HTTP %s при открытии формы создания темы.", get_response.status_code)
                 return False, f"Не удалось открыть страницу создания темы. HTTP {get_response.status_code}."
