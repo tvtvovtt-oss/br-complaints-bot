@@ -175,6 +175,31 @@ async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
         return
     # photo — список миниатюр, берём самую большую (последнюю)
     file_id = message.photo[-1].file_id
+
+    # NSFW-фильтр (если включён). Качаем картинку, проверяем, и если ок —
+    # сохраняем file_id как обычно. Сами байты больше нигде не нужны.
+    from src.moderation import has_moderation, check_image
+    if has_moderation():
+        try:
+            file_info = await bot.get_file(file_id)
+            file_bytes_io = await bot.download_file(file_info.file_path)
+            image_bytes = file_bytes_io.read()
+        except Exception:
+            logger.exception("Не удалось скачать фото для NSFW-проверки.")
+            image_bytes = None
+
+        if image_bytes:
+            allowed, reason = await check_image(image_bytes)
+            if not allowed:
+                logger.warning("Фото к баг-репорту от %s отклонено: %s",
+                               describe_user(message.from_user), reason)
+                await message.answer(
+                    f"🚫 <b>Скриншот не принят:</b> {escape(reason)}.\n\n"
+                    "Пришлите другой скриншот или нажмите «⏭ Пропустить».",
+                    reply_markup=_photo_step_kb(),
+                )
+                return
+
     await _finalize_report(message, state, bot, photo_file_id=file_id)
 
 

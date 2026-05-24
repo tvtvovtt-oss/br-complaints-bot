@@ -843,6 +843,23 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
         )
         return
 
+    # Проверка на NSFW/gore/экстремистскую символику
+    from src.moderation import check_image, has_moderation
+    if has_moderation():
+        await status_msg.edit_text("⏳ Проверяю содержимое скриншота...")
+        allowed, reason = await check_image(image_bytes)
+        if not allowed:
+            logger.warning(
+                "Скриншот от %s отклонён модерацией: %s",
+                describe_user(message.from_user), reason,
+            )
+            await status_msg.edit_text(
+                f"🚫 <b>Скриншот не принят:</b> {escape(reason)}.\n\n"
+                "Пришлите другой скриншот или вставьте ссылку текстом."
+            )
+            return
+        await status_msg.edit_text("⏳ Загружаю скриншот на imgbb...")
+
     ok, result = await upload_image(image_bytes, filename=f"proof_{message.from_user.id}.jpg")
     if not ok:
         logger.warning("Загрузка на imgbb не удалась: %s", result)
