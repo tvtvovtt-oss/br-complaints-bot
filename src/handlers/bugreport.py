@@ -169,22 +169,40 @@ async def bug_skip_photo(message: types.Message, state: FSMContext, bot: Bot):
     await _finalize_report(message, state, bot, photo_file_id=None)
 
 
+# Лимит на размер скачиваемого фото (для NSFW-проверки) — 10 МБ.
+# Сам Telegram уже жмёт фото, так что 10 МБ хватит с большим запасом.
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
+
+
 @router.message(BugForm.waiting_for_photo, F.photo)
 async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
     # photo — список миниатюр, берём самую большую (последнюю)
-    file_id = message.photo[-1].file_id
+    largest = message.photo[-1]
+    file_id = largest.file_id
 
     # NSFW-фильтр (если включён). Качаем картинку, проверяем, и если ок —
     # сохраняем file_id как обычно. Сами байты больше нигде не нужны.
     from src.moderation import has_moderation, check_image
     if has_moderation():
-        try:
-            file_info = await bot.get_file(file_id)
-            file_bytes_io = await bot.download_file(file_info.file_path)
-            image_bytes = file_bytes_io.read()
-        except Exception:
-            logger.exception("Не удалось скачать фото для NSFW-проверки.")
+        # Защита от слишком больших файлов (теоретически Telegram отдаёт
+        # photo до ~10 МБ, но проверяем на всякий — мало ли клиент отправит)
+        if largest.file_size and largest.file_size > MAX_PHOTO_BYTES:
+            logger.info("Фото размером %d байт пропущено мимо NSFW-фильтра "
+                        "(больше %d МБ).",
+                        largest.file_size, MAX_PHOTO_BYTES // (1024 * 1024))
             image_bytes = None
+        else:
+            try:
+                file_info = await bot.get_file(file_id)
+                file_bytes_io = await bot.download_file(file_info.file_path)
+                image_bytes = file_bytes_io.read()
+                if len(image_bytes) > MAX_PHOTO_BYTES:
+                    logger.info("Скачанное фото %d байт > лимита.",
+                                len(image_bytes))
+                    image_bytes = None
+            except Exception:
+                logger.exception("Не удалось скачать фото для NSFW-проверки.")
+                image_bytes = None
 
         if image_bytes:
             allowed, reason = await check_image(image_bytes)
@@ -196,7 +214,6 @@ async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
                     "Пришлите другой скриншот или нажмите «⏭ Пропустить».",
                     reply_markup=_photo_step_kb(),
                 )
-                return
                 return
 
     await _finalize_report(message, state, bot, photo_file_id=file_id)

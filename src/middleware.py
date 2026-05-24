@@ -156,19 +156,32 @@ class ThrottleMiddleware(BaseMiddleware):
 
 
 class CleanupMiddleware(BaseMiddleware):
-    """Периодически чистит словари ThrottleMiddleware от давно неактивных
-    пользователей, чтобы не разрастаться в памяти. Запускается раз в 1000
-    сообщений."""
+    """Чистит словари ThrottleMiddleware от давно неактивных пользователей.
+
+    Триггеры:
+    - каждые 1000 событий (для активного бота)
+    - либо раз в 5 минут (для бота с редкими событиями — иначе при низкой
+      активности память никогда не освобождалась бы).
+    """
+
+    CLEANUP_EVERY_EVENTS = 1000
+    CLEANUP_EVERY_SECONDS = 5 * 60
 
     def __init__(self, throttle: ThrottleMiddleware) -> None:
         super().__init__()
         self._throttle = throttle
         self._counter = 0
+        self._last_cleanup_at: float = time.monotonic()
 
     async def __call__(self, handler, event, data):
         self._counter += 1
-        if self._counter % 1000 == 0:
+        now = time.monotonic()
+        if (
+            self._counter % self.CLEANUP_EVERY_EVENTS == 0
+            or (now - self._last_cleanup_at) > self.CLEANUP_EVERY_SECONDS
+        ):
             await self._cleanup()
+            self._last_cleanup_at = now
         return await handler(event, data)
 
     async def _cleanup(self) -> None:
@@ -177,8 +190,6 @@ class CleanupMiddleware(BaseMiddleware):
         async with self._throttle._lock:
             for store in (self._throttle._last_message,
                           self._throttle._last_callback):
-                # list(store.items()) — обязательно, иначе RuntimeError при
-                # модификации dict во время итерации в pop().
                 stale = [uid for uid, t in list(store.items()) if now - t > cutoff]
                 for uid in stale:
                     store.pop(uid, None)

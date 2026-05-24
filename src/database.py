@@ -1,3 +1,4 @@
+import json as _json
 import logging
 import aiosqlite
 from src.config import DB_PATH
@@ -118,6 +119,21 @@ async def init_db():
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_active
                 ON accounts(telegram_id, is_active)
+        """)
+
+        # Индексы на жалобах — для быстрого запроса истории пользователя,
+        # фильтра «pending» при мониторинге, поиска по нику-цели.
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_complaints_user
+                ON complaints(telegram_id, id DESC)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_complaints_status
+                ON complaints(status)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_complaints_nickname
+                ON complaints(LOWER(nickname))
         """)
 
         # Пользовательские шаблоны жалоб (привязаны к telegram_id юзера)
@@ -413,8 +429,6 @@ async def get_complaint_categories(server_node_id: int) -> dict[str, tuple[str, 
 
 
 # ---------- Форумные аккаунты ----------
-
-import json as _json
 
 
 async def upsert_account(telegram_id: int, username: str, login: str | None,
@@ -940,11 +954,15 @@ async def claim_available_account(telegram_id: int,
                                     cooldown_seconds: int) -> dict | None:
     """Атомарно «забронировать» свободный аккаунт под публикацию.
 
-    UPDATE с RETURNING делает выбор и постановку кулдауна одним запросом,
-    исключая гонку: даже если две жалобы запустятся в одну миллисекунду,
-    каждая получит свой аккаунт (или None если свободных не осталось).
+    Атомарность гарантируется одновременно тремя слоями:
+    1. BEGIN IMMEDIATE — захватывает write-lock SQLite на всю транзакцию,
+       параллельные коннекты на write-операциях ждут.
+    2. SQLite сериализует write-транзакции (single writer model).
+    3. UPDATE с подзапросом SELECT...LIMIT 1 + RETURNING выполняется как
+       единая операция: между SELECT и UPDATE невозможно вклиниться.
 
-    Если свободных нет — возвращает None и НЕ ставит кулдаун.
+    Поэтому даже если N воркеров одновременно вызовут эту функцию —
+    каждому достанется свой аккаунт (или None если свободных нет).
 
     SQLite 3.35+ требуется для RETURNING.
     """

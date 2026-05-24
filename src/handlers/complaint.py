@@ -822,9 +822,17 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
 
     status_msg = await message.answer("⏳ Загружаю скриншот на imgbb...")
 
+    # Защита от больших файлов: лучше проверить размер ДО скачивания
+    largest = message.photo[-1]
+    if largest.file_size and largest.file_size > 32 * 1024 * 1024:
+        await status_msg.edit_text(
+            "❌ Файл больше 32 МБ — imgbb не примет. "
+            "Пришлите файл меньше или вставьте ссылку текстом."
+        )
+        return
+
     try:
-        # Берём самое большое фото из присланных миниатюр
-        file_id = message.photo[-1].file_id
+        file_id = largest.file_id
         file_info = await bot.get_file(file_id)
         file_bytes_io = await bot.download_file(file_info.file_path)
         image_bytes = file_bytes_io.read()

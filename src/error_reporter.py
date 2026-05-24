@@ -114,7 +114,9 @@ class TelegramErrorHandler(logging.Handler):
         import time
         async with _recent_lock:
             now = time.monotonic()
-            for k, t in list(_recent_keys):
+            # deque поддерживает прямой обход без копирования. Под Lock-ом
+            # содержимое стабильно — list() здесь был лишним.
+            for k, t in _recent_keys:
                 if k == key and (now - t) < SUPPRESS_REPEAT_SECONDS:
                     return
             _recent_keys.append((key, now))
@@ -148,11 +150,18 @@ class TelegramErrorHandler(logging.Handler):
                 disable_web_page_preview=True,
                 disable_notification=False,
             )
-        except (TelegramBadRequest, TelegramForbiddenError):
-            pass
-        except Exception:
-            # Глушим — handler не должен сам себя ронять
-            pass
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            # Telegram отказал (форматирование, чат закрыт) — пишем в stderr
+            # обычным root-логгером в обход самих себя, чтобы не зацикливаться.
+            import sys
+            print(f"[error_reporter] Telegram API отверг отчёт: {e}",
+                  file=sys.stderr)
+        except Exception as e:
+            # Не вызываем logger.exception — он триггернёт нас же. Пишем в
+            # stderr напрямую: это последний шанс увидеть ошибку.
+            import sys
+            print(f"[error_reporter] не удалось отправить отчёт: {e!r}",
+                  file=sys.stderr)
 
 
 def install(bot: Bot) -> bool:
