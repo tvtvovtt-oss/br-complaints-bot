@@ -237,3 +237,61 @@ class MaintenanceMiddleware(BaseMiddleware):
             pass
         # Не зовём handler — событие игнорируется
         return None
+
+
+class BanMiddleware(BaseMiddleware):
+    """Блокирует забаненных пользователей. Подключается ПЕРЕД
+    MaintenanceMiddleware. Админов не трогает."""
+
+    # Кэш в памяти на 30 секунд, чтобы не дёргать БД на каждое событие.
+    def __init__(self) -> None:
+        super().__init__()
+        # telegram_id -> (is_banned, reason, expires_at)
+        self._cache: dict[int, tuple[bool, str | None, float]] = {}
+        self._ttl = 30.0
+
+    async def _check(self, telegram_id: int) -> tuple[bool, str | None]:
+        now = time.monotonic()
+        cached = self._cache.get(telegram_id)
+        if cached and cached[2] > now:
+            return cached[0], cached[1]
+        from src.database import is_banned
+        rec = await is_banned(telegram_id)
+        is_b = rec is not None
+        reason = rec.get("reason") if rec else None
+        self._cache[telegram_id] = (is_b, reason, now + self._ttl)
+        return is_b, reason
+
+    def invalidate(self, telegram_id: int) -> None:
+        """Сбросить кэш для конкретного пользователя (после ban/unban)."""
+        self._cache.pop(telegram_id, None)
+
+    async def __call__(self, handler, event, data):
+        from src.config import ADMIN_IDS
+
+        user = data.get("event_from_user")
+        if user is None:
+            return await handler(event, data)
+        # Админа банить нельзя — пропускаем без проверок
+        if ADMIN_IDS and user.id in ADMIN_IDS:
+            return await handler(event, data)
+
+        is_b, reason = await self._check(user.id)
+        if not is_b:
+            return await handler(event, data)
+
+        from aiogram.types import Message, CallbackQuery
+        reason_part = f"\n\n<i>Причина:</i> {reason}" if reason else ""
+        text = (
+            "🚫 <b>Вы заблокированы в этом боте.</b>"
+            f"{reason_part}\n\n"
+            "Если считаете блокировку ошибкой — напишите администратору."
+        )
+        try:
+            if isinstance(event, Message):
+                await event.answer(text)
+            elif isinstance(event, CallbackQuery):
+                await event.answer("🚫 Вы заблокированы.", show_alert=True)
+        except Exception:
+            pass
+        return None

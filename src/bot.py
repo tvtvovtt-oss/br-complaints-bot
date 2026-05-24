@@ -21,7 +21,9 @@ from src.config import DB_PATH, COOKIES_PATH
 from src.database import init_db
 from src.handlers import common, complaint, bugreport, admin
 from src.logger import setup_logging
-from src.middleware import ThrottleMiddleware, CleanupMiddleware, MaintenanceMiddleware
+from src.middleware import (
+    ThrottleMiddleware, CleanupMiddleware, MaintenanceMiddleware, BanMiddleware,
+)
 from src.status_monitor import status_monitor_loop
 from src.queue_processor import queue_processor_loop
 from src.error_reporter import install as install_error_reporter
@@ -73,12 +75,18 @@ async def main():
     cleanup = CleanupMiddleware(throttle)
     dp.message.middleware(cleanup)
     dp.callback_query.middleware(cleanup)
+    # Бан забаненных пользователей (до проверки maintenance — иначе бан
+    # без причины «обнулится» сообщением о техработах)
+    from src.handlers.admin import set_ban_middleware
+    ban = BanMiddleware()
+    set_ban_middleware(ban)
+    dp.message.middleware(ban)
+    dp.callback_query.middleware(ban)
     # Режим обслуживания — отказ обычным юзерам если админ включил
     maintenance = MaintenanceMiddleware()
     dp.message.middleware(maintenance)
     dp.callback_query.middleware(maintenance)
-    logger.info("Подключён ThrottleMiddleware (rate-limit и soft-ban) + "
-                "MaintenanceMiddleware.")
+    logger.info("Подключены middleware: Throttle, Ban, Maintenance.")
 
     dp.include_router(common.router)
     dp.include_router(complaint.router)
@@ -145,7 +153,11 @@ async def main():
         BotCommand(command="stats", description="📊 Статистика"),
         BotCommand(command="broadcast", description="📢 Рассылка"),
         BotCommand(command="queue", description="📦 Очередь жалоб"),
+        BotCommand(command="complaints", description="📋 Все жалобы (просмотр)"),
         BotCommand(command="bugs", description="🐞 Список баг-репортов"),
+        BotCommand(command="ban", description="🚫 Забанить пользователя"),
+        BotCommand(command="unban", description="✅ Разбанить пользователя"),
+        BotCommand(command="banlist", description="🚫 Список забаненных"),
         BotCommand(command="maintenance", description="🔒 Режим обслуживания"),
         BotCommand(command="dbinfo", description="🛠 Состояние БД"),
     ]

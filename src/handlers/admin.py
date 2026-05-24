@@ -15,12 +15,38 @@ from src.database import (
     get_stats,
     list_all_users,
     list_queue_pending,
+    ban_user,
+    unban_user,
+    list_banned,
+    is_banned,
+    list_complaints_paginated,
+    get_complaint,
+    delete_complaint,
 )
 from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+# Глобальный экземпляр BanMiddleware — заполняется при старте бота через
+# set_ban_middleware(). Нужен чтобы ban/unban команды могли инвалидировать
+# 30-секундный кэш middleware и эффект применился сразу.
+_ban_mw = None
+
+
+def set_ban_middleware(mw) -> None:
+    global _ban_mw
+    _ban_mw = mw
+
+
+def _invalidate_ban_cache(telegram_id: int) -> None:
+    if _ban_mw is not None:
+        try:
+            _ban_mw.invalidate(telegram_id)
+        except Exception:
+            pass
 
 
 # ---------------- Статистика ----------------
@@ -637,3 +663,421 @@ async def maint_off(call: types.CallbackQuery):
     except Exception:
         pass
     await call.answer("🔓 Выключено")
+
+
+# ---------------- Бан / разбан пользователей ----------------
+
+def _parse_ban_args(args: str) -> tuple[int | None, str | None]:
+    """Парсит «<id> [причина...]» → (id, reason). Возвращает (None, None)
+    если id не распознан."""
+    args = (args or "").strip()
+    if not args:
+        return None, None
+    parts = args.split(maxsplit=1)
+    raw_id = parts[0].lstrip("@").lstrip("#")
+    if not raw_id.isdigit():
+        return None, None
+    reason = parts[1].strip() if len(parts) > 1 else None
+    return int(raw_id), reason
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: types.Message, command: Command):
+    """Забанить пользователя в боте. Использование:
+        /ban <telegram_id> [причина]
+    """
+    if not is_admin(message.from_user.id):
+        return
+    user_id, reason = _parse_ban_args(command.args or "")
+    if user_id is None:
+        await message.answer(
+            "Использование: <code>/ban &lt;telegram_id&gt; [причина]</code>\n"
+            "Пример: <code>/ban 123456789 спам жалобами</code>"
+        )
+        return
+
+    if is_admin(user_id):
+        await message.answer("🔒 Нельзя забанить админа.")
+        return
+
+    new_ban = await ban_user(
+        telegram_id=user_id, reason=reason, banned_by=message.from_user.id,
+    )
+    _invalidate_ban_cache(user_id)
+    logger.info("Админ %s забанил user_id=%s. Причина: %s.",
+                describe_user(message.from_user), user_id, reason or "—")
+
+    suffix = "🆕" if new_ban else "🔁 (обновлён)"
+    reason_part = f"\nПричина: <i>{escape(reason)}</i>" if reason else ""
+    await message.answer(
+        f"🚫 <b>Пользователь {user_id} забанен</b> {suffix}.{reason_part}"
+    )
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: types.Message, command: Command):
+    """Разбанить пользователя. Использование: /unban <telegram_id>"""
+    if not is_admin(message.from_user.id):
+        return
+    raw = (command.args or "").strip().lstrip("@").lstrip("#")
+    if not raw.isdigit():
+        await message.answer(
+            "Использование: <code>/unban &lt;telegram_id&gt;</code>"
+        )
+        return
+    user_id = int(raw)
+    ok = await unban_user(user_id)
+    _invalidate_ban_cache(user_id)
+    if ok:
+        logger.info("Админ %s разбанил user_id=%s.",
+                    describe_user(message.from_user), user_id)
+        await message.answer(f"✅ Пользователь {user_id} разбанен.")
+    else:
+        await message.answer(f"ℹ️ Пользователь {user_id} не был забанен.")
+
+
+@router.message(Command("baninfo"))
+async def cmd_baninfo(message: types.Message, command: Command):
+    """Информация о бане конкретного пользователя.
+    Использование: /baninfo <telegram_id>"""
+    if not is_admin(message.from_user.id):
+        return
+    raw = (command.args or "").strip().lstrip("@").lstrip("#")
+    if not raw.isdigit():
+        await message.answer(
+            "Использование: <code>/baninfo &lt;telegram_id&gt;</code>"
+        )
+        return
+    rec = await is_banned(int(raw))
+    if not rec:
+        await message.answer(f"✅ Пользователь {raw} не забанен.")
+        return
+    reason = escape(rec.get("reason") or "—")
+    by = rec.get("banned_by") or "—"
+    when = escape(str(rec.get("banned_at") or "—"))
+    await message.answer(
+        f"🚫 <b>Пользователь {raw} забанен</b>\n"
+        f"Причина: <i>{reason}</i>\n"
+        f"Кто: <code>{by}</code>\n"
+        f"Когда: <code>{when}</code>"
+    )
+
+
+@router.message(Command("banlist"))
+async def cmd_banlist(message: types.Message):
+    """Все забаненные пользователи."""
+    if not is_admin(message.from_user.id):
+        return
+    bans = await list_banned()
+    if not bans:
+        await message.answer("📭 Список банов пуст.")
+        return
+
+    lines = [f"🚫 <b>Забанено: {len(bans)}</b>\n"]
+    for b in bans[:50]:
+        reason = escape(b["reason"]) if b["reason"] else "<i>без причины</i>"
+        lines.append(
+            f"• <code>{b['telegram_id']}</code> — {reason}\n"
+            f"   <i>{escape(str(b['banned_at']))}</i>"
+        )
+    if len(bans) > 50:
+        lines.append(f"\n…и ещё {len(bans) - 50}")
+    await message.answer("\n\n".join(lines))
+
+
+# ---------------- Просмотр всех жалоб (с пагинацией) ----------------
+
+# Размер страницы для /complaints
+COMPLAINTS_PAGE_SIZE = 8
+
+
+def _complaints_list_kb(page: int, total_pages: int,
+                          status_filter: str | None) -> types.InlineKeyboardMarkup:
+    """Строит клавиатуру навигации по списку жалоб."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    nav: list[types.InlineKeyboardButton] = []
+    if page > 1:
+        nav.append(types.InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"adm_cs:{page - 1}:{status_filter or 'all'}",
+        ))
+    nav.append(types.InlineKeyboardButton(
+        text=f"📄 {page}/{total_pages or 1}",
+        callback_data="adm_cs_noop",
+    ))
+    if page < total_pages:
+        nav.append(types.InlineKeyboardButton(
+            text="Вперёд ▶️",
+            callback_data=f"adm_cs:{page + 1}:{status_filter or 'all'}",
+        ))
+    if nav:
+        rows.append(nav)
+
+    # Фильтры по статусу
+    rows.append([
+        types.InlineKeyboardButton(
+            text="🔄 Все" + (" ✓" if not status_filter else ""),
+            callback_data="adm_cs:1:all",
+        ),
+        types.InlineKeyboardButton(
+            text="⏳ В ожидании" + (" ✓" if status_filter == "pending" else ""),
+            callback_data="adm_cs:1:pending",
+        ),
+    ])
+    rows.append([
+        types.InlineKeyboardButton(
+            text="✅ Принято" + (" ✓" if status_filter == "accepted" else ""),
+            callback_data="adm_cs:1:accepted",
+        ),
+        types.InlineKeyboardButton(
+            text="❌ Отказано" + (" ✓" if status_filter == "rejected" else ""),
+            callback_data="adm_cs:1:rejected",
+        ),
+    ])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _complaint_actions_kb(complaint_id: int,
+                            has_thread: bool) -> types.InlineKeyboardMarkup:
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if has_thread:
+        rows.append([types.InlineKeyboardButton(
+            text="🔗 Открыть на форуме",
+            callback_data=f"adm_c_open_url:{complaint_id}",
+        )])
+    rows.append([
+        types.InlineKeyboardButton(
+            text="🗂 Удалить из истории",
+            callback_data=f"adm_c_del:{complaint_id}",
+        ),
+        types.InlineKeyboardButton(
+            text="🚫 Забанить автора",
+            callback_data=f"adm_c_banauth:{complaint_id}",
+        ),
+    ])
+    rows.append([types.InlineKeyboardButton(
+        text="◀️ К списку", callback_data="adm_cs:1:all",
+    )])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_complaint_short(c: dict) -> str:
+    """Строка для списка."""
+    status_emoji = {
+        "pending": "⏳", "accepted": "✅", "rejected": "❌", "closed": "🔒",
+    }.get(c["status"], "❔")
+    summary = c.get("summary") or ""
+    target = escape(c["nickname"])
+    info = f"{status_emoji} <b>#{c['id']}</b> • <code>{c['telegram_id']}</code> → <b>{target}</b>"
+    if summary:
+        info += f" • <i>{escape(summary)}</i>"
+    return info
+
+
+async def _render_complaints_page(page: int,
+                                    status_filter: str | None) -> tuple[str, types.InlineKeyboardMarkup]:
+    items, total = await list_complaints_paginated(
+        page=page,
+        page_size=COMPLAINTS_PAGE_SIZE,
+        status=status_filter,
+    )
+    total_pages = max(1, (total + COMPLAINTS_PAGE_SIZE - 1) // COMPLAINTS_PAGE_SIZE)
+
+    if total == 0:
+        text = (
+            "📭 <b>Нет жалоб</b>"
+            + (f" в статусе «{status_filter}»" if status_filter else "")
+            + "."
+        )
+    else:
+        header = f"📋 <b>Жалобы — стр. {page}/{total_pages}</b>"
+        if status_filter:
+            header += f"  •  фильтр: <code>{status_filter}</code>"
+        header += f"\n<i>Всего: {total}</i>\n"
+        body = "\n\n".join(_format_complaint_short(c) for c in items)
+        body += "\n\n<i>Нажмите кнопку ниже чтобы открыть подробности конкретной жалобы.</i>"
+        text = f"{header}\n{body}"
+
+    rows: list[list[types.InlineKeyboardButton]] = []
+    # Кнопки на конкретные жалобы
+    for c in items:
+        rows.append([types.InlineKeyboardButton(
+            text=f"📄 #{c['id']} {c['nickname']}",
+            callback_data=f"adm_c_open:{c['id']}",
+        )])
+    # Навигация
+    nav_kb = _complaints_list_kb(page, total_pages, status_filter)
+    rows.extend(nav_kb.inline_keyboard)
+    return text, types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("complaints"))
+async def cmd_complaints(message: types.Message):
+    """Список всех жалоб (для админа). Поддерживает фильтр по статусу."""
+    if not is_admin(message.from_user.id):
+        return
+    text, kb = await _render_complaints_page(page=1, status_filter=None)
+    await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data == "adm_cs_noop")
+async def adm_cs_noop(call: types.CallbackQuery):
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_cs:"))
+async def adm_complaints_navigate(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    parts = call.data.split(":", 2)
+    page = int(parts[1])
+    status_arg = parts[2] if len(parts) > 2 else "all"
+    status_filter = None if status_arg == "all" else status_arg
+
+    text, kb = await _render_complaints_page(page=page, status_filter=status_filter)
+    try:
+        await call.message.edit_text(
+            text, reply_markup=kb, disable_web_page_preview=True,
+        )
+    except Exception:
+        # содержимое не изменилось — просто закрываем спиннер
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_c_open:"))
+async def adm_complaint_open(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+
+    status_label_map = {
+        "pending": "⏳ В ожидании",
+        "accepted": "✅ Принята",
+        "rejected": "❌ Отклонена",
+        "closed":   "🔒 Закрыта",
+    }
+    status = comp.get("status") or "pending"
+    label = status_label_map.get(status, status)
+
+    target = escape(comp["nickname"])
+    your_nick = escape(comp.get("your_nickname") or "—")
+    summary = escape(comp.get("summary") or "—")
+    description = escape((comp.get("description") or "")[:1500])
+    proof = escape(comp.get("proof_link") or "—")
+    server = escape(comp.get("server_name") or "—")
+    category = escape(comp.get("category_key") or "—")
+    pdate = escape(comp.get("punishment_date") or "—")
+    created = escape(str(comp.get("created_at") or "—"))
+    thread_url = comp.get("forum_thread_url")
+
+    parts = [
+        f"📄 <b>Жалоба #{comp['id']}</b> — {label}",
+        f"<i>Создана: {created}</i>",
+        "",
+        f"👤 Автор: <code>{comp['telegram_id']}</code>",
+        f"🎮 Сервер: {server}",
+        f"📁 Категория: <code>{category}</code>",
+        f"🔫 Цель: <b>{target}</b>",
+        f"📝 Ваш ник в жалобе: <b>{your_nick}</b>",
+        f"📌 Суть: {summary}",
+    ]
+    if pdate and pdate != "—":
+        parts.append(f"📅 Дата наказания: {pdate}")
+    parts.append("")
+    parts.append(f"📖 <b>Описание:</b>\n<blockquote>{description}</blockquote>")
+    parts.append(f"🔗 <b>Доказательства:</b>\n<code>{proof}</code>")
+    if thread_url:
+        parts.append(
+            f"\n🌐 <a href=\"{escape(thread_url)}\">Тема на форуме</a>"
+        )
+
+    text = "\n".join(parts)
+    kb = _complaint_actions_kb(comp["id"], has_thread=bool(thread_url))
+    try:
+        await call.message.edit_text(
+            text, reply_markup=kb, disable_web_page_preview=True,
+        )
+    except TelegramBadRequest:
+        # если очень длинное — отправляем новым сообщением
+        await call.message.answer(
+            text, reply_markup=kb, disable_web_page_preview=True,
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_c_open_url:"))
+async def adm_complaint_open_url(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp or not comp.get("forum_thread_url"):
+        await call.answer("Нет ссылки.", show_alert=True)
+        return
+    await call.answer()
+    await call.message.answer(
+        f"🔗 {escape(comp['forum_thread_url'])}",
+        disable_web_page_preview=False,
+    )
+
+
+@router.callback_query(F.data.startswith("adm_c_del:"))
+async def adm_complaint_delete(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+    # Удаляем по telegram_id автора жалобы (схема delete_complaint)
+    ok = await delete_complaint(comp["telegram_id"], cid)
+    if ok:
+        logger.info("Админ %s удалил жалобу #%s из истории.",
+                    describe_user(call.from_user), cid)
+        await call.answer("🗂 Удалена из истории", show_alert=False)
+        # Возвращаем к списку
+        text, kb = await _render_complaints_page(page=1, status_filter=None)
+        try:
+            await call.message.edit_text(
+                text, reply_markup=kb, disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+    else:
+        await call.answer("Не удалось удалить.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("adm_c_banauth:"))
+async def adm_complaint_ban_author(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+    author_id = comp["telegram_id"]
+    if is_admin(author_id):
+        await call.answer("🔒 Нельзя банить админа.", show_alert=True)
+        return
+
+    await ban_user(
+        telegram_id=author_id,
+        reason=f"Бан через карточку жалобы #{cid}",
+        banned_by=call.from_user.id,
+    )
+    _invalidate_ban_cache(author_id)
+    logger.info("Админ %s забанил автора жалобы #%s (user_id=%s).",
+                describe_user(call.from_user), cid, author_id)
+    await call.answer(f"🚫 Забанен {author_id}", show_alert=True)

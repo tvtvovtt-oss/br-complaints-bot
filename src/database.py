@@ -1409,3 +1409,151 @@ async def set_setting(key: str, value: str) -> None:
         )
         await db.commit()
     await _trigger_backup()
+
+
+# ---------- Бан пользователей бота ----------
+
+async def _ensure_bans_table(db: aiosqlite.Connection) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS banned_users (
+            telegram_id INTEGER PRIMARY KEY,
+            reason TEXT,
+            banned_by INTEGER,
+            banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+async def ban_user(telegram_id: int, reason: str | None = None,
+                    banned_by: int | None = None) -> bool:
+    """Добавляет пользователя в бан-лист. Возвращает True если добавлено
+    впервые (False — уже был забанен и просто обновили причину)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_bans_table(db)
+        async with db.execute(
+            "SELECT 1 FROM banned_users WHERE telegram_id = ?",
+            (telegram_id,),
+        ) as cur:
+            already = await cur.fetchone() is not None
+
+        await db.execute(
+            """
+            INSERT INTO banned_users (telegram_id, reason, banned_by, banned_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                reason = excluded.reason,
+                banned_by = excluded.banned_by,
+                banned_at = CURRENT_TIMESTAMP
+            """,
+            (telegram_id, reason, banned_by),
+        )
+        await db.commit()
+    logger.info("Пользователь telegram_id=%s забанен (причина: %s, кем: %s).",
+                telegram_id, reason or "—", banned_by)
+    await _trigger_backup()
+    return not already
+
+
+async def unban_user(telegram_id: int) -> bool:
+    """Снимает бан. True если пользователь был забанен."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_bans_table(db)
+        cur = await db.execute(
+            "DELETE FROM banned_users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        await db.commit()
+        ok = cur.rowcount > 0
+    if ok:
+        logger.info("Пользователь telegram_id=%s разбанен.", telegram_id)
+        await _trigger_backup()
+    return ok
+
+
+async def is_banned(telegram_id: int) -> dict | None:
+    """Возвращает запись о бане {reason, banned_by, banned_at} или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_bans_table(db)
+        async with db.execute(
+            "SELECT reason, banned_by, banned_at FROM banned_users "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {"reason": row[0], "banned_by": row[1], "banned_at": row[2]}
+
+
+async def list_banned() -> list[dict]:
+    """Все забаненные."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_bans_table(db)
+        async with db.execute(
+            "SELECT telegram_id, reason, banned_by, banned_at "
+            "FROM banned_users ORDER BY banned_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                {"telegram_id": r[0], "reason": r[1],
+                 "banned_by": r[2], "banned_at": r[3]}
+                for r in rows
+            ]
+
+
+# ---------- Расширенный поиск жалоб для админа ----------
+
+async def list_complaints_paginated(
+    page: int = 1,
+    page_size: int = 10,
+    status: str | None = None,
+    target_nickname: str | None = None,
+    telegram_id: int | None = None,
+) -> tuple[list[dict], int]:
+    """Постраничный список жалоб для админа с фильтрами.
+
+    Возвращает (список_жалоб, total_count).
+    """
+    where_parts: list[str] = []
+    params: list = []
+    if status:
+        where_parts.append("status = ?")
+        params.append(status)
+    if target_nickname:
+        where_parts.append("LOWER(nickname) LIKE LOWER(?)")
+        params.append(f"%{target_nickname}%")
+    if telegram_id is not None:
+        where_parts.append("telegram_id = ?")
+        params.append(telegram_id)
+
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    offset = max(0, (page - 1) * page_size)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"SELECT COUNT(*) FROM complaints {where_sql}", params,
+        ) as cur:
+            total = (await cur.fetchone())[0]
+
+        async with db.execute(
+            f"""
+            SELECT id, telegram_id, nickname, status, forum_thread_url,
+                   server_name, summary, created_at
+            FROM complaints {where_sql}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [page_size, offset],
+        ) as cur:
+            rows = await cur.fetchall()
+            items = [
+                {
+                    "id": r[0], "telegram_id": r[1], "nickname": r[2],
+                    "status": r[3] or "pending",
+                    "forum_thread_url": r[4],
+                    "server_name": r[5], "summary": r[6],
+                    "created_at": r[7],
+                }
+                for r in rows
+            ]
+    return items, total
