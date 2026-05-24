@@ -1557,3 +1557,19 @@ async def list_complaints_paginated(
                 for r in rows
             ]
     return items, total
+
+
+async def admin_delete_complaint(complaint_id: int) -> bool:
+    """Админское удаление жалобы из БД без проверки автора (в отличие от
+    delete_complaint, где telegram_id обязателен). Возвращает True если
+    запись удалилась."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM complaints WHERE id = ?", (complaint_id,),
+        )
+        await db.commit()
+        ok = cur.rowcount > 0
+    if ok:
+        logger.info("Админское удаление жалобы #%s из БД.", complaint_id)
+        await _trigger_backup()
+    return ok

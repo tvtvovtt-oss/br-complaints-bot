@@ -21,7 +21,6 @@ from src.database import (
     is_banned,
     list_complaints_paginated,
     get_complaint,
-    delete_complaint,
 )
 from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
@@ -845,9 +844,13 @@ def _complaint_actions_kb(complaint_id: int,
             text="🔗 Открыть на форуме",
             callback_data=f"adm_c_open_url:{complaint_id}",
         )])
+        rows.append([types.InlineKeyboardButton(
+            text="🗑 Удалить с форума и из БД",
+            callback_data=f"adm_c_delf:{complaint_id}",
+        )])
     rows.append([
         types.InlineKeyboardButton(
-            text="🗂 Удалить из истории",
+            text="🗂 Удалить из БД",
             callback_data=f"adm_c_del:{complaint_id}",
         ),
         types.InlineKeyboardButton(
@@ -1031,6 +1034,7 @@ async def adm_complaint_open_url(call: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_c_del:"))
 async def adm_complaint_delete(call: types.CallbackQuery):
+    """Удаление жалобы только из БД (тема на форуме остаётся)."""
     if not is_admin(call.from_user.id):
         await call.answer("🔒 Только для админов.", show_alert=True)
         return
@@ -1039,13 +1043,12 @@ async def adm_complaint_delete(call: types.CallbackQuery):
     if not comp:
         await call.answer("Жалоба не найдена.", show_alert=True)
         return
-    # Удаляем по telegram_id автора жалобы (схема delete_complaint)
-    ok = await delete_complaint(comp["telegram_id"], cid)
+    from src.database import admin_delete_complaint
+    ok = await admin_delete_complaint(cid)
     if ok:
-        logger.info("Админ %s удалил жалобу #%s из истории.",
+        logger.info("Админ %s удалил жалобу #%s из БД.",
                     describe_user(call.from_user), cid)
-        await call.answer("🗂 Удалена из истории", show_alert=False)
-        # Возвращаем к списку
+        await call.answer("🗂 Удалена из БД", show_alert=False)
         text, kb = await _render_complaints_page(page=1, status_filter=None)
         try:
             await call.message.edit_text(
@@ -1055,6 +1058,113 @@ async def adm_complaint_delete(call: types.CallbackQuery):
             pass
     else:
         await call.answer("Не удалось удалить.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("adm_c_delf:"))
+async def adm_complaint_delete_forum(call: types.CallbackQuery):
+    """Удаление темы на форуме + жалобы из БД. Использует куки того
+    аккаунта, под которым жалоба подавалась (только автор может удалять)."""
+    if not is_admin(call.from_user.id):
+        await call.answer("🔒 Только для админов.", show_alert=True)
+        return
+    cid = int(call.data.split(":", 1)[1])
+    comp = await get_complaint(cid)
+    if not comp:
+        await call.answer("Жалоба не найдена.", show_alert=True)
+        return
+    if not comp.get("forum_thread_url"):
+        await call.answer("У жалобы нет ссылки на форум.", show_alert=True)
+        return
+
+    await call.answer("⏳ Удаляю тему на форуме...")
+    try:
+        await call.message.edit_text(
+            "⏳ <b>Удаляю тему на форуме и из БД...</b>"
+        )
+    except Exception:
+        pass
+
+    # Куки аккаунта-автора жалобы
+    from src.database import get_account, admin_delete_complaint
+    from src.forum.xenforo import apply_account_cookies, delete_thread
+
+    if comp.get("account_id"):
+        acc_full = await get_account(comp["account_id"])
+        if acc_full and acc_full.get("cookies"):
+            apply_account_cookies(acc_full["cookies"])
+
+    success, msg = await delete_thread(
+        comp["forum_thread_url"],
+        reason="Удалено администратором бота",
+    )
+
+    if success:
+        await admin_delete_complaint(cid)
+        logger.info("Админ %s удалил жалобу #%s с форума и из БД (%s).",
+                    describe_user(call.from_user), cid, msg)
+        try:
+            await call.message.edit_text(
+                f"🗑 <b>Жалоба #{cid} удалена</b> с форума и из БД.\n\n"
+                f"<i>{escape(str(msg))}</i>"
+            )
+        except Exception:
+            pass
+    else:
+        logger.warning("Не удалось удалить жалобу #%s с форума: %s", cid, msg)
+        # Спросим — удалить только из БД? Кнопкой.
+        try:
+            kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(
+                    text="🗂 Удалить только из БД",
+                    callback_data=f"adm_c_del:{cid}",
+                )],
+                [types.InlineKeyboardButton(
+                    text="◀️ Назад к карточке",
+                    callback_data=f"adm_c_open:{cid}",
+                )],
+            ])
+            await call.message.edit_text(
+                f"❌ <b>Не удалось удалить тему на форуме.</b>\n\n"
+                f"<i>{escape(str(msg))}</i>\n\n"
+                f"Возможно, истёк срок удаления или у аккаунта нет прав.\n"
+                f"Можно удалить только из БД (тема на форуме останется):",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
+
+@router.message(Command("delcomplaint"))
+async def cmd_delcomplaint(message: types.Message, command: Command):
+    """Удаление жалобы по id из БД (без удаления темы на форуме).
+    Использование: /delcomplaint <id>"""
+    if not is_admin(message.from_user.id):
+        return
+    raw = (command.args or "").strip()
+    if not raw.isdigit():
+        await message.answer(
+            "Использование: <code>/delcomplaint &lt;id&gt;</code>\n\n"
+            "Чтобы удалить и с форума — откройте жалобу через "
+            "<code>/complaints</code> и нажмите «🗑 Удалить с форума и из БД»."
+        )
+        return
+    cid = int(raw)
+    comp = await get_complaint(cid)
+    if not comp:
+        await message.answer(f"Жалоба #{cid} не найдена.")
+        return
+    from src.database import admin_delete_complaint
+    ok = await admin_delete_complaint(cid)
+    if ok:
+        logger.info("Админ %s удалил жалобу #%s через /delcomplaint.",
+                    describe_user(message.from_user), cid)
+        await message.answer(
+            f"🗂 Жалоба #{cid} удалена из БД.\n"
+            f"Тема на форуме (если была) <b>сохранена</b>."
+        )
+    else:
+        await message.answer(f"Не удалось удалить жалобу #{cid}.")
 
 
 @router.callback_query(F.data.startswith("adm_c_banauth:"))

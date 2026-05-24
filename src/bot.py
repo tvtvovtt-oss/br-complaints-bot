@@ -154,6 +154,7 @@ async def main():
         BotCommand(command="broadcast", description="📢 Рассылка"),
         BotCommand(command="queue", description="📦 Очередь жалоб"),
         BotCommand(command="complaints", description="📋 Все жалобы (просмотр)"),
+        BotCommand(command="delcomplaint", description="🗂 Удалить жалобу по id"),
         BotCommand(command="bugs", description="🐞 Список баг-репортов"),
         BotCommand(command="ban", description="🚫 Забанить пользователя"),
         BotCommand(command="unban", description="✅ Разбанить пользователя"),
