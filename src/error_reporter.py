@@ -90,9 +90,14 @@ class TelegramErrorHandler(logging.Handler):
         except Exception:
             return
 
-        # Запускаем отправку в фоне — emit() не должен блокировать
+        # Запускаем отправку в фоне — emit() не должен блокировать.
+        # get_running_loop() корректен в py3.10+; если цикла нет (логирование
+        # из синхронного кода до запуска бота) — просто пропускаем.
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
             loop.create_task(self._send(record, text))
         except RuntimeError:
             pass

@@ -171,8 +171,6 @@ async def bug_skip_photo(message: types.Message, state: FSMContext, bot: Bot):
 
 @router.message(BugForm.waiting_for_photo, F.photo)
 async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
-    if await _bug_cancel(message, state):
-        return
     # photo — список миниатюр, берём самую большую (последнюю)
     file_id = message.photo[-1].file_id
 
@@ -198,6 +196,7 @@ async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
                     "Пришлите другой скриншот или нажмите «⏭ Пропустить».",
                     reply_markup=_photo_step_kb(),
                 )
+                return
                 return
 
     await _finalize_report(message, state, bot, photo_file_id=file_id)

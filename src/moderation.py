@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 import httpx
 
@@ -126,7 +125,6 @@ async def check_image(image_bytes: bytes,
     nazi = float(offensive.get("nazi", 0.0))
     supremacist = float(offensive.get("supremacist", 0.0))
     terrorist = float(offensive.get("terrorist", 0.0))
-    middle_finger = float(offensive.get("middle_finger", 0.0))
     offensive_score = max(nazi, supremacist, terrorist)
 
     if offensive_score >= OFFENSIVE_THRESHOLD:
@@ -136,7 +134,8 @@ async def check_image(image_bytes: bytes,
         return False, ("обнаружена запрещённая символика "
                        "(нацистская/экстремистская)")
 
-    # middle_finger чаще всего безобиден на скриншотах из игры — не блокируем
+    # middle_finger / прочую мелочь не блокируем — на скриншотах из игры
+    # это безобидно.
 
     logger.debug("Sightengine: ок (nudity=%.2f, gore=%.2f, offensive=%.2f).",
                  nudity_score, gore_prob, offensive_score)
