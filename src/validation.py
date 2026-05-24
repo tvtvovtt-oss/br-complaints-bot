@@ -51,7 +51,7 @@ _BAD_WORD_ROOTS = [
     r"бз[дd]",               # бзд*
     r"п[еe]т[уy][хx]",       # петух (как оскорбление)
     r"с[оo]сн",              # сосн*
-    r"трах",                 # трах*
+    r"\bтрах",               # трах* (только в начале слова, чтобы не цеплять «страх»)
     r"мудозвон",             # мудозвон
     r"еблан",                # еблан
     r"очк[оo]",              # очко (контекст бранный)
@@ -130,6 +130,83 @@ def contains_profanity(text: str) -> bool:
 # покрыть как обычные ники (Bruce_Banner), так и редкие длинные (Iv_Petrov123).
 NICK_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{2,23}_[A-Za-z][A-Za-z0-9]{1,23}$")
 
+# Гласные (включая Y — в реальных никах часто играет роль гласной: Tommy, Sky)
+_VOWELS = set("aeiouy")
+
+# Максимум согласных подряд: реальные ники обычно дают не больше 4 подряд
+# (Strzelecki, McKinley). 5+ — почти всегда случайный набор клавиш.
+_MAX_CONSONANTS_IN_ROW = 4
+
+# Максимум одного и того же символа подряд: реальные ники "Carrado", "Tommy"
+# имеют максимум 2 одинаковые подряд. 4+ — фейк (xxxxxx, aaaaaa).
+_MAX_SAME_CHAR_IN_ROW = 3
+
+# Минимальная доля гласных в части ника (для частей длиннее 4 букв)
+_MIN_VOWEL_RATIO = 0.18  # 18%
+
+# Клавиатурные ряды и подпоследовательности — почти всегда мусор
+_KEYBOARD_ROWS = (
+    "qwertyuiop", "asdfghjkl", "zxcvbnm",
+    "1234567890",
+    "йцукенгшщзхъ", "фывапролджэ", "ячсмитьбю",  # на всякий — кириллицу всё
+                                                  # равно регекс отбросит, но пусть
+)
+# Минимальная длина клавиатурного фрагмента, который считаем подозрительным
+_KEYBOARD_MIN_RUN = 4
+
+
+def _has_keyboard_run(text: str) -> bool:
+    """True если в строке встречается ≥4 подряд идущих символов с одного
+    ряда клавиатуры (qwer, asdf, zxcv, 1234 и т.п.). Берём как прямую,
+    так и обратную последовательность."""
+    low = text.lower()
+    for row in _KEYBOARD_ROWS:
+        for start in range(len(row) - _KEYBOARD_MIN_RUN + 1):
+            chunk = row[start:start + _KEYBOARD_MIN_RUN]
+            if chunk in low or chunk[::-1] in low:
+                return True
+    return False
+
+
+def _is_random_part(part: str) -> tuple[bool, str]:
+    """Эвристика «часть ника похожа на случайный набор букв».
+    Возвращает (random?, reason) — если True, ник лучше отвергнуть."""
+    p = part.lower()
+    if not p:
+        return False, ""
+
+    # 1. Повторы одной буквы 4+ подряд
+    if re.search(rf"(.)\1{{{_MAX_SAME_CHAR_IN_ROW},}}", p):
+        return True, "слишком много одинаковых букв подряд"
+
+    # 2. Согласные подряд (без учёта цифр)
+    letters_only = re.sub(r"[^a-z]", "", p)
+    consonants_run = re.search(
+        rf"[bcdfghjklmnpqrstvwxz]{{{_MAX_CONSONANTS_IN_ROW + 1},}}",
+        letters_only,
+    )
+    if consonants_run:
+        return True, f"подряд идёт {len(consonants_run.group())} согласных — похоже на набор клавиш"
+
+    # 3. Доля гласных
+    if len(letters_only) >= 5:
+        vowels = sum(1 for ch in letters_only if ch in _VOWELS)
+        ratio = vowels / len(letters_only)
+        if vowels == 0:
+            return True, "нет ни одной гласной"
+        if ratio < _MIN_VOWEL_RATIO:
+            return True, f"гласных всего {int(ratio * 100)}% — обычно у имён больше"
+    elif len(letters_only) >= 3:
+        # Короткие части (3-4 буквы) — должна быть хотя бы одна гласная
+        if not any(ch in _VOWELS for ch in letters_only):
+            return True, "нет ни одной гласной"
+
+    # 4. Клавиатурные последовательности
+    if _has_keyboard_run(p):
+        return True, "содержит клавиатурную последовательность (qwerty/asdfgh/12345…)"
+
+    return False, ""
+
 # Допустимые форматы даты:
 #   15.05.2026
 #   15.05.2026 19:30
@@ -166,9 +243,23 @@ def validate_nickname(text: str) -> tuple[bool, str]:
         return False, "В никнейме обнаружена нецензурная лексика."
     if not NICK_RE.match(text):
         return False, (
-            "Неверный формат никнейма. Ожидается `Имя_Фамилия` латиницей "
-            "(например: `Bruce_Banner`)."
+            "Неверный формат никнейма. Ожидается <code>Имя_Фамилия</code> "
+            "латиницей (например: <code>Bruce_Banner</code>)."
         )
+
+    # Эвристика: похож ли ник на случайный набор клавиш
+    parts = text.split("_", 1)
+    for idx, part in enumerate(parts, start=1):
+        is_random, reason = _is_random_part(part)
+        if is_random:
+            label = "имя" if idx == 1 else "фамилия"
+            return False, (
+                f"Похоже на случайный набор букв ({label}: «{part}»): "
+                f"{reason}.\n"
+                f"Введите реальный игровой ник в формате "
+                f"<code>Имя_Фамилия</code> (например: <code>Bruce_Banner</code>)."
+            )
+
     return True, text
 
 
