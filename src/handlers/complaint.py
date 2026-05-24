@@ -944,12 +944,27 @@ async def process_proof(message: types.Message, state: FSMContext):
     await state.update_data(proof_link=value)
     logger.debug("Шаг: получены доказательства (%d симв.). Готовлю превью.", len(value))
 
+    # Защита от восстановленного черновика, в котором ключи могут отсутствовать
+    required = ("category_key", "your_nickname", "target_nickname",
+                "description", "summary", "section_id")
+    missing = [k for k in required if k not in data or not data.get(k)]
+    if missing:
+        logger.warning("FSM-данные неполные для %s, не хватает: %s",
+                       describe_user(message.from_user), missing)
+        await message.answer(
+            "⚠️ Похоже, какие-то шаги жалобы пропущены или не сохранились.\n"
+            "Начните подачу заново через <b>📝 Подать жалобу</b>.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+        await state.clear()
+        return
+
     bb_code = build_body(
         category_key=data["category_key"],
         your_nickname=data["your_nickname"],
         target_nickname=data["target_nickname"],
         description=data["description"],
-        proof_link=data["proof_link"],
+        proof_link=value,
         punishment_date=data.get("punishment_date"),
     )
     thread_title = build_title(data["target_nickname"], data["summary"])
