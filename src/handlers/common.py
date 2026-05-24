@@ -75,6 +75,10 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
                 types.KeyboardButton(text="📦 Очередь жалоб"),
             ],
             [
+                types.KeyboardButton(text="🔒 Режим обслуживания"),
+                types.KeyboardButton(text="🐞 Баг-репорты"),
+            ],
+            [
                 types.KeyboardButton(text="🔍 Проверить статус форума"),
                 types.KeyboardButton(text="🔄 Синхронизировать форум"),
             ],
@@ -85,10 +89,6 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
             [
                 types.KeyboardButton(text="📊 Статистика"),
                 types.KeyboardButton(text="📢 Рассылка"),
-            ],
-            [
-                types.KeyboardButton(text="🐞 Баг-репорты"),
-                types.KeyboardButton(text="🔒 Режим обслуживания"),
             ],
         ]
     else:
