@@ -59,7 +59,9 @@ async def cmd_stats(message: types.Message):
     rate = (s["accepted"] / s["total"] * 100) if s["total"] else 0
     lines = [
         "📊 <b>Статистика за 7 дней</b>\n",
-        f"👥 Уникальных пользователей: <b>{s['total_users']}</b>",
+        f"👥 Всего пользователей: <b>{s['total_users']}</b>",
+        f"   🆕 Новых за 7 дн: <b>{s.get('new_users', 0)}</b>",
+        f"   🔥 Активных за 7 дн: <b>{s.get('active_users', 0)}</b>",
         f"📝 Жалоб подано: <b>{s['total']}</b>",
         f"   ✅ Принято: <b>{s['accepted']}</b> ({rate:.0f}%)",
         f"   ❌ Отклонено: <b>{s['rejected']}</b>",

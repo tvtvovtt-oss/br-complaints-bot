@@ -23,6 +23,7 @@ from src.handlers import common, complaint, bugreport, admin
 from src.logger import setup_logging
 from src.middleware import (
     ThrottleMiddleware, CleanupMiddleware, MaintenanceMiddleware, BanMiddleware,
+    UserTrackingMiddleware,
 )
 from src.status_monitor import status_monitor_loop
 from src.queue_processor import queue_processor_loop
@@ -86,7 +87,12 @@ async def main():
     maintenance = MaintenanceMiddleware()
     dp.message.middleware(maintenance)
     dp.callback_query.middleware(maintenance)
-    logger.info("Подключены middleware: Throttle, Ban, Maintenance.")
+    # Учёт всех пользователей бота — записываем в БД любого, кто прошёл
+    # антиспам, бан и maintenance. Так попадают и те, кто просто /start нажал.
+    tracker = UserTrackingMiddleware()
+    dp.message.middleware(tracker)
+    dp.callback_query.middleware(tracker)
+    logger.info("Подключены middleware: Throttle, Ban, Maintenance, UserTracking.")
 
     dp.include_router(common.router)
     dp.include_router(complaint.router)

@@ -1192,11 +1192,19 @@ async def cancel_queue_item(telegram_id: int, queue_id: int) -> bool:
 # ---------- Все пользователи бота (для рассылок) ----------
 
 async def list_all_users() -> list[int]:
-    """Возвращает уникальные telegram_id всех, кто хоть раз взаимодействовал
-    с ботом (записал жалобу, шаблон, баг-репорт, добавил аккаунт)."""
+    """Возвращает уникальные telegram_id всех известных пользователей бота.
+
+    Объединяет:
+    - таблицу `users` (все, кто хотя бы нажал /start)
+    - старые таблицы (complaints, user_templates, bug_reports, accounts,
+      complaint_queue) — на случай миграции с предыдущих версий, когда
+      `users` ещё не существовала.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_users_table(db)
         async with db.execute("""
-            SELECT telegram_id FROM complaints
+            SELECT telegram_id FROM users
+            UNION SELECT telegram_id FROM complaints
             UNION SELECT telegram_id FROM user_templates
             UNION SELECT telegram_id FROM bug_reports
             UNION SELECT telegram_id FROM accounts
@@ -1211,11 +1219,15 @@ async def list_all_users() -> list[int]:
 async def get_stats(within_days: int = 7) -> dict:
     """Возвращает агрегированную статистику за последние N дней."""
     async with aiosqlite.connect(DB_PATH) as db:
-        # Всего пользователей
+        await _ensure_users_table(db)
+        # Всего пользователей: считаем по таблице users (все кто хотя бы
+        # нажимал /start) + UNION со старыми таблицами на случай миграции.
         async with db.execute(
-            "SELECT COUNT(DISTINCT telegram_id) FROM "
-            "(SELECT telegram_id FROM complaints "
-            " UNION SELECT telegram_id FROM bug_reports)"
+            "SELECT COUNT(DISTINCT telegram_id) FROM ("
+            " SELECT telegram_id FROM users"
+            " UNION SELECT telegram_id FROM complaints"
+            " UNION SELECT telegram_id FROM bug_reports"
+            ")"
         ) as cur:
             total_users = (await cur.fetchone())[0]
 
@@ -1280,9 +1292,26 @@ async def get_stats(within_days: int = 7) -> dict:
         ) as cur:
             queue_pending = (await cur.fetchone())[0]
 
+        # Новые пользователи (зарегистрированы в users) и активные (last_seen)
+        # за выбранный период.
+        async with db.execute(
+            "SELECT COUNT(*) FROM users "
+            "WHERE first_seen_at >= datetime('now', ?)",
+            (f"-{int(within_days)} days",),
+        ) as cur:
+            new_users = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM users "
+            "WHERE last_seen_at >= datetime('now', ?)",
+            (f"-{int(within_days)} days",),
+        ) as cur:
+            active_users = (await cur.fetchone())[0]
+
     return {
         "within_days": within_days,
         "total_users": total_users,
+        "new_users": new_users,
+        "active_users": active_users,
         "total": total,
         "accepted": accepted,
         "rejected": rejected,
@@ -1591,3 +1620,79 @@ async def admin_delete_complaint(complaint_id: int) -> bool:
         logger.info("Админское удаление жалобы #%s из БД.", complaint_id)
         await _trigger_backup()
     return ok
+
+
+# ---------- Учёт всех пользователей бота ----------
+
+async def _ensure_users_table(db: aiosqlite.Connection) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            language_code TEXT,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            interactions INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+
+
+async def track_user(telegram_id: int, username: str | None = None,
+                      full_name: str | None = None,
+                      language_code: str | None = None) -> None:
+    """Отмечает пользователя как взаимодействовавшего с ботом. Если первый
+    раз — создаёт запись, иначе обновляет last_seen_at и инкрементит счётчик."""
+    if not telegram_id:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_users_table(db)
+        await db.execute(
+            """
+            INSERT INTO users
+                (telegram_id, username, full_name, language_code,
+                 first_seen_at, last_seen_at, interactions)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                username = COALESCE(excluded.username, users.username),
+                full_name = COALESCE(excluded.full_name, users.full_name),
+                language_code = COALESCE(excluded.language_code, users.language_code),
+                last_seen_at = CURRENT_TIMESTAMP,
+                interactions = users.interactions + 1
+            """,
+            (telegram_id, username, full_name, language_code),
+        )
+        await db.commit()
+
+
+async def list_tracked_users(limit: int | None = None) -> list[dict]:
+    """Все известные пользователи с метаданными (для админ-команд)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_users_table(db)
+        sql = (
+            "SELECT telegram_id, username, full_name, first_seen_at, "
+            "last_seen_at, interactions "
+            "FROM users ORDER BY last_seen_at DESC"
+        )
+        params: tuple = ()
+        if limit:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        async with db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+            return [
+                {
+                    "telegram_id": r[0], "username": r[1],
+                    "full_name": r[2], "first_seen_at": r[3],
+                    "last_seen_at": r[4], "interactions": r[5],
+                }
+                for r in rows
+            ]
+
+
+async def count_tracked_users() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_users_table(db)
+        async with db.execute("SELECT COUNT(*) FROM users") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0

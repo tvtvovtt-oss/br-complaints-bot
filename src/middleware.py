@@ -306,3 +306,27 @@ class BanMiddleware(BaseMiddleware):
         except Exception:
             pass
         return None
+
+
+class UserTrackingMiddleware(BaseMiddleware):
+    """Записывает каждого пользователя в таблицу `users` при первом
+    взаимодействии с ботом — даже если он просто нажал /start.
+
+    Используется для статистики и рассылки. Подключается ПОСЛЕ Throttle/Ban
+    чтобы заблокированные/спамящие не попадали в счётчики.
+    """
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is not None:
+            try:
+                from src.database import track_user
+                await track_user(
+                    telegram_id=user.id,
+                    username=user.username,
+                    full_name=user.full_name,
+                    language_code=getattr(user, "language_code", None),
+                )
+            except Exception:
+                logger.debug("track_user failed", exc_info=True)
+        return await handler(event, data)
