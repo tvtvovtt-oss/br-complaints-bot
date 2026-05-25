@@ -1402,6 +1402,31 @@ async def cmpl_open(call: types.CallbackQuery):
         link = "<i>тема не опубликована</i>"
 
     admin_comment = (comp.get("admin_comment") or "").strip()
+    # Если коммент в БД пуст, но тема опубликована — подтянем с форума
+    # на лету (старые жалобы могли быть до миграции).
+    if comp.get("forum_thread_url") and not admin_comment:
+        try:
+            from src.forum.xenforo import fetch_thread_admin_comment
+            from src.database import (
+                update_complaint_admin_comment as _save_comment,
+            )
+            cookies_to_use = None
+            if comp.get("account_id"):
+                acc_full = await get_account(comp["account_id"])
+                if acc_full and acc_full.get("cookies"):
+                    cookies_to_use = acc_full["cookies"]
+                    apply_account_cookies(
+                        cookies_to_use, account_id=acc_full["id"],
+                    )
+            fetched = await fetch_thread_admin_comment(
+                comp["forum_thread_url"], cookies=cookies_to_use,
+            )
+            if fetched:
+                admin_comment = fetched.strip()
+                await _save_comment(comp["id"], admin_comment)
+        except Exception:
+            logger.debug("on-demand admin_comment failed", exc_info=True)
+
     comment_block = ""
     if admin_comment:
         snippet = admin_comment if len(admin_comment) <= 800 \

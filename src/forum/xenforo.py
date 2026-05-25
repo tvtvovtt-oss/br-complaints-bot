@@ -1322,6 +1322,54 @@ _STATUS_KEYWORDS = {
 }
 
 
+async def fetch_thread_admin_comment(
+    thread_url: str,
+    cookies: dict | None = None,
+) -> str | None:
+    """Заходит на страницу темы и возвращает текст последнего ответа
+    админа/модератора (или None если нет).
+
+    Используется в админской карточке жалобы для on-demand подтягивания
+    комментария — даже если мониторинг ещё не успел его записать в БД.
+    """
+    if not thread_url:
+        return None
+
+    if cookies is not None:
+        client_ctx = httpx.AsyncClient(
+            cookies=cookies, headers=HEADERS,
+            follow_redirects=True, timeout=15.0,
+        )
+    else:
+        client_ctx = _session(timeout=15.0)
+
+    try:
+        async with client_ctx as client:
+            try:
+                r = await client.get(thread_url)
+                if r.status_code != 200:
+                    return None
+                html = r.text
+                if "vddosw3data.js" in html or "slowAES" in html:
+                    fresh = await _solve_ddos_guard()
+                    if fresh:
+                        client.cookies.set("R3ACTLB", fresh,
+                                            domain=FORUM_HOST, path="/")
+                        r = await client.get(thread_url)
+                        html = r.text
+                if "/login/" in str(r.url):
+                    return None
+                return _extract_last_admin_comment(_soup(html))
+            except httpx.RequestError as e:
+                logger.debug("fetch_thread_admin_comment: сеть %s", e)
+                return None
+            except Exception:
+                logger.exception("fetch_thread_admin_comment: ошибка")
+                return None
+    except Exception:
+        return None
+
+
 async def fetch_complaint_status(
     thread_url: str,
     cookies: dict | None = None,

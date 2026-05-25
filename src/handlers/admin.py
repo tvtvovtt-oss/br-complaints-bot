@@ -997,6 +997,34 @@ async def adm_complaint_open(call: types.CallbackQuery):
     thread_url = comp.get("forum_thread_url")
     admin_comment = (comp.get("admin_comment") or "").strip()
 
+    # Если темы есть, но коммент в БД пуст — попробуем подтянуть с форума
+    # прямо сейчас. Это нужно для старых жалоб (миграция только добавила
+    # поле, мониторинг ещё не успел заполнить).
+    if thread_url and not admin_comment:
+        try:
+            from src.forum.xenforo import (
+                fetch_thread_admin_comment, apply_account_cookies,
+            )
+            from src.database import get_account, update_complaint_admin_comment
+            cookies_to_use = None
+            if comp.get("account_id"):
+                acc_full = await get_account(comp["account_id"])
+                if acc_full and acc_full.get("cookies"):
+                    cookies_to_use = acc_full["cookies"]
+                    apply_account_cookies(
+                        cookies_to_use, account_id=acc_full["id"],
+                    )
+            fetched = await fetch_thread_admin_comment(
+                thread_url, cookies=cookies_to_use,
+            )
+            if fetched:
+                admin_comment = fetched.strip()
+                # Сохраняем в БД, чтобы в следующий раз не идти на форум
+                await update_complaint_admin_comment(comp["id"], admin_comment)
+        except Exception:
+            logger.debug("Не удалось подтянуть admin_comment с форума",
+                         exc_info=True)
+
     parts = [
         f"📄 <b>Жалоба #{comp['id']}</b> — {label}",
         f"<i>Создана: {created}</i>",

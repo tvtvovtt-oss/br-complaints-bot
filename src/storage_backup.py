@@ -12,6 +12,7 @@
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -229,14 +230,34 @@ async def schedule_backup(bot: Bot | None = None) -> None:
         _pending_backup_task = asyncio.create_task(_runner())
 
 
+_force_backup_lock = asyncio.Lock()
+_last_force_backup_at: float = 0.0
+# Минимальный интервал между forced-бэкапами (для immediate-вызовов из БД).
+# Если важных событий пришло много подряд — пропускаем; периодический цикл
+# их потом всё равно догонит, плюс finally при остановке.
+FORCE_BACKUP_MIN_INTERVAL = 60.0
+
+
 async def force_backup(bot: Bot | None = None) -> None:
-    """Немедленный синхронный бэкап (для /backup и при остановке)."""
+    """Немедленный синхронный бэкап (для /backup, immediate-вызовов из БД
+    и при остановке). Тротлится: не чаще раза в 60 сек, кроме случая когда
+    bot передан явно (это вызов при shutdown — пропускаем без задержки)."""
     if not is_enabled():
         return
     target_bot = bot or _bot_ref
     if target_bot is None:
         return
-    await _send_backup_now(target_bot)
+
+    global _last_force_backup_at
+    explicit_bot = bot is not None  # True для shutdown-сценария
+    async with _force_backup_lock:
+        now = time.monotonic()
+        if not explicit_bot and (now - _last_force_backup_at) < FORCE_BACKUP_MIN_INTERVAL:
+            logger.debug("force_backup пропущен — слишком часто "
+                         "(прошло %.1f с).", now - _last_force_backup_at)
+            return
+        await _send_backup_now(target_bot)
+        _last_force_backup_at = time.monotonic()
 
 
 async def periodic_backup_loop(bot: Bot, interval_seconds: int = 600) -> None:

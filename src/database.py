@@ -17,6 +17,20 @@ async def _trigger_backup() -> None:
         logger.debug("trigger_backup failed", exc_info=True)
 
 
+async def _trigger_backup_immediate() -> None:
+    """Немедленный бэкап без 30-секундного дебаунса. Используется для
+    критичных изменений (логин, обновление кук, бан) — чтобы свежие
+    данные точно ушли в канал до того, как хостинг сделает rolling-deploy
+    и стартует с устаревшего бэкапа."""
+    try:
+        from src.storage_backup import force_backup, is_enabled
+        if not is_enabled():
+            return
+        await force_backup()
+    except Exception:
+        logger.debug("trigger_backup_immediate failed", exc_info=True)
+
+
 async def init_db():
     """Инициализация базы данных и создание таблиц."""
     logger.info("Инициализирую SQLite-базу данных: %s", DB_PATH)
@@ -497,7 +511,9 @@ async def upsert_account(telegram_id: int, username: str, login: str | None,
         ) as cur:
             row = await cur.fetchone()
             account_id = row[0] if row else 0
-    await _trigger_backup()
+    # Immediate-бэкап: новый аккаунт / обновлённые куки критичны для
+    # rolling deploy.
+    await _trigger_backup_immediate()
     return account_id
 
 
@@ -650,7 +666,11 @@ async def delete_account(telegram_id: int, account_id: int) -> bool:
 
 
 async def update_account_cookies(account_id: int, cookies: dict) -> None:
-    """Обновляет куки аккаунта (после реауторизации)."""
+    """Обновляет куки аккаунта (после реауторизации).
+
+    Делает немедленный бэкап (без 30-секундного дебаунса), чтобы при rolling
+    deploy на хостинге свежие куки точно успели уйти в Telegram-канал и
+    после рестарта восстановились актуальные, а не вчерашние."""
     cookies_str = _json.dumps(cookies, ensure_ascii=False)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -659,6 +679,7 @@ async def update_account_cookies(account_id: int, cookies: dict) -> None:
             (cookies_str, account_id),
         )
         await db.commit()
+    await _trigger_backup_immediate()
 
 
 async def set_account_cooldown(account_id: int, seconds: int) -> None:
@@ -1040,14 +1061,16 @@ async def release_account_cooldown(account_id: int) -> None:
 
 async def set_account_encrypted_password(account_id: int,
                                            encrypted_password: str | None) -> None:
-    """Сохраняет/удаляет зашифрованный пароль аккаунта."""
+    """Сохраняет/удаляет зашифрованный пароль аккаунта.
+    Делает немедленный бэкап — пароль слишком ценный, чтобы потерять при
+    rolling deploy."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE accounts SET encrypted_password = ? WHERE id = ?",
             (encrypted_password, account_id),
         )
         await db.commit()
-    await _trigger_backup()
+    await _trigger_backup_immediate()
 
 
 async def get_account_encrypted_password(account_id: int) -> str | None:
