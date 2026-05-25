@@ -1287,6 +1287,7 @@ async def discover_all_complaint_categories(
 # Сопоставление текста префикса темы (lowercase) на стандартный статус.
 # Статусы в боте:
 #   "pending"  — Ожидание (или префикс не найден)
+#   "review"   — На рассмотрении (промежуточный, админ форума уже взял)
 #   "accepted" — принята/одобрена/удовлетворена
 #   "rejected" — отклонена/отказ
 #   "closed"   — закрыта (без явного решения)
@@ -1310,11 +1311,13 @@ _STATUS_KEYWORDS = {
         "закрыт", "закрыто", "закрыта",
         "архив",
     ),
+    "review":   (
+        "на рассмотрении", "рассматривается", "рассмотрении",
+        "в работе",
+    ),
     "pending":  (
         "ожидание", "ожидан",
         "новая", "новое",
-        "в работе",
-        "рассматривается", "рассмотрении",
     ),
 }
 
@@ -1467,8 +1470,10 @@ async def fetch_complaint_status(
                     lowered = prefix_text.lower()
                     for status, keywords in _STATUS_KEYWORDS.items():
                         if any(k in lowered for k in keywords):
-                            # Для нефинальных статусов (pending) комментарий
-                            # не нужен — нечего пользователю слать
+                            # Комментарий админа возвращаем для всех
+                            # нефинальных статусов кроме pending — он
+                            # пригодится и в карточке жалобы, и в
+                            # уведомлении пользователю.
                             comment = admin_comment if status != "pending" else None
                             return status, prefix_text, comment
                     logger.info("Тема %s: префикс «%s» не распознан, считаю pending.",

@@ -34,6 +34,7 @@ DELAY_BETWEEN_REQUESTS = 1.5
 # Человекочитаемые подписи для статусов
 STATUS_LABELS = {
     "pending":  "⏳ Ожидание",
+    "review":   "🔎 На рассмотрении",
     "accepted": "✅ Принята",
     "rejected": "❌ Отклонена",
     "closed":   "🔒 Закрыта",
@@ -83,6 +84,13 @@ async def _notify_user(bot: Bot, complaint: dict, new_status: str,
         text = (
             f"🔒 <b>Тема жалобы на «{nickname}» закрыта.</b>\n\n"
             f"Статус: <b>{label}</b>{link_part}{comment_part}"
+        )
+        effect = None
+    elif new_status == "review":
+        text = (
+            f"🔎 <b>Вашу жалобу на «{nickname}» взяли на рассмотрение.</b>\n\n"
+            f"Статус: <b>{label}</b>{link_part}{comment_part}\n\n"
+            "<i>Скоро придёт окончательное решение.</i>"
         )
         effect = None
     else:
@@ -196,9 +204,17 @@ async def _check_once(bot: Bot) -> None:
             logger.info("Жалоба id=%s: статус %s → %s (префикс «%s»).",
                         comp["id"], old_status, new_status, prefix_text or "?")
 
-        # Шлём уведомление если статус финальный и пользователь о нём ещё не знал
+        # Сохраняем свежий комментарий админа в БД (для карточки жалобы),
+        # даже если уведомлять пока не нужно.
+        if admin_comment and admin_comment != comp.get("admin_comment"):
+            from src.database import update_complaint_admin_comment
+            await update_complaint_admin_comment(comp["id"], admin_comment)
+
+        # Шлём уведомление если статус финальный/review и пользователь о нём
+        # ещё не знал. review — промежуточный, но юзеру важно знать.
         notified_status = comp.get("notified_status") or "pending"
-        if new_status != notified_status and new_status in ("accepted", "rejected", "closed"):
+        if new_status != notified_status and new_status in (
+                "accepted", "rejected", "closed", "review"):
             ok = await _notify_user(bot, comp, new_status, admin_comment)
             if ok:
                 await mark_complaint_notified(comp["id"], new_status)

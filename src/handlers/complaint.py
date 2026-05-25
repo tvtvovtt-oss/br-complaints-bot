@@ -1401,6 +1401,16 @@ async def cmpl_open(call: types.CallbackQuery):
     else:
         link = "<i>тема не опубликована</i>"
 
+    admin_comment = (comp.get("admin_comment") or "").strip()
+    comment_block = ""
+    if admin_comment:
+        snippet = admin_comment if len(admin_comment) <= 800 \
+            else admin_comment[:800] + "..."
+        comment_block = (
+            f"\n<b>💬 Комментарий админа форума:</b>\n"
+            f"<blockquote>{escape(snippet)}</blockquote>\n"
+        )
+
     text = (
         f"<b>Жалоба #{comp['id']}</b>  {st_label}\n\n"
         f"<b>Цель:</b> {escape(comp['nickname'])}\n"
@@ -1408,6 +1418,7 @@ async def cmpl_open(call: types.CallbackQuery):
         f"<b>Тема:</b> {link}\n\n"
         f"<b>Описание:</b>\n<blockquote>{escape(comp['description'])}</blockquote>\n"
         f"<b>Доказательства:</b> <code>{escape(comp['proof_link'])}</code>"
+        f"{comment_block}"
     )
     try:
         await call.message.edit_text(

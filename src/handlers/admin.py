@@ -349,6 +349,7 @@ async def cmd_force_check(message: types.Message):
         all_complaints = []
 
     pending_n = by_status.get("pending", 0)
+    review_n = by_status.get("review", 0)
     accepted_n = by_status.get("accepted", 0)
     rejected_n = by_status.get("rejected", 0)
     closed_n = by_status.get("closed", 0)
@@ -358,6 +359,7 @@ async def cmd_force_check(message: types.Message):
         "✅ <b>Проверка статусов завершена</b>\n",
         f"📦 Всего жалоб в БД: <b>{total_n}</b>",
         f"⏳ Ожидание: <b>{pending_n}</b>",
+        f"🔎 На рассмотрении: <b>{review_n}</b>",
         f"✅ Принято: <b>{accepted_n}</b>",
         f"❌ Отклонено: <b>{rejected_n}</b>",
         f"🔒 Закрыто: <b>{closed_n}</b>",
@@ -827,6 +829,16 @@ def _complaints_list_kb(page: int, total_pages: int,
     ])
     rows.append([
         types.InlineKeyboardButton(
+            text="🔎 Рассмотр." + (" ✓" if status_filter == "review" else ""),
+            callback_data="adm_cs:1:review",
+        ),
+        types.InlineKeyboardButton(
+            text="🔒 Закрыто" + (" ✓" if status_filter == "closed" else ""),
+            callback_data="adm_cs:1:closed",
+        ),
+    ])
+    rows.append([
+        types.InlineKeyboardButton(
             text="✅ Принято" + (" ✓" if status_filter == "accepted" else ""),
             callback_data="adm_cs:1:accepted",
         ),
@@ -869,7 +881,8 @@ def _complaint_actions_kb(complaint_id: int,
 def _format_complaint_short(c: dict) -> str:
     """Строка для списка."""
     status_emoji = {
-        "pending": "⏳", "accepted": "✅", "rejected": "❌", "closed": "🔒",
+        "pending": "⏳", "review": "🔎",
+        "accepted": "✅", "rejected": "❌", "closed": "🔒",
     }.get(c["status"], "❔")
     summary = c.get("summary") or ""
     target = escape(c["nickname"])
@@ -963,7 +976,8 @@ async def adm_complaint_open(call: types.CallbackQuery):
         return
 
     status_label_map = {
-        "pending": "⏳ В ожидании",
+        "pending":  "⏳ В ожидании",
+        "review":   "🔎 На рассмотрении",
         "accepted": "✅ Принята",
         "rejected": "❌ Отклонена",
         "closed":   "🔒 Закрыта",
@@ -981,6 +995,7 @@ async def adm_complaint_open(call: types.CallbackQuery):
     pdate = escape(comp.get("punishment_date") or "—")
     created = escape(str(comp.get("created_at") or "—"))
     thread_url = comp.get("forum_thread_url")
+    admin_comment = (comp.get("admin_comment") or "").strip()
 
     parts = [
         f"📄 <b>Жалоба #{comp['id']}</b> — {label}",
@@ -998,6 +1013,14 @@ async def adm_complaint_open(call: types.CallbackQuery):
     parts.append("")
     parts.append(f"📖 <b>Описание:</b>\n<blockquote>{description}</blockquote>")
     parts.append(f"🔗 <b>Доказательства:</b>\n<code>{proof}</code>")
+    if admin_comment:
+        # Обрезаем очень длинные комментарии чтобы не упереться в лимит Telegram
+        snippet = admin_comment if len(admin_comment) <= 1500 \
+            else admin_comment[:1500] + "..."
+        parts.append(
+            f"\n💬 <b>Комментарий админа форума:</b>\n"
+            f"<blockquote>{escape(snippet)}</blockquote>"
+        )
     if thread_url:
         parts.append(
             f"\n🌐 <a href=\"{escape(thread_url)}\">Тема на форуме</a>"

@@ -51,6 +51,7 @@ async def init_db():
             ("punishment_date", "ALTER TABLE complaints ADD COLUMN punishment_date TEXT"),
             ("server_node_id", "ALTER TABLE complaints ADD COLUMN server_node_id INTEGER"),
             ("server_name", "ALTER TABLE complaints ADD COLUMN server_name TEXT"),
+            ("admin_comment", "ALTER TABLE complaints ADD COLUMN admin_comment TEXT"),
         ]:
             if col not in cols:
                 logger.info("Миграция: добавляю колонку '%s' в complaints.", col)
@@ -281,7 +282,8 @@ async def get_complaint(complaint_id: int) -> dict | None:
         async with db.execute(
             "SELECT id, telegram_id, nickname, description, proof_link, "
             "forum_thread_url, status, notified_status, created_at, "
-            "account_id, your_nickname, summary, category_key, punishment_date "
+            "account_id, your_nickname, summary, category_key, "
+            "punishment_date, admin_comment "
             "FROM complaints WHERE id = ?",
             (complaint_id,),
         ) as cur:
@@ -303,19 +305,24 @@ async def get_complaint(complaint_id: int) -> dict | None:
                 "summary": row[11],
                 "category_key": row[12],
                 "punishment_date": row[13],
+                "admin_comment": row[14],
             }
 
 
 async def list_complaints_for_status_check() -> list[dict]:
     """Возвращает все жалобы с forum_thread_url, у которых статус ещё
-    не финальный — нужно проверить состояние на форуме."""
+    не финальный — нужно проверить состояние на форуме.
+
+    Финальные статусы — accepted/rejected/closed — не проверяются повторно
+    (тема уже решена админом форума, нет смысла дёргать). Перепроверяем
+    только pending/unknown/review."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT id, telegram_id, nickname, forum_thread_url, status, "
-            "notified_status, account_id "
+            "notified_status, account_id, admin_comment "
             "FROM complaints "
             "WHERE forum_thread_url IS NOT NULL "
-            "AND status IN ('pending', 'unknown')"
+            "AND status IN ('pending', 'unknown', 'review')"
         ) as cursor:
             rows = await cursor.fetchall()
             return [
@@ -325,6 +332,7 @@ async def list_complaints_for_status_check() -> list[dict]:
                     "status": r[4] or "pending",
                     "notified_status": r[5],
                     "account_id": r[6],
+                    "admin_comment": r[7],
                 }
                 for r in rows
             ]
@@ -337,6 +345,18 @@ async def update_complaint_status(complaint_id: int, status: str) -> None:
             "UPDATE complaints SET status = ?, "
             "last_status_check = CURRENT_TIMESTAMP WHERE id = ?",
             (status, complaint_id),
+        )
+        await db.commit()
+
+
+async def update_complaint_admin_comment(complaint_id: int,
+                                            comment: str | None) -> None:
+    """Сохраняет комментарий админа форума к жалобе (для показа автору
+    и в карточке жалобы)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE complaints SET admin_comment = ? WHERE id = ?",
+            (comment, complaint_id),
         )
         await db.commit()
 
