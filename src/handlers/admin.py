@@ -1216,3 +1216,53 @@ async def adm_complaint_ban_author(call: types.CallbackQuery):
     logger.info("Админ %s забанил автора жалобы #%s (user_id=%s).",
                 describe_user(call.from_user), cid, author_id)
     await call.answer(f"🚫 Забанен {author_id}", show_alert=True)
+
+
+# ---------------- Авто-перелогин по сохранённым паролям ----------------
+
+@router.message(Command("relogin"))
+async def cmd_relogin(message: types.Message):
+    """Принудительно прогоняет авто-перелогин по всем аккаунтам с
+    сохранённым паролем. Помогает быстро восстановить умершие сессии,
+    не дожидаясь фонового цикла (раз в 12 часов)."""
+    if not is_admin(message.from_user.id):
+        return
+
+    from src.auto_relogin import relogin_all_with_passwords
+    from src.crypto import is_available as crypto_available
+
+    if not crypto_available():
+        await message.answer(
+            "⚠️ <b>Шифрование не настроено</b> (нет SECRET_KEY).\n\n"
+            "Авто-перелогин невозможен. Установите ключ через "
+            "<code>SECRET_KEY=$(python -c \"from cryptography.fernet "
+            "import Fernet; print(Fernet.generate_key().decode())\")</code> "
+            "и заново войдите в аккаунты с сохранением пароля."
+        )
+        return
+
+    status = await message.answer(
+        "⏳ Перелогиниваю аккаунты с сохранёнными паролями...\n"
+        "<i>Это может занять до минуты — на каждый аккаунт ~2 сек.</i>"
+    )
+    try:
+        relogined, failed = await relogin_all_with_passwords()
+    except Exception as e:
+        logger.exception("Ошибка авто-перелогина")
+        await status.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>")
+        return
+
+    if relogined == 0 and failed == 0:
+        await status.edit_text(
+            "ℹ️ <b>Все сессии живы</b> — никого перелогинивать не пришлось.\n\n"
+            "Если у вас есть аккаунты, у которых пароль не сохранён, добавьте "
+            "их через <b>🔐 Войти по паролю</b> и нажмите <b>«💾 Сохранить»</b> "
+            "после успешного входа."
+        )
+    else:
+        await status.edit_text(
+            f"✅ <b>Авто-перелогин завершён</b>\n\n"
+            f"🔄 Обновлено сессий: <b>{relogined}</b>\n"
+            f"❌ Не удалось: <b>{failed}</b>\n\n"
+            f"<i>Подробности в логах.</i>"
+        )
