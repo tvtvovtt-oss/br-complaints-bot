@@ -356,6 +356,108 @@ async def _solve_ddos_guard() -> Optional[str]:
         return None
 
 
+async def _forum_login_via_curl_cffi(login: str, password: str) -> dict:
+    """Опциональная реализация forum_login через curl_cffi с TLS-impersonation.
+
+    Если пакет curl_cffi установлен — имитирует Chrome 124 на уровне TLS,
+    чтобы обойти DDoS-Guard JA3-фильтр. Если пакета нет — возвращает None,
+    и forum_login работает в обычном режиме (httpx).
+    """
+    try:
+        from curl_cffi.requests import AsyncSession
+    except ImportError:
+        return None
+
+    logger.info("Использую curl_cffi (TLS-impersonation Chrome 124) для входа.")
+
+    sess = AsyncSession(impersonate="chrome124")
+    try:
+        # 1. Прогрев главной — набрать cookies от DDoS-Guard
+        try:
+            r = await sess.get(FORUM_URL, headers=HEADERS, timeout=20)
+        except Exception as e:
+            logger.error("curl_cffi прогрев упал: %s", e)
+            return {"status": "error",
+                    "message": f"curl_cffi: ошибка прогрева — {e}"}
+
+        if r.status_code == 403:
+            logger.error("Даже через curl_cffi DDoS-Guard вернул 403 на главную.")
+            return {"status": "error",
+                    "message": (
+                        "🚫 DDoS-Guard блокирует даже с TLS-impersonation. "
+                        "Возможно, IP в чёрном списке или сменился защитник. "
+                        "Попробуйте залить cookies.json вручную."
+                    )}
+
+        # 2. /login/ — получить CSRF
+        r = await sess.get(LOGIN_URL, headers=HEADERS, timeout=20)
+        if r.status_code != 200:
+            return {"status": "error",
+                    "message": (f"curl_cffi: HTTP {r.status_code} на /login/. "
+                                f"Залейте cookies.json вручную.")}
+
+        csrf = _extract_csrf(r.text)
+        if not csrf:
+            return {"status": "error",
+                    "message": "CSRF-токен на /login/ не найден (curl_cffi)."}
+
+        # 3. POST логина
+        ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": LOGIN_URL}
+        payload = {
+            "login": login,
+            "password": password,
+            "remember": "1",
+            "register": "0",
+            "_xfToken": csrf,
+            "_xfRedirect": f"{FORUM_URL}/",
+            "_xfRequestUri": "/login/login",
+            "_xfWithData": "1",
+            "_xfResponseType": "json",
+        }
+        r = await sess.post(LOGIN_POST_URL, data=payload, headers=ajax, timeout=20)
+
+        try:
+            rj = r.json()
+        except Exception:
+            rj = None
+
+        if rj and rj.get("errors"):
+            errs = rj["errors"]
+            msg = "; ".join(errs) if isinstance(errs, list) else str(errs)
+            return {"status": "error", "message": msg}
+
+        # Берём свежие куки из сессии
+        fresh_cookies = {c.name: c.value for c in sess.cookies.jar}
+
+        # 4. Проверяем что вошли — берём какую-нибудь страницу с data-logged-in
+        check = await sess.get(f"{FORUM_URL}/", headers=HEADERS, timeout=20)
+        if check.status_code != 200:
+            return {"status": "error",
+                    "message": f"После логина: HTTP {check.status_code}."}
+
+        # 2FA?
+        if "/login/two-step" in str(check.url) or "/login/two-step" in check.text[:2000]:
+            return {"status": "error",
+                    "message": ("Форум требует 2FA, но curl_cffi-вход пока "
+                                "не поддерживает 2FA. Залейте cookies.json вручную.")}
+
+        m_logged = _LOGGED_IN_RE.search(check.text[:8000])
+        if m_logged and m_logged.group(1) == "true":
+            # Имя пользователя из data-username или fallback
+            from re import search
+            m_user = search(r'data-username="([^"]+)"', check.text[:8000])
+            username = m_user.group(1) if m_user else login
+            return {"status": "ok", "username": username, "cookies": fresh_cookies}
+
+        return {"status": "error",
+                "message": "После входа форум не подтвердил авторизацию."}
+    finally:
+        try:
+            await sess.close()
+        except Exception:
+            pass
+
+
 async def forum_login(login: str, password: str) -> dict:
     """Логинится на форум по логину/паролю.
 
@@ -369,6 +471,23 @@ async def forum_login(login: str, password: str) -> dict:
     - {"status": "error", "message": str}
     """
     logger.info("Начинаю вход на форум по паролю (логин: %r).", login)
+
+    # Если установлен curl_cffi — пробуем сначала через него (TLS-impersonation
+    # Chrome 124 надёжнее обходит DDoS-Guard JA3-фильтр). При успехе — возвращаем
+    # результат. При ошибке (403 / нет 2FA-поддержки и т.п.) — fallback на httpx.
+    cf_result = await _forum_login_via_curl_cffi(login, password)
+    if cf_result is not None and cf_result.get("status") == "ok":
+        return cf_result
+    if cf_result is not None and cf_result.get("status") == "error":
+        # curl_cffi установлен, но форум всё равно отказал. Это может быть
+        # неверный пароль — нет смысла пробовать через httpx (разве что для
+        # запасной диагностики). Возвращаем ошибку curl_cffi сразу.
+        if "пароль" in cf_result.get("message", "").lower() \
+                or "credentials" in cf_result.get("message", "").lower():
+            return cf_result
+        # Иначе fallback на обычный httpx
+        logger.warning("curl_cffi-вход не удался: %s — fallback на httpx.",
+                       cf_result.get("message"))
 
     # DDoS-Guard на BR обязательно требует cookie R3ACTLB, который выдаётся после
     # JS-челленджа. Сами решаем челлендж AES-128-CBC, чтобы не зависеть от ручного

@@ -3,6 +3,11 @@
 
 aiogram>=3.0.0,<4.0.0
 httpx>=0.24.0,<1.0.0
+# curl_cffi даёт TLS-handshake идентичный реальному Chrome — нужен чтобы
+# обходить DDoS-Guard на форуме. Если не установится (нет manylinux-колеса
+# на твоей платформе) — бот fallback на обычный httpx, но DDoS-Guard будет
+# чаще блокировать /login/.
+curl_cffi>=0.7.0,<1.0.0
 beautifulsoup4>=4.12.0,<5.0.0
 lxml>=5.0.0,<6.0.0
 python-dotenv>=1.0.0,<2.0.0
