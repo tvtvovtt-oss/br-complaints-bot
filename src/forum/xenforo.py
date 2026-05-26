@@ -40,11 +40,19 @@ HEADERS = {
         "image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
     ),
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
     "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
-    "Origin": FORUM_URL,
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
     "Referer": f"{FORUM_URL}/",
+    # Origin отдельно — отправляется только на POST (см. ajax_headers в forum_login).
+    # Браузер на GET-навигации Origin не шлёт; шаблон бот-без-Origin = бот с
+    # Origin на GET — последний DDoS-Guard ловит и отдаёт 403.
 }
 
 # Используем lxml, если установлен — он в 5-10 раз быстрее html.parser
@@ -410,6 +418,24 @@ async def forum_login(login: str, password: str) -> dict:
     # Только успешный 2FA-ответ оставляет клиент открытым (его закроет submit_2fa).
     keep_open = False
     try:
+        # 0. Прогрев главной — чтобы DDoS-Guard поставил свои внутренние
+        # куки (xf_csrf, xf_session_id и т.п.) и /login/ не выглядел как
+        # «бот пришёл сразу на login без посещения главной».
+        try:
+            warmup = await client.get(FORUM_URL)
+            if warmup.status_code == 200 and (
+                "vddosw3data.js" in warmup.text or "slowAES" in warmup.text
+            ):
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain=FORUM_HOST, path="/")
+                    await client.get(FORUM_URL)
+            # Маленькая пауза — браузер тоже не молниеносно перелистывает
+            await asyncio.sleep(0.8)
+        except httpx.RequestError:
+            pass
+
         # 1. Получаем CSRF и стартовые куки с /login/
         r = await client.get(LOGIN_URL)
         if r.status_code != 200:
@@ -451,7 +477,12 @@ async def forum_login(login: str, password: str) -> dict:
             "_xfWithData": "1",
             "_xfResponseType": "json",
         }
-        ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": LOGIN_URL}
+        ajax = {
+            **HEADERS,
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": FORUM_URL,
+            "Referer": LOGIN_URL,
+        }
         r2 = await client.post(LOGIN_POST_URL, data=payload, headers=ajax)
         logger.debug("POST /login/login -> HTTP %s, content-type %s",
                      r2.status_code, r2.headers.get("content-type"))
@@ -663,6 +694,7 @@ async def forum_submit_2fa(state: dict, code: str,
         ajax = {
             **HEADERS,
             "X-Requested-With": "XMLHttpRequest",
+            "Origin": FORUM_URL,
             "Referer": two_step_url,
         }
         r = await client.post(two_step_url, data=payload, headers=ajax)
@@ -1017,7 +1049,11 @@ async def post_complaint(section_id: int, title: str, message: str) -> tuple[boo
             if prefix_id is not None:
                 payload["prefix_id"] = prefix_id
 
-            ajax_headers = {**HEADERS, "X-Requested-With": "XMLHttpRequest"}
+            ajax_headers = {
+                **HEADERS,
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": FORUM_URL,
+            }
             logger.debug("Шаг 3/3: POST %s (AJAX, %d полей)...", post_url, len(payload))
             post_response = await client.post(post_url, data=payload, headers=ajax_headers)
 
@@ -1731,8 +1767,12 @@ async def delete_thread(thread_url: str,
                 "_xfWithData": "1",
                 "_xfResponseType": "json",
             }
-            ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
-                    "Referer": delete_url}
+            ajax = {
+                **HEADERS,
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": FORUM_URL,
+                "Referer": delete_url,
+            }
             r2 = await client.post(delete_url, data=payload, headers=ajax)
 
             try:
@@ -1806,8 +1846,12 @@ async def edit_thread_post(thread_url: str, new_message: str,
                 "_xfWithData": "1",
                 "_xfResponseType": "json",
             }
-            ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
-                    "Referer": edit_url}
+            ajax = {
+                **HEADERS,
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": FORUM_URL,
+                "Referer": edit_url,
+            }
             r2 = await client.post(f"{FORUM_URL}/posts/{post_id}/save",
                                      data=payload, headers=ajax)
             try:
@@ -1834,8 +1878,12 @@ async def edit_thread_post(thread_url: str, new_message: str,
                         "_xfWithData": "1",
                         "_xfResponseType": "json",
                     }
-                    ajax_t = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
-                              "Referer": edit_thread_url}
+                    ajax_t = {
+                        **HEADERS,
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Origin": FORUM_URL,
+                        "Referer": edit_thread_url,
+                    }
                     rt2 = await client.post(edit_thread_url, data=title_payload,
                                               headers=ajax_t)
                     try:
