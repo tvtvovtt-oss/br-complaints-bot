@@ -8,7 +8,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup, any_state
 
 from src.config import ADMIN_IDS, COOKIES_PATH
-from src.crypto import is_available as crypto_available, encrypt as crypto_encrypt
 from src.forum.xenforo import (
     check_auth,
     check_auth_for_cookies,
@@ -28,7 +27,6 @@ from src.database import (
     delete_account,
     get_account,
     get_active_account,
-    set_account_encrypted_password,
 )
 from src.logger import describe_user
 from src.effects import EFFECT_CONFETTI, EFFECT_FIRE, EFFECT_LIKE
@@ -120,7 +118,6 @@ class LoginForm(StatesGroup):
     waiting_for_login = State()
     waiting_for_password = State()
     waiting_for_2fa_code = State()
-    waiting_for_save_password = State()
 
 
 def _login_cancel_kb() -> types.ReplyKeyboardMarkup:
@@ -933,115 +930,28 @@ async def acc_add(call: types.CallbackQuery, state: FSMContext):
     await _begin_login(call.message, state, call.from_user)
 
 
-# ---------------- Сохранение пароля (опционально) ----------------
+# ---------------- Финальное сообщение после входа ----------------
 
 async def _offer_save_password(message: types.Message, state: FSMContext,
                                  account_id: int, username: str,
                                  password: str | None) -> None:
-    """После успешного входа предлагает сохранить пароль зашифрованным.
+    """Финальное сообщение после успешного входа.
 
-    Если шифрование не настроено или пароль не передан — просто шлёт
-    финальное сообщение без предложения сохранения.
+    (Имя сохранено для обратной совместимости — раньше тут был шаг
+    «сохранить пароль для авто-перелогина», но фича удалена. Делаем
+    просто финальный экран.)
     """
-    base_text = (
-        f"✅ <b>Вход выполнен!</b>\n👤 Аккаунт: <b>{escape(username)}</b>\n\n"
-        "Аккаунт сохранён и помечен активным."
-    )
-
-    if not password or not crypto_available():
-        # Нет ключа шифрования или нет пароля — просто завершаем
-        await state.clear()
-        await message.answer(
-            base_text + "\n\nТеперь рекомендую <b>🔄 Синхронизировать форум</b>.",
-            reply_markup=_menu_for(message.from_user.id),
-            message_effect_id=EFFECT_LIKE,
-        )
-        return
-
-    # Сохраняем пароль во временное хранилище FSM до подтверждения
-    await state.set_state(LoginForm.waiting_for_save_password)
-    await state.update_data(
-        _save_password=password,
-        _save_account_id=account_id,
-        _save_username=username,
-    )
-    kb = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="💾 Сохранить пароль")],
-            [types.KeyboardButton(text="🚫 Не сохранять")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    # Затираем все возможные следы пароля в FSM
+    await state.update_data(_save_password=None, _password_temp=None)
+    await state.clear()
     await message.answer(
-        base_text + (
-            "\n\n🔑 <b>Сохранить пароль?</b>\n\n"
-            "Пароль будет зашифрован Fernet (AES-128) и сохранён в БД. "
-            "Это позволит в будущем добавить авто-перелогин при истечении "
-            "сессии — не придётся вводить пароль вручную.\n\n"
-            "<i>Расшифровать его без мастер-ключа SECRET_KEY невозможно.</i>"
-        ),
-        reply_markup=kb,
+        f"✅ <b>Вход выполнен!</b>\n"
+        f"👤 Аккаунт: <b>{escape(username)}</b>\n\n"
+        "Аккаунт сохранён и помечен активным.\n\n"
+        "Теперь рекомендую <b>🔄 Синхронизировать форум</b>.",
+        reply_markup=_menu_for(message.from_user.id),
+        message_effect_id=EFFECT_LIKE,
     )
-
-
-@router.message(LoginForm.waiting_for_save_password)
-async def login_save_password_choice(message: types.Message, state: FSMContext):
-    if await _deny_non_admin(message):
-        await state.clear()
-        return
-
-    text = (message.text or "").strip()
-    data = await state.get_data()
-    password = data.get("_save_password")
-    account_id = data.get("_save_account_id")
-    username = data.get("_save_username", "?")
-
-    if text == "💾 Сохранить пароль":
-        if not password or not account_id:
-            await state.clear()
-            await message.answer(
-                "⚠️ Что-то пошло не так. Пароль не сохранён.",
-                reply_markup=_menu_for(message.from_user.id),
-            )
-            return
-        encrypted = crypto_encrypt(password)
-        # Очищаем пароль из FSM сразу после шифрования — больше он не нужен.
-        await state.update_data(_save_password=None, _password_temp=None)
-        if not encrypted:
-            logger.error("Не удалось зашифровать пароль для аккаунта id=%s.",
-                         account_id)
-            await state.clear()
-            await message.answer(
-                "⚠️ Не удалось зашифровать пароль (проблема с SECRET_KEY). "
-                "Аккаунт сохранён без пароля.",
-                reply_markup=_menu_for(message.from_user.id),
-            )
-            return
-        await set_account_encrypted_password(account_id, encrypted)
-        logger.info("Зашифрованный пароль сохранён для аккаунта «%s» (id=%s).",
-                    username, account_id)
-        await state.clear()
-        await message.answer(
-            "💾 <b>Пароль сохранён</b> (зашифрован).\n\n"
-            "Теперь запустите <b>🔄 Синхронизировать форум</b>.",
-            reply_markup=_menu_for(message.from_user.id),
-            message_effect_id=EFFECT_LIKE,
-        )
-    elif text == "🚫 Не сохранять":
-        # Пароль никуда не сохраняем и явно затираем из FSM
-        await state.update_data(_save_password=None, _password_temp=None)
-        await state.clear()
-        await message.answer(
-            "👌 Пароль не сохранён.\n\n"
-            "Теперь запустите <b>🔄 Синхронизировать форум</b>.",
-            reply_markup=_menu_for(message.from_user.id),
-            message_effect_id=EFFECT_LIKE,
-        )
-    else:
-        await message.answer(
-            "Выберите кнопку: <b>💾 Сохранить пароль</b> или <b>🚫 Не сохранять</b>."
-        )
 
 
 # ---------------- Глобальная отмена ----------------

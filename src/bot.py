@@ -27,7 +27,6 @@ from src.middleware import (
 )
 from src.status_monitor import status_monitor_loop
 from src.queue_processor import queue_processor_loop
-from src.auto_relogin import auto_relogin_loop
 from src.error_reporter import install as install_error_reporter
 from src.storage_backup import (
     is_enabled as backup_is_enabled,
@@ -154,7 +153,6 @@ async def main():
     admin_commands = public_commands + [
         BotCommand(command="login", description="🔐 Войти по паролю"),
         BotCommand(command="accounts", description="👥 Аккаунты форума"),
-        BotCommand(command="relogin", description="🔄 Перелогинить аккаунты"),
         BotCommand(command="sync", description="🔄 Синхронизировать форум"),
         BotCommand(command="check", description="🔍 Проверить статусы жалоб"),
         BotCommand(command="checkurl", description="🔍 Проверить статус темы"),
@@ -188,9 +186,7 @@ async def main():
     logger.info("Запускаю long-polling. Для остановки нажмите Ctrl+C.")
     monitor_task = asyncio.create_task(status_monitor_loop(bot))
     queue_task = asyncio.create_task(queue_processor_loop(bot))
-    relogin_task = asyncio.create_task(auto_relogin_loop())
-    logger.info("Запущены фоновые задачи: мониторинг статусов, "
-                "процессор очереди, авто-перелогин.")
+    logger.info("Запущены фоновые задачи: мониторинг статусов, процессор очереди.")
     backup_task = None
     if backup_is_enabled():
         backup_task = asyncio.create_task(periodic_backup_loop(bot))
@@ -204,7 +200,7 @@ async def main():
         except Exception:
             logger.exception("Финальный бэкап не удался.")
         logger.info("Останавливаю фоновые задачи...")
-        for task in (monitor_task, queue_task, relogin_task, backup_task):
+        for task in (monitor_task, queue_task, backup_task):
             if task is not None:
                 task.cancel()
                 try:

@@ -392,12 +392,53 @@ async def forum_login(login: str, password: str) -> dict:
     # Только успешный 2FA-ответ оставляет клиент открытым (его закроет submit_2fa).
     keep_open = False
     try:
-        # 1. Получаем CSRF и стартовые куки с /login/
-        r = await client.get(LOGIN_URL)
-        if r.status_code != 200:
-            logger.error("HTTP %s при загрузке /login/", r.status_code)
+        # 0. Прогрев: сначала идём на главную, чтобы DDoS-Guard поставил
+        # свои куки (cf_*, ddg*) и не блокнул /login/ как «робот».
+        try:
+            warmup = await client.get(FORUM_URL)
+            if warmup.status_code == 200 and (
+                "vddosw3data.js" in warmup.text or "slowAES" in warmup.text
+            ):
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain=FORUM_HOST, path="/")
+                    await client.get(FORUM_URL)
+        except httpx.RequestError as e:
+            logger.warning("Прогрев главной не удался: %s — пробую сразу /login/.", e)
+
+        # 1. Получаем CSRF и стартовые куки с /login/. До 3 попыток если 403.
+        r = None
+        for attempt in range(1, 4):
+            r = await client.get(LOGIN_URL)
+            if r.status_code != 403:
+                break
+            logger.warning("HTTP 403 на /login/ (попытка %d/3) — пробую "
+                           "обновить R3ACTLB и повторить.", attempt)
+            fresh = await _solve_ddos_guard()
+            if fresh:
+                client.cookies.set("R3ACTLB", fresh,
+                                    domain=FORUM_HOST, path="/")
+            # Между попытками небольшая пауза, чтобы IP не был распознан как бот
+            await asyncio.sleep(2.0)
+
+        if r is None or r.status_code != 200:
+            code = r.status_code if r else "—"
+            logger.error("HTTP %s при загрузке /login/", code)
+            hint = ""
+            if code == 403:
+                hint = (
+                    "\n\nДоступ к форуму заблокирован DDoS-Guard. Возможные причины:\n"
+                    "• IP хостинга в чёрном списке (часто на VPS/виртуальных серверах);\n"
+                    "• User-Agent или заголовки выглядят как бот;\n"
+                    "• Слишком частые запросы за короткое время.\n\n"
+                    "Решения:\n"
+                    "• Подождите 10–15 минут и попробуйте снова.\n"
+                    "• Залейте свежий <code>cookies.json</code> вручную (из браузера).\n"
+                    "• Если бот на VPS — попробуйте перезапустить, многие хостинги меняют IP."
+                )
             return {"status": "error",
-                    "message": f"Форум вернул HTTP {r.status_code} на странице входа."}
+                    "message": f"Форум вернул HTTP {code} на странице входа.{hint}"}
 
         if "vddosw3data.js" in r.text or "slowAES" in r.text:
             logger.warning("На /login/ снова DDoS-Guard заглушка — пробую обновить R3ACTLB.")
