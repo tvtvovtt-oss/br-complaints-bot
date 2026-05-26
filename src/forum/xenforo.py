@@ -332,37 +332,27 @@ _USER_ID_RE = re.compile(r'data-user-id\s*=\s*"(\d+)"', re.IGNORECASE)
 _CSRF_RE = re.compile(r'data-csrf\s*=\s*"([^"]+)"', re.IGNORECASE)
 
 
-async def _solve_ddos_guard() -> Optional[str]:
-    """Решает JS-челлендж DDoS-Guard и возвращает значение cookie R3ACTLB.
-    Возвращает None если страница не оказалась челленджем или решить не вышло.
+def _solve_ddos_guard_from_html(html: str) -> Optional[str]:
+    """Решает JS-челлендж DDoS-Guard по уже полученному HTML заглушки.
 
-    Заглушка содержит три 32-символьные hex-строки a, b, c. Cookie вычисляется
-    как hex(AES-128-CBC.decrypt(ciphertext=c, key=a, iv=b)).
+    Возвращает hex(R3ACTLB) или None. Не делает сетевых запросов — может
+    быть вызвано на тех же байтах, которые форум только что отдал твоему
+    клиенту, чтобы не получить новый набор ключей с другого запроса
+    (DDoS-Guard может выдавать a/b/c с привязкой к сессии и IP).
     """
-    try:
-        async with httpx.AsyncClient(
-            headers=HEADERS, follow_redirects=False, timeout=15.0,
-        ) as client:
-            r = await client.get(FORUM_URL)
-            html = r.text
-            if "slowAES" not in html and "vddosw3data" not in html:
-                # Уже не челлендж — нечего решать
-                return None
-            m = _DDOS_KEYS_RE.search(html)
-            if not m:
-                logger.debug("В заглушке DDoS-Guard не нашлись AES-ключи.")
-                return None
-            a_hex, b_hex, c_hex = m.group(1), m.group(2), m.group(3)
-    except httpx.RequestError as e:
-        logger.warning("Сетевая ошибка при загрузке заглушки DDoS-Guard: %s", e)
+    if "slowAES" not in html and "vddosw3data" not in html:
         return None
+    m = _DDOS_KEYS_RE.search(html)
+    if not m:
+        logger.debug("В заглушке DDoS-Guard не нашлись AES-ключи.")
+        return None
+    a_hex, b_hex, c_hex = m.group(1), m.group(2), m.group(3)
 
     try:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         from cryptography.hazmat.backends import default_backend
     except ImportError:
-        logger.warning("Для решателя DDoS-Guard нужен пакет cryptography. "
-                       "Установите: pip install cryptography")
+        logger.warning("Для решателя DDoS-Guard нужен пакет cryptography.")
         return None
 
     try:
@@ -375,6 +365,29 @@ async def _solve_ddos_guard() -> Optional[str]:
         return plaintext.hex()
     except Exception as e:
         logger.warning("Не удалось расшифровать DDoS-Guard challenge: %s", e)
+        return None
+
+
+async def _solve_ddos_guard() -> Optional[str]:
+    """Решает JS-челлендж DDoS-Guard и возвращает значение cookie R3ACTLB.
+    Возвращает None если страница не оказалась челленджем или решить не вышло.
+
+    Заглушка содержит три 32-символьные hex-строки a, b, c. Cookie вычисляется
+    как hex(AES-128-CBC.decrypt(ciphertext=c, key=a, iv=b)).
+
+    ВАЖНО: эта функция делает СВОЙ httpx-запрос, поэтому полученный
+    R3ACTLB подходит только для нового клиента (с теми же IP/UA/headers).
+    Если нужен R3ACTLB для уже открытого клиента — используй
+    `_solve_ddos_guard_from_html(html)` на содержимом ответа того клиента.
+    """
+    try:
+        async with httpx.AsyncClient(
+            headers=HEADERS, follow_redirects=False, timeout=15.0,
+        ) as client:
+            r = await client.get(FORUM_URL)
+            return _solve_ddos_guard_from_html(r.text)
+    except httpx.RequestError as e:
+        logger.warning("Сетевая ошибка при загрузке заглушки DDoS-Guard: %s", e)
         return None
 
 
@@ -392,22 +405,17 @@ async def forum_login(login: str, password: str) -> dict:
     """
     logger.info("Начинаю вход на форум по паролю (логин: %r).", login)
 
-    # DDoS-Guard на BR обязательно требует cookie R3ACTLB, который выдаётся после
-    # JS-челленджа. Сами решаем челлендж AES-128-CBC, чтобы не зависеть от ручного
-    # экспорта кук. Если по какой-то причине не получилось — пробуем взять
-    # существующий R3ACTLB из cookies.json (вдруг сработает).
+    # Стартуем БЕЗ R3ACTLB. Прогревочный запрос на главную сам получит
+    # JS-челлендж от DDoS-Guard, мы решим его на тех же байтах и поставим
+    # R3ACTLB ИМЕННО НА ЭТОТ ЖЕ клиент. Если решать через отдельный запрос
+    # (как раньше через _solve_ddos_guard()), DDoS-Guard может выдать
+    # другой набор a/b/c — итоговый R3ACTLB не подойдёт нашей сессии и
+    # последующий /login/ упадёт в 403.
     initial_cookies: dict = {}
-    solved = await _solve_ddos_guard()
-    if solved:
-        initial_cookies["R3ACTLB"] = solved
-        logger.info("DDoS-Guard челлендж решён, R3ACTLB получен.")
-    else:
-        existing = load_cookies()
-        if existing.get("R3ACTLB"):
-            initial_cookies["R3ACTLB"] = existing["R3ACTLB"]
-            logger.warning("Решатель не отработал, использую R3ACTLB из cookies.json.")
-        else:
-            logger.warning("R3ACTLB получить не удалось — продолжаю без него (скорее всего, упадёт).")
+    existing = load_cookies()
+    if existing.get("R3ACTLB"):
+        # Если в cookies.json уже есть свежий R3ACTLB — пробуем сначала с ним
+        initial_cookies["R3ACTLB"] = existing["R3ACTLB"]
 
     client = httpx.AsyncClient(
         cookies=initial_cookies,
@@ -418,34 +426,75 @@ async def forum_login(login: str, password: str) -> dict:
     # Только успешный 2FA-ответ оставляет клиент открытым (его закроет submit_2fa).
     keep_open = False
     try:
-        # 0. Прогрев главной — чтобы DDoS-Guard поставил свои внутренние
-        # куки (xf_csrf, xf_session_id и т.п.) и /login/ не выглядел как
-        # «бот пришёл сразу на login без посещения главной».
-        try:
-            warmup = await client.get(FORUM_URL)
-            if warmup.status_code == 200 and (
-                "vddosw3data.js" in warmup.text or "slowAES" in warmup.text
-            ):
-                fresh = await _solve_ddos_guard()
-                if fresh:
-                    client.cookies.set("R3ACTLB", fresh,
-                                        domain=FORUM_HOST, path="/")
-                    await client.get(FORUM_URL)
-            # Маленькая пауза — браузер тоже не молниеносно перелистывает
-            await asyncio.sleep(0.8)
-        except httpx.RequestError:
-            pass
+        # 0. Прогрев главной — чтобы DDoS-Guard либо отдал реальную страницу
+        # (R3ACTLB уже подходит), либо отдал JS-челлендж — мы решим его НА
+        # ЭТОМ ЖЕ КЛИЕНТЕ и попробуем ещё раз.
+        for warmup_attempt in range(3):
+            try:
+                warmup = await client.get(FORUM_URL)
+            except httpx.RequestError as e:
+                logger.warning("Прогрев главной упал: %s", e)
+                return {"status": "error",
+                        "message": f"Сетевая ошибка при прогреве: {e}"}
+
+            if warmup.status_code == 403:
+                logger.error("DDoS-Guard заблокировал главную (HTTP 403). "
+                              "IP сервера в чёрном списке.")
+                return {"status": "error",
+                        "message": (
+                            "🚫 DDoS-Guard вернул 403 на главную страницу — "
+                            "IP вашего сервера в чёрном списке. Используйте "
+                            "другой хостинг или запустите бота локально."
+                        )}
+
+            if "vddosw3data.js" not in warmup.text and "slowAES" not in warmup.text:
+                # Нормальная страница, R3ACTLB подходит — выходим из прогрева
+                break
+
+            # Получили JS-челлендж — решаем НА ЕГО ЖЕ HTML
+            fresh = _solve_ddos_guard_from_html(warmup.text)
+            if not fresh:
+                logger.error("Не смог решить DDoS-Guard challenge.")
+                return {"status": "error",
+                        "message": "Не удалось решить DDoS-Guard challenge."}
+
+            client.cookies.set("R3ACTLB", fresh,
+                                domain=FORUM_HOST, path="/")
+            logger.info("DDoS-Guard challenge решён (попытка %d). Повторяю запрос.",
+                         warmup_attempt + 1)
+            await asyncio.sleep(1.0)
+        else:
+            # 3 попытки — заглушка осталась
+            logger.error("DDoS-Guard challenge не разруливается за 3 попытки.")
+            return {"status": "error",
+                    "message": (
+                        "DDoS-Guard форума не пропускает запросы. "
+                        "Возможно изменилась защита либо IP в чёрном списке."
+                    )}
+
+        # Маленькая пауза — браузер тоже не молниеносно навигирует
+        await asyncio.sleep(0.5)
 
         # 1. Получаем CSRF и стартовые куки с /login/
         r = await client.get(LOGIN_URL)
+        if r.status_code == 403:
+            logger.error("HTTP 403 при загрузке /login/ — даже после прогрева. "
+                          "Возможно, /login/ защищён отдельно или IP блокируется.")
+            return {"status": "error",
+                    "message": (
+                        "Форум вернул 403 на странице /login/ "
+                        "(после успешного прогрева главной).\n\n"
+                        "Скорее всего IP в чёрном списке только для /login/. "
+                        "Залейте свежий cookies.json вручную как обходной путь."
+                    )}
         if r.status_code != 200:
             logger.error("HTTP %s при загрузке /login/", r.status_code)
             return {"status": "error",
                     "message": f"Форум вернул HTTP {r.status_code} на странице входа."}
 
         if "vddosw3data.js" in r.text or "slowAES" in r.text:
-            logger.warning("На /login/ снова DDoS-Guard заглушка — пробую обновить R3ACTLB.")
-            fresh = await _solve_ddos_guard()
+            logger.warning("На /login/ снова DDoS-Guard заглушка — решаю на её HTML.")
+            fresh = _solve_ddos_guard_from_html(r.text)
             if fresh:
                 client.cookies.set("R3ACTLB", fresh,
                                     domain=FORUM_HOST, path="/")
