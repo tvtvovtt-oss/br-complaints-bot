@@ -923,30 +923,6 @@ async def set_bug_report_status(report_id: int, status: str,
     logger.info("Баг-репорт #%s: статус → %s", report_id, status)
 
 
-async def recent_complaint_against(telegram_id: int, target_nickname: str,
-                                     within_minutes: int = 30) -> dict | None:
-    """Возвращает последнюю жалобу пользователя на тот же ник, поданную не
-    более `within_minutes` минут назад. Используется для антиспама — нельзя
-    жаловаться на одного и того же игрока дважды подряд."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            """
-            SELECT id, created_at, forum_thread_url
-            FROM complaints
-            WHERE telegram_id = ?
-              AND LOWER(nickname) = LOWER(?)
-              AND created_at >= datetime('now', ? || ' minutes')
-            ORDER BY id DESC LIMIT 1
-            """,
-            (telegram_id, target_nickname, f"-{int(within_minutes)}"),
-        ) as cur:
-            row = await cur.fetchone()
-            if not row:
-                return None
-            return {"id": row[0], "created_at": row[1],
-                    "forum_thread_url": row[2]}
-
-
 async def count_recent_bug_reports(telegram_id: int, within_minutes: int) -> int:
     """Сколько баг-репортов от пользователя за последние N минут."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1603,20 +1579,25 @@ async def list_complaints_paginated(
     """Постраничный список жалоб для админа с фильтрами.
 
     Возвращает (список_жалоб, total_count).
+
+    SQL составляется только из заранее определённых литералов внутри функции
+    (нет конкатенации пользовательского ввода в SQL). Все динамические
+    значения проходят как параметры (?, ...).
     """
-    where_parts: list[str] = []
+    # Каждое условие — фиксированный литерал (никогда не приходит из ввода).
+    conditions: list[str] = []
     params: list = []
-    if status:
-        where_parts.append("status = ?")
+    if status is not None:
+        conditions.append("status = ?")
         params.append(status)
-    if target_nickname:
-        where_parts.append("LOWER(nickname) LIKE LOWER(?)")
+    if target_nickname is not None:
+        conditions.append("LOWER(nickname) LIKE LOWER(?)")
         params.append(f"%{target_nickname}%")
     if telegram_id is not None:
-        where_parts.append("telegram_id = ?")
+        conditions.append("telegram_id = ?")
         params.append(telegram_id)
 
-    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     offset = max(0, (page - 1) * page_size)
 
     async with aiosqlite.connect(DB_PATH) as db:

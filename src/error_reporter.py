@@ -140,9 +140,16 @@ class TelegramErrorHandler(logging.Handler):
         )
         if tb:
             text_full += f"\n\n<pre>{escape(tb)}</pre>"
-        # Telegram-лимит 4096
+        # Telegram-лимит 4096. Обрезаем аккуратно: если в обрезанном тексте
+        # есть открытый <pre>, добавляем закрывающий, иначе — обычный курсив.
         if len(text_full) > 4000:
-            text_full = text_full[:3950] + "\n\n<i>...обрезано</i></pre>"
+            truncated = text_full[:3950]
+            opens = truncated.count("<pre>")
+            closes = truncated.count("</pre>")
+            suffix = "\n\n<i>...обрезано</i>"
+            if opens > closes:
+                suffix += "</pre>"
+            text_full = truncated + suffix
 
         try:
             await bot.send_message(

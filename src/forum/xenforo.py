@@ -2,9 +2,10 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from html import escape as escape_html
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import httpx
 from bs4 import BeautifulSoup
@@ -142,19 +143,28 @@ async def save_cookies_async(cookies_dict: dict) -> None:
             logger.exception("Не удалось сохранить куки в файл: %s", e)
 
 
+# Лок для sync-версии save_cookies. asyncio.Lock в синхронном коде не работает,
+# а одновременная запись cookies.json из двух корутин может дать побитый файл.
+_save_cookies_sync_lock = threading.Lock()
+
+
 def save_cookies(cookies_dict: dict) -> None:
     """Синхронная обёртка над save_cookies_async для обратной совместимости.
     Если вызывается из async-контекста — лучше использовать save_cookies_async.
+
+    Атомарность записи файла защищена threading.Lock — даже если две корутины
+    пишут одновременно, они выстраиваются в очередь.
     """
     global _cookies_cache, _cookies_mtime
-    try:
-        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-            json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
-        _cookies_cache = dict(cookies_dict)
-        _cookies_mtime = COOKIES_PATH.stat().st_mtime
-        logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))
-    except Exception as e:
-        logger.exception("Не удалось сохранить куки в файл: %s", e)
+    with _save_cookies_sync_lock:
+        try:
+            with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+                json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
+            _cookies_cache = dict(cookies_dict)
+            _cookies_mtime = COOKIES_PATH.stat().st_mtime
+            logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))
+        except Exception as e:
+            logger.exception("Не удалось сохранить куки в файл: %s", e)
 
 
 def invalidate_cookies_cache() -> None:
@@ -247,22 +257,30 @@ def _extract_user_id(html: str) -> int:
 
 
 def _extract_username(soup: BeautifulSoup) -> str:
-    """Достаёт имя авторизованного пользователя из шапки XenForo."""
+    """Достаёт имя авторизованного пользователя из шапки XenForo.
+
+    Ищем строго внутри элементов навигации/шапки. Не идём по всем ссылкам
+    /members/ на странице — там могут быть имена других пользователей
+    (последние пользователи, авторы постов и т.п.).
+    """
     tag = soup.find("span", class_="p-navgroup-linkText")
     if tag and tag.text.strip():
         return tag.text.strip()
+
+    # data-username на элементе с класса .p-navgroup--member или похожих
+    nav = soup.find(class_=re.compile(r"\bp-navgroup\b.*member|p-account|p-nav-user"))
+    if nav:
+        # Любой <a href=/members/...> ВНУТРИ этой обёртки уже точно про
+        # самого пользователя, а не про чужого.
+        a = nav.find("a", href=re.compile(r"/members/"))
+        if a and a.text.strip():
+            return a.text.strip()
 
     avatar = soup.find("span", class_="avatar")
     if avatar and avatar.parent:
         sibling = avatar.parent.find("span")
         if sibling and sibling.text.strip():
             return sibling.text.strip()
-
-    for a in soup.find_all("a", href=True):
-        if "/members/" in a["href"]:
-            text = a.text.strip()
-            if text:
-                return text
 
     return "Авторизован (Имя не найдено)"
 
@@ -1220,7 +1238,7 @@ async def discover_complaint_categories(
 async def discover_all_complaint_categories(
     servers: list[tuple[str, int]],
     concurrency: int = 6,
-    progress: Optional[callable] = None,
+    progress: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
 ) -> dict[int, dict[str, tuple[str, int]]]:
     """Параллельно сканирует категории жалоб для всех серверов одним клиентом.
 

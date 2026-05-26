@@ -264,8 +264,13 @@ async def srv_pick(call: types.CallbackQuery, state: FSMContext):
         await call.answer()
         return
 
-    _, node_id_str, name = call.data.split(":", 2)
-    node_id = int(node_id_str)
+    try:
+        _, node_id_str, name = call.data.split(":", 2)
+        node_id = int(node_id_str)
+    except (ValueError, AttributeError):
+        logger.warning("srv_pick: некорректный callback data %r", call.data)
+        await call.answer("Ошибка данных кнопки.", show_alert=True)
+        return
 
     categories = await get_complaint_categories(node_id)
     if not categories:

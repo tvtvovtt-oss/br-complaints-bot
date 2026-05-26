@@ -253,13 +253,12 @@ async def login_step_password(message: types.Message, state: FSMContext, bot: Bo
         logger.info("Вход для %s успешен, аккаунт «%s» сохранён в БД и активирован.",
                     describe_user(message.from_user), username)
         await status_msg.delete()
-        # Предложим сохранить пароль (если шифрование настроено)
-        await _offer_save_password(message, state, account_id, username, password)
+        # Финальное сообщение (пароль больше не сохраняем — авто-перелогин убран)
+        await _offer_save_password(message, state, account_id, username, None)
         return
 
     # status == "2fa"
-    # Не очищаем пароль в state — он понадобится после ввода 2FA для сохранения
-    await state.update_data(twofa=result, _password_temp=password)
+    await state.update_data(twofa=result)
     await state.set_state(LoginForm.waiting_for_2fa_code)
     provider = result.get("provider", "email")
     providers = result.get("providers", [provider])
@@ -329,7 +328,6 @@ async def login_step_2fa(message: types.Message, state: FSMContext):
     if not login_value:
         # достанем из FSM-данных шага login если был
         login_value = data2.get("login")
-    password_temp = data2.get("_password_temp")
     account_id = await upsert_account(
         telegram_id=message.from_user.id,
         username=username,
@@ -341,8 +339,8 @@ async def login_step_2fa(message: types.Message, state: FSMContext):
     logger.info("Вход с 2FA для %s успешен, аккаунт «%s» сохранён в БД.",
                 describe_user(message.from_user), username)
     await status_msg.delete()
-    # Предлагаем сохранить пароль
-    await _offer_save_password(message, state, account_id, username, password_temp)
+    # Финальное сообщение
+    await _offer_save_password(message, state, account_id, username, None)
 
 
 @router.message(Command("start"))
@@ -934,14 +932,13 @@ async def acc_add(call: types.CallbackQuery, state: FSMContext):
 
 async def _offer_save_password(message: types.Message, state: FSMContext,
                                  account_id: int, username: str,
-                                 password: str | None) -> None:
+                                 password: str | None = None) -> None:
     """Финальное сообщение после успешного входа.
 
-    (Имя сохранено для обратной совместимости — раньше тут был шаг
-    «сохранить пароль для авто-перелогина», но фича удалена. Делаем
-    просто финальный экран.)
+    Параметр `password` оставлен для обратной совместимости, но больше
+    не используется (фича авто-перелогина удалена).
     """
-    # Затираем все возможные следы пароля в FSM
+    # Затираем все возможные следы пароля в FSM (на случай старых черновиков)
     await state.update_data(_save_password=None, _password_temp=None)
     await state.clear()
     await message.answer(

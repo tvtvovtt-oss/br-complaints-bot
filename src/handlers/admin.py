@@ -238,7 +238,22 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
                 delivered += 1
             except Exception:
                 failed += 1
-        except (TelegramBadRequest, Exception) as e:
+        except TelegramBadRequest as e:
+            # Чаще всего — не валидный HTML в тексте админа. Пробуем plain.
+            if "parse" in str(e).lower() or "tag" in str(e).lower():
+                try:
+                    await bot.send_message(
+                        uid, text,
+                        disable_web_page_preview=True,
+                        parse_mode=None,
+                    )
+                    delivered += 1
+                    continue
+                except Exception:
+                    pass
+            logger.debug("broadcast: %s -> %s", uid, e)
+            failed += 1
+        except Exception as e:
             logger.debug("broadcast: %s -> %s", uid, e)
             failed += 1
 
