@@ -318,6 +318,10 @@ async def _solve_ddos_guard() -> Optional[str]:
             headers=HEADERS, follow_redirects=False, timeout=15.0,
         ) as client:
             r = await client.get(FORUM_URL)
+            if r.status_code == 403:
+                logger.warning("DDoS-Guard заблокировал даже главную (HTTP 403). "
+                               "Скорее всего IP в чёрном списке.")
+                return None
             html = r.text
             if "slowAES" not in html and "vddosw3data" not in html:
                 # Уже не челлендж — нечего решать
@@ -394,8 +398,24 @@ async def forum_login(login: str, password: str) -> dict:
     try:
         # 0. Прогрев: сначала идём на главную, чтобы DDoS-Guard поставил
         # свои куки (cf_*, ddg*) и не блокнул /login/ как «робот».
+        # Если сам прогрев вернул 403 — значит IP заблокирован, нет смысла
+        # стучаться дальше.
         try:
             warmup = await client.get(FORUM_URL)
+            if warmup.status_code == 403:
+                logger.error("DDoS-Guard заблокировал главную страницу (HTTP 403). "
+                              "IP сервера в чёрном списке — авторизация невозможна.")
+                return {"status": "error",
+                        "message": (
+                            "🚫 DDoS-Guard заблокировал даже главную форума "
+                            "(HTTP 403).\n\n"
+                            "<b>IP вашего хостинга в чёрном списке.</b>\n\n"
+                            "<b>Что делать:</b>\n"
+                            "• Перезапустите контейнер у хостинга (часто меняет IP).\n"
+                            "• Подождите 30–60 минут и попробуйте снова.\n"
+                            "• Залейте свежий <code>cookies.json</code> "
+                            "вручную — это в обход DDoS-Guard."
+                        )}
             if warmup.status_code == 200 and (
                 "vddosw3data.js" in warmup.text or "slowAES" in warmup.text
             ):
