@@ -806,6 +806,27 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
                 title_tag = soup.find("title")
                 title = title_tag.text.strip() if title_tag else "?"
 
+                # Особый случай: DDoS-Guard заглушка. На ней нет data-logged-in,
+                # потому что это вообще не страница форума — это challenge-страница.
+                ddg_blocked = (
+                    "vddosw3data" in html or "slowAES" in html
+                    or "ddos-guard" in html.lower()
+                    or "checking your browser" in html.lower()
+                )
+                if ddg_blocked:
+                    logger.warning("DDoS-Guard блокирует доступ к форуму "
+                                    "(IP %s в чёрном списке).", "сервера бота")
+                    return False, (
+                        "🚫 <b>DDoS-Guard блокирует IP сервера бота.</b>\n\n"
+                        "Куки сами по себе валидные, но форум подсунул "
+                        "заглушку защиты (а не страницу форума), потому что "
+                        "IP вашего хостинга в чёрном списке.\n\n"
+                        "<b>Что делать:</b>\n"
+                        "• Подождите 30–60 минут — обычно блок снимается.\n"
+                        "• Перезапустите бота на хостинге (часто меняет IP).\n"
+                        "• Если не помогло — поменяйте хостинг."
+                    )
+
                 names = sorted(cookies.keys())
                 names_str = ", ".join(names) or "(пусто)"
                 has_user = "xf_user" in cookies
