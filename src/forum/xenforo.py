@@ -806,19 +806,46 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
                 title_tag = soup.find("title")
                 title = title_tag.text.strip() if title_tag else "?"
 
-                names = ", ".join(sorted(cookies.keys()))
+                names = sorted(cookies.keys())
+                names_str = ", ".join(names) or "(пусто)"
+                has_user = "xf_user" in cookies
+                has_session = "xf_session" in cookies
+                has_ddg = "R3ACTLB" in cookies
                 logger.warning(
                     "Форум не считает сессию авторизованной. data-logged-in=%r, "
-                    "title=%r, имеющиеся куки: %s",
-                    logged_in_attr, title, names,
+                    "title=%r, имеющиеся куки: %s, xf_user=%s, xf_session=%s, R3ACTLB=%s",
+                    logged_in_attr, title, names_str,
+                    has_user, has_session, has_ddg,
                 )
-                return False, (
-                    "Форум не принял сессию (<code>data-logged-in != true</code>).\n\n"
-                    "Возможные причины:\n"
-                    "• <b>Куки истекли</b> — экспортируйте свежие из браузера.\n"
+
+                missing = []
+                if not has_user:
+                    missing.append("<code>xf_user</code>")
+                if not has_session:
+                    missing.append("<code>xf_session</code>")
+
+                hints = ["Возможные причины:"]
+                if missing:
+                    hints.append(
+                        f"• <b>Не хватает кук:</b> {', '.join(missing)}. "
+                        "Часто Cookie-Editor пропускает HttpOnly-куки. Возьмите "
+                        "<b>все</b> через DevTools → Application → Cookies."
+                    )
+                hints.extend([
+                    "• <b>Куки привязаны к IP</b> — экспортируете с домашнего IP, "
+                    "а бот сидит на хостинге с другим. DDoS-Guard это видит и режет.",
+                    "• <b>Куки истекли</b> — войдите в браузере заново и экспортируйте.",
                     "• <b>User-Agent не совпадает</b> с браузером, где брали куки. "
-                    f"Сейчас в .env: <code>{escape_html(USER_AGENT)}</code>\n"
-                    "• Куки взяты из режима инкогнито — после закрытия они умирают."
+                    f"Сейчас в .env: <code>{escape_html(USER_AGENT)}</code>",
+                    "• Куки взяты в инкогнито — после закрытия они умирают.",
+                ])
+
+                return False, (
+                    "Форум не принял сессию "
+                    f"(<code>data-logged-in={escape_html(str(logged_in_attr))}</code>).\n\n"
+                    f"<b>Что прислал бот в куках:</b> "
+                    f"<code>{escape_html(names_str)}</code>\n\n"
+                    + "\n".join(hints)
                 )
 
             updated = _flatten_cookies(client)
