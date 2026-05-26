@@ -41,6 +41,11 @@ PROCESS_INTERVAL = 5
 # Максимум попыток на одну жалобу
 MAX_ATTEMPTS = 3
 
+# Сколько жалоб обрабатываем одновременно. У каждой публикации свой аккаунт
+# из пула (claim_available_account), так что параллельные публикации не мешают
+# друг другу. 2 — компромисс: ускорение в 2 раза, но не перегружаем форум.
+PARALLEL_WORKERS = 2
+
 
 async def _notify_user(bot: Bot, telegram_id: int, text: str,
                         disable_preview: bool = False) -> None:
@@ -123,10 +128,29 @@ async def _process_one(bot: Bot, item: dict) -> None:
 
 
 async def queue_processor_loop(bot: Bot) -> None:
-    """Бесконечный цикл обработки очереди."""
-    logger.info("Запущен процессор очереди жалоб (интервал %d сек).",
-                PROCESS_INTERVAL)
+    """Бесконечный цикл обработки очереди.
+
+    Обрабатывает до PARALLEL_WORKERS жалоб одновременно — у каждой свой
+    аккаунт из пула (через claim_available_account), параллелизм не
+    мешает кулдауну на стороне форума.
+    """
+    logger.info("Запущен процессор очереди жалоб (интервал %d сек, "
+                "параллельность %d).", PROCESS_INTERVAL, PARALLEL_WORKERS)
     await asyncio.sleep(60)  # стартовая задержка, как у других циклов
+
+    sem = asyncio.Semaphore(PARALLEL_WORKERS)
+
+    async def _run_one(item):
+        async with sem:
+            try:
+                await asyncio.wait_for(_process_one(bot, item), timeout=120)
+            except asyncio.TimeoutError:
+                logger.warning("Жалоба #%s — таймаут публикации.", item["id"])
+                await increment_queue_attempt(item["id"], "таймаут")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка обработки жалобы #%s", item["id"])
 
     while True:
         try:
@@ -135,19 +159,9 @@ async def queue_processor_loop(bot: Bot) -> None:
                 await asyncio.sleep(PROCESS_INTERVAL)
                 continue
 
-            # Обрабатываем по одной — иначе лимит на форуме обойти не получится
-            for item in pending:
-                try:
-                    await asyncio.wait_for(_process_one(bot, item), timeout=120)
-                except asyncio.TimeoutError:
-                    logger.warning("Жалоба #%s — таймаут публикации.", item["id"])
-                    await increment_queue_attempt(item["id"], "таймаут")
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("Ошибка обработки жалобы #%s", item["id"])
-                # Пауза между жалобами
-                await asyncio.sleep(PROCESS_INTERVAL)
+            # Запускаем все pending параллельно (semaphore ограничит).
+            await asyncio.gather(*(_run_one(item) for item in pending))
+            await asyncio.sleep(PROCESS_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Процессор очереди остановлен.")
             raise

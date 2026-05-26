@@ -191,6 +191,36 @@ async def main():
     if backup_is_enabled():
         backup_task = asyncio.create_task(periodic_backup_loop(bot))
         logger.info("Фоновая задача периодического бэкапа БД запущена.")
+
+    # Стартап-сводка админам — чтобы видеть, что бот ожил после деплоя
+    try:
+        from src.database import (
+            count_complaints_by_status, list_accounts, count_tracked_users,
+        )
+        statuses = await count_complaints_by_status()
+        total_complaints = sum(statuses.values())
+        users_n = await count_tracked_users()
+        accs_per_admin = []
+        for aid in ADMIN_IDS[:1]:  # достаточно сводки по первому админу
+            accs_per_admin.append(len(await list_accounts(aid)))
+        accs_count = accs_per_admin[0] if accs_per_admin else 0
+
+        startup_text = (
+            "🚀 <b>Бот запущен</b>\n\n"
+            f"👥 Известных пользователей: <b>{users_n}</b>\n"
+            f"📝 Жалоб в БД: <b>{total_complaints}</b>\n"
+            f"🔑 Аккаунтов в пуле: <b>{accs_count}</b>\n"
+            f"📡 @{bot_info.username}\n"
+            f"<i>{platform.python_version()} • {platform.system()}</i>"
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(admin_id, startup_text,
+                                        disable_notification=True)
+            except Exception:
+                logger.debug("Не доставил стартап-сводку админу %s", admin_id)
+    except Exception:
+        logger.exception("Не удалось собрать стартап-сводку")
     try:
         await dp.start_polling(bot)
     finally:

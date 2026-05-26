@@ -998,20 +998,39 @@ async def cmd_me(message: types.Message):
     complaints = await get_user_complaints(user.id)
     accepted = sum(1 for c in complaints if c["status"] == "accepted")
     rejected = sum(1 for c in complaints if c["status"] == "rejected")
+    review = sum(1 for c in complaints if c["status"] == "review")
     pending = sum(1 for c in complaints if c["status"] == "pending")
 
     role = "👑 Администратор" if is_admin(user.id) else "👤 Пользователь"
 
-    text = (
-        f"<b>Ваш профиль</b>\n\n"
-        f"🆔 <code>{user.id}</code>\n"
-        f"👤 {escape(user.full_name or '—')}\n"
-        f"{f'📛 @{escape(user.username)}' if user.username else ''}\n"
-        f"🛡 Роль: {role}\n\n"
-        f"<b>📊 Ваша статистика жалоб:</b>\n"
-        f"   📝 Всего: <b>{len(complaints)}</b>\n"
-        f"   ⏳ Ожидание: <b>{pending}</b>\n"
-        f"   ✅ Принято: <b>{accepted}</b>\n"
-        f"   ❌ Отклонено: <b>{rejected}</b>"
-    )
-    await message.answer(text)
+    parts = [
+        "<b>Ваш профиль</b>\n",
+        f"🆔 <code>{user.id}</code>",
+        f"👤 {escape(user.full_name or '—')}",
+    ]
+    if user.username:
+        parts.append(f"📛 @{escape(user.username)}")
+    parts.append(f"🛡 Роль: {role}")
+    parts.append("")
+    parts.append("<b>📊 Ваша статистика жалоб:</b>")
+    parts.append(f"   📝 Всего: <b>{len(complaints)}</b>")
+    parts.append(f"   ⏳ Ожидание: <b>{pending}</b>")
+    parts.append(f"   🔎 На рассмотрении: <b>{review}</b>")
+    parts.append(f"   ✅ Принято: <b>{accepted}</b>")
+    parts.append(f"   ❌ Отклонено: <b>{rejected}</b>")
+
+    if complaints:
+        from src.status_monitor import status_label
+        parts.append("\n<b>📜 Последние жалобы:</b>")
+        for c in complaints[:5]:
+            st = status_label(c.get("status", "pending"))
+            target = escape((c.get("nickname") or "—")[:30])
+            url = c.get("forum_thread_url") or ""
+            link = (f' <a href="{escape(url)}">тема</a>'
+                    if url else "")
+            parts.append(f"   {st} <b>{target}</b>{link}")
+        if len(complaints) > 5:
+            parts.append(f"\n<i>…ещё {len(complaints) - 5}. Все — в "
+                          "<b>📜 Мои жалобы</b>.</i>")
+
+    await message.answer("\n".join(parts), disable_web_page_preview=True)

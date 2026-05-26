@@ -232,32 +232,70 @@ async def schedule_backup(bot: Bot | None = None) -> None:
 
 _force_backup_lock = asyncio.Lock()
 _last_force_backup_at: float = 0.0
-# Минимальный интервал между forced-бэкапами (для immediate-вызовов из БД).
-# Если важных событий пришло много подряд — пропускаем; периодический цикл
-# их потом всё равно догонит, плюс finally при остановке.
+_pending_backup_task: Optional[asyncio.Task] = None
+# Минимальный интервал между forced-бэкапами. Адаптивный: первое событие
+# после паузы — flush сразу. Если события идут чаще — последующие
+# отправляются «в хвост» через отложенный таск, чтобы не флудить канал.
 FORCE_BACKUP_MIN_INTERVAL = 60.0
 
 
 async def force_backup(bot: Bot | None = None) -> None:
-    """Немедленный синхронный бэкап (для /backup, immediate-вызовов из БД
-    и при остановке). Тротлится: не чаще раза в 60 сек, кроме случая когда
-    bot передан явно (это вызов при shutdown — пропускаем без задержки)."""
+    """Немедленный бэкап в Telegram-канал.
+
+    Адаптивный тротлинг:
+    - Первый вызов после паузы > FORCE_BACKUP_MIN_INTERVAL — отправка сразу.
+    - Последующие в окно — планируется один отложенный «хвостовой» бэкап,
+      чтобы свежие изменения не потерялись.
+    - При shutdown (bot передан явно) — без тротлинга.
+    """
     if not is_enabled():
         return
     target_bot = bot or _bot_ref
     if target_bot is None:
         return
 
-    global _last_force_backup_at
+    global _last_force_backup_at, _pending_backup_task
     explicit_bot = bot is not None  # True для shutdown-сценария
+
     async with _force_backup_lock:
         now = time.monotonic()
-        if not explicit_bot and (now - _last_force_backup_at) < FORCE_BACKUP_MIN_INTERVAL:
-            logger.debug("force_backup пропущен — слишком часто "
-                         "(прошло %.1f с).", now - _last_force_backup_at)
+        if explicit_bot:
+            # Shutdown — отправляем без задержки и сбрасываем тротлинг
+            await _send_backup_now(target_bot)
+            _last_force_backup_at = time.monotonic()
             return
-        await _send_backup_now(target_bot)
-        _last_force_backup_at = time.monotonic()
+
+        elapsed = now - _last_force_backup_at
+        if elapsed >= FORCE_BACKUP_MIN_INTERVAL:
+            # Достаточно времени прошло — отправляем сразу
+            await _send_backup_now(target_bot)
+            _last_force_backup_at = time.monotonic()
+            return
+
+        # Слишком часто — отправим в хвосте через отложенный таск.
+        # Если такой таск уже запланирован — оставляем его (он подхватит
+        # самые свежие данные на момент срабатывания).
+        if _pending_backup_task is not None and not _pending_backup_task.done():
+            logger.debug("force_backup: уже запланирован хвостовой бэкап.")
+            return
+
+        delay = FORCE_BACKUP_MIN_INTERVAL - elapsed
+
+        async def _delayed_flush():
+            try:
+                await asyncio.sleep(delay)
+                async with _force_backup_lock:
+                    await _send_backup_now(target_bot)
+                    global _last_force_backup_at
+                    _last_force_backup_at = time.monotonic()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка хвостового бэкапа")
+
+        _pending_backup_task = asyncio.create_task(_delayed_flush())
+        logger.debug("force_backup: запланирован хвостовой бэкап через %.1f с.",
+                     delay)
 
 
 async def periodic_backup_loop(bot: Bot, interval_seconds: int = 600) -> None:

@@ -218,9 +218,13 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Таблица users (нужна для list_all_users без UNION) + бэкфил из
+        # старых таблиц для проектов, обновляющихся с предыдущих версий.
+        await _ensure_users_table(db)
+        await _backfill_users(db)
         await db.commit()
     logger.info("База данных готова. Таблицы: complaints, servers, "
-                "complaint_categories, accounts.")
+                "complaint_categories, accounts, users.")
 
 
 # ---------- Жалобы ----------
@@ -836,6 +840,36 @@ async def delete_user_template(telegram_id: int, template_id: int) -> bool:
         return cur.rowcount > 0
 
 
+async def update_user_template(telegram_id: int, template_id: int,
+                                 *, name: str | None = None,
+                                 summary: str | None = None,
+                                 description: str | None = None) -> bool:
+    """Обновляет одно или несколько полей шаблона. Возвращает True если что-то
+    обновилось. Имена столбцов фиксированные литералы — без склейки строк."""
+    if name is None and summary is None and description is None:
+        return False
+    sets: list[str] = []
+    params: list = []
+    if name is not None:
+        sets.append("name = ?")
+        params.append(name)
+    if summary is not None:
+        sets.append("summary = ?")
+        params.append(summary)
+    if description is not None:
+        sets.append("description = ?")
+        params.append(description)
+    params.extend([template_id, telegram_id])
+    sql = (
+        "UPDATE user_templates SET " + ", ".join(sets)
+        + " WHERE id = ? AND telegram_id = ?"
+    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(sql, params)
+        await db.commit()
+        return cur.rowcount > 0
+
+
 # ---------- Баг-репорты ----------
 
 async def add_bug_report(telegram_id: int, username: str | None,
@@ -1213,24 +1247,39 @@ async def cancel_queue_item(telegram_id: int, queue_id: int) -> bool:
 async def list_all_users() -> list[int]:
     """Возвращает уникальные telegram_id всех известных пользователей бота.
 
-    Объединяет:
-    - таблицу `users` (все, кто хотя бы нажал /start)
-    - старые таблицы (complaints, user_templates, bug_reports, accounts,
-      complaint_queue) — на случай миграции с предыдущих версий, когда
-      `users` ещё не существовала.
+    Читает из таблицы `users` — она заполняется через middleware при любом
+    взаимодействии и пополняется бэкфилом при init_db (см. `_backfill_users`).
+    Это O(N) по индексу, без UNION'ов 5 таблиц.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_users_table(db)
-        async with db.execute("""
-            SELECT telegram_id FROM users
-            UNION SELECT telegram_id FROM complaints
+        async with db.execute(
+            "SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+            return [r[0] for r in rows if r[0]]
+
+
+async def _backfill_users(db: aiosqlite.Connection) -> int:
+    """Дозаполняет таблицу users telegram_id из старых таблиц (миграция).
+    Запускается один раз при init_db. Использует INSERT OR IGNORE — повторный
+    вызов идемпотентен и быстро отрабатывает."""
+    cur = await db.execute("""
+        INSERT OR IGNORE INTO users (telegram_id)
+        SELECT telegram_id FROM (
+            SELECT telegram_id FROM complaints
             UNION SELECT telegram_id FROM user_templates
             UNION SELECT telegram_id FROM bug_reports
             UNION SELECT telegram_id FROM accounts
             UNION SELECT telegram_id FROM complaint_queue
-        """) as cur:
-            rows = await cur.fetchall()
-            return [r[0] for r in rows if r[0]]
+        ) WHERE telegram_id IS NOT NULL
+    """)
+    inserted = cur.rowcount
+    await db.commit()
+    if inserted and inserted > 0:
+        logger.info("users-таблица: бэкфил добавил %d telegram_id из старых таблиц.",
+                    inserted)
+    return inserted or 0
 
 
 # ---------- Статистика ----------

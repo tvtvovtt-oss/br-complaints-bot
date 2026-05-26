@@ -130,6 +130,11 @@ async def _check_once(bot: Bot) -> None:
     logger.info("Мониторинг: проверяю %d жалоб.", len(complaints))
     changed = 0
     notified = 0
+    # Circuit breaker: считаем подряд идущие «не смогли определить» (None).
+    # Если их слишком много — форум либо упал, либо забанил IP. Прерываем
+    # весь цикл, чтобы не тратить минуты на гарантированно-провальные запросы.
+    consecutive_unknown = 0
+    UNKNOWN_BREAKER_THRESHOLD = 5
 
     for i, comp in enumerate(complaints):
         new_status = None
@@ -193,9 +198,19 @@ async def _check_once(bot: Bot) -> None:
             continue
 
         if new_status is None:
-            # Не смогли определить — не меняем
-            logger.debug("Жалоба id=%s: статус не удалось определить.", comp["id"])
+            # Не смогли определить — не меняем. Считаем для circuit breaker.
+            consecutive_unknown += 1
+            logger.debug("Жалоба id=%s: статус не удалось определить (%d подряд).",
+                          comp["id"], consecutive_unknown)
+            if consecutive_unknown >= UNKNOWN_BREAKER_THRESHOLD:
+                logger.warning(
+                    "Мониторинг: %d жалоб подряд недоступны (форум блокирует?), "
+                    "прерываю цикл досрочно.", consecutive_unknown,
+                )
+                break
             continue
+        # Успешный ответ — сбрасываем счётчик
+        consecutive_unknown = 0
 
         old_status = comp["status"]
         if new_status != old_status:

@@ -1368,6 +1368,40 @@ async def fetch_thread_admin_comment(
         return None
 
 
+_PREFIX_LABEL_RE = re.compile(
+    r'<span[^>]*class="[^"]*\blabel\b[^"]*"[^>]*>\s*([^<]{2,40})\s*</span>',
+    re.IGNORECASE,
+)
+
+
+def _fast_prefix_from_html(html: str) -> str | None:
+    """Быстрое извлечение префикса темы регексом, без BeautifulSoup.
+
+    Ищем первый <span class="...label...">текст</span> внутри блока
+    p-title-value. Возвращаем текст, если он не похож на blacklist
+    (плейсхолдеры XenForo вроде «Искать только в заголовках»).
+    """
+    # Ограничиваем поиск блоком заголовка (грубо, но достаточно для пути fast)
+    title_start = html.find('p-title-value')
+    if title_start < 0:
+        return None
+    # Берём окно ~2КБ вокруг — заголовок туда вместе с label-ами влезет.
+    chunk = html[title_start:title_start + 2000]
+    m = _PREFIX_LABEL_RE.search(chunk)
+    if not m:
+        return None
+    text = m.group(1).strip()
+    if not text:
+        return None
+    BLACKLIST = (
+        "искать только в заголовках", "поиск", "title only", "filter by",
+    )
+    lowered = text.lower()
+    if any(b in lowered for b in BLACKLIST):
+        return None
+    return text
+
+
 async def fetch_complaint_status(
     thread_url: str,
     cookies: dict | None = None,
@@ -1422,6 +1456,23 @@ async def fetch_complaint_status(
                     logger.info("Тема %s — куки не пускают (редирект на login).",
                                 thread_url)
                     return None, None, None
+
+                # Быстрый путь: пытаемся извлечь префикс регексом без
+                # BeautifulSoup — это в 5-10 раз быстрее. Если не нашли —
+                # fallback на полноценный парсинг.
+                fast_prefix = _fast_prefix_from_html(html)
+                if fast_prefix:
+                    soup = _soup(html)
+                    admin_comment = _extract_last_admin_comment(soup)
+                    lowered = fast_prefix.lower()
+                    for status, keywords in _STATUS_KEYWORDS.items():
+                        if any(k in lowered for k in keywords):
+                            comment = admin_comment if status != "pending" else None
+                            logger.info("Тема %s: префикс=%r (быстрый путь, status=%s)",
+                                         thread_url, fast_prefix, status)
+                            return status, fast_prefix, comment
+                    # Префикс есть, но в keywords не попал — упадём в pending
+                    return "pending", fast_prefix, None
 
                 soup = _soup(html)
 

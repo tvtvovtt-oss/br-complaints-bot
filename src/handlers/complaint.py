@@ -34,6 +34,7 @@ from src.database import (
     get_user_template,
     add_user_template,
     delete_user_template,
+    update_user_template,
     update_complaint_content,
     save_draft,
     get_draft,
@@ -132,6 +133,11 @@ class TemplateForm(StatesGroup):
     waiting_for_name = State()
     waiting_for_summary = State()
     waiting_for_description = State()
+
+
+class TemplateEditForm(StatesGroup):
+    """FSM для редактирования шаблона. После выбора поля — ждёт новое значение."""
+    waiting_for_value = State()
 
 
 class EditForm(StatesGroup):
@@ -1584,10 +1590,16 @@ async def cmd_templates(message: types.Message):
 
     rows: list[list[types.InlineKeyboardButton]] = []
     for ut in user_tpls:
-        rows.append([types.InlineKeyboardButton(
-            text=f"🗑 {ut['name']}",
-            callback_data=f"utpl_del:{ut['id']}",
-        )])
+        rows.append([
+            types.InlineKeyboardButton(
+                text=f"✏️ {ut['name']}",
+                callback_data=f"utpl_edit:{ut['id']}",
+            ),
+            types.InlineKeyboardButton(
+                text="🗑",
+                callback_data=f"utpl_del:{ut['id']}",
+            ),
+        ])
     kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
 
     cat_label = {
@@ -1603,7 +1615,7 @@ async def cmd_templates(message: types.Message):
             f"   <i>Описание:</i> {escape(ut['description'][:120])}"
             f"{'…' if len(ut['description']) > 120 else ''}"
         )
-    lines.append("\n<i>Нажмите на 🗑, чтобы удалить шаблон.</i>")
+    lines.append("\n<i>✏️ — изменить, 🗑 — удалить.</i>")
     await message.answer("\n\n".join(lines), reply_markup=kb)
 
 
@@ -1661,6 +1673,138 @@ async def utpl_del(call: types.CallbackQuery):
     except Exception:
         pass
     await call.answer("🗑 Удалён", show_alert=False)
+
+
+# ---------------- Редактирование пользовательского шаблона ----------------
+
+@router.callback_query(F.data.startswith("utpl_edit:"))
+async def utpl_edit_start(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    tid = int(call.data.split(":", 1)[1])
+    tpl = await get_user_template(tid)
+    if not tpl or tpl["telegram_id"] != call.from_user.id:
+        await call.answer("Шаблон не найден.", show_alert=True)
+        return
+
+    text = (
+        f"✏️ <b>Шаблон «{escape(tpl['name'])}»</b>\n\n"
+        f"<b>Имя:</b> {escape(tpl['name'])}\n"
+        f"<b>Суть:</b> <code>{escape(tpl['summary'])}</code>\n"
+        f"<b>Описание:</b> {escape(tpl['description'][:200])}"
+        f"{'…' if len(tpl['description']) > 200 else ''}\n\n"
+        "Что меняем?"
+    )
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✏️ Имя",
+            callback_data=f"utpl_efield:name:{tid}")],
+        [types.InlineKeyboardButton(text="✏️ Суть",
+            callback_data=f"utpl_efield:summary:{tid}")],
+        [types.InlineKeyboardButton(text="✏️ Описание",
+            callback_data=f"utpl_efield:description:{tid}")],
+        [types.InlineKeyboardButton(text="◀️ Отмена",
+            callback_data="utpl_back")],
+    ])
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await call.message.answer(text, reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(F.data == "utpl_back")
+async def utpl_back(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.answer("Отменено")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("utpl_efield:"))
+async def utpl_efield(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    try:
+        _, field, tid_str = call.data.split(":", 2)
+        tid = int(tid_str)
+    except (ValueError, AttributeError):
+        await call.answer("Ошибка данных кнопки.", show_alert=True)
+        return
+    if field not in ("name", "summary", "description"):
+        await call.answer("Неизвестное поле.", show_alert=True)
+        return
+    await state.set_state(TemplateEditForm.waiting_for_value)
+    await state.update_data(_edit_tpl_id=tid, _edit_tpl_field=field)
+    field_label = {
+        "name": "имя", "summary": "краткую суть",
+        "description": "описание",
+    }[field]
+    await call.message.answer(
+        f"✏️ Введите новое значение для поля <b>{field_label}</b>:",
+        reply_markup=_cancel_kb(),
+    )
+    await call.answer()
+
+
+@router.message(TemplateEditForm.waiting_for_value)
+async def utpl_save_value(message: types.Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    tid = data.get("_edit_tpl_id")
+    field = data.get("_edit_tpl_field")
+
+    if not tid or field not in ("name", "summary", "description"):
+        await state.clear()
+        await message.answer("⚠️ Сессия редактирования утеряна.",
+                              reply_markup=_menu_for(message.from_user.id))
+        return
+
+    # Валидация в зависимости от поля
+    if field == "summary":
+        ok, value = validate_summary(text)
+        if not ok:
+            await message.answer(f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+                                  reply_markup=_cancel_kb())
+            return
+    elif field == "description":
+        ok, value = validate_description(text)
+        if not ok:
+            await message.answer(f"❌ {escape(value)}\n\nПопробуйте ещё раз:",
+                                  reply_markup=_cancel_kb())
+            return
+    else:  # name
+        if len(text) < 1 or len(text) > 60:
+            await message.answer("Имя должно быть 1–60 символов.",
+                                  reply_markup=_cancel_kb())
+            return
+        value = text
+
+    success = await update_user_template(
+        message.from_user.id, tid, **{field: value},
+    )
+    await state.clear()
+    if success:
+        logger.info("Пользователь %s обновил шаблон #%s (поле %s).",
+                    describe_user(message.from_user), tid, field)
+        await message.answer(
+            f"✅ Шаблон обновлён. Поле <b>{field}</b> = "
+            f"<code>{escape(value[:120])}</code>",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+    else:
+        await message.answer(
+            "⚠️ Не удалось обновить шаблон.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
 
 
 # ---------------- Редактирование жалобы на форуме ----------------
