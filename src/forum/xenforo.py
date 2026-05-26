@@ -533,15 +533,16 @@ def _flatten_cookies(client: httpx.AsyncClient) -> dict:
 
 
 def _persist_cookies_from_client(client: httpx.AsyncClient) -> None:
-    """Сливает текущее состояние jar клиента в cookies.json и в БД (для
-    активного аккаунта, если он установлен).
+    """Сливает текущее состояние jar клиента в cookies.json.
 
     Сохраняет существующие записи, обновляя/добавляя свежие. Безопасно
     вызывать часто — на старые значения просто перезаписывает.
 
-    Зеркалирование в БД критично: иначе после рестарта бот загрузит из БД
-    устаревшие куки и упадёт на 403, особенно когда форум ротирует
-    `xf_session` каждые несколько часов.
+    Зеркалирование в БД для конкретного аккаунта делается явно через
+    `update_account_cookies(account_id, cookies)` после успешной операции
+    (см. `process_confirm` в `complaint.py`). Здесь мы НЕ зеркалим в БД,
+    потому что параллельные операции с разными аккаунтами могли бы
+    записать чужие куки в чужую запись (race на глобальной переменной).
     """
     fresh = _flatten_cookies(client)
     if not fresh:
@@ -551,27 +552,6 @@ def _persist_cookies_from_client(client: httpx.AsyncClient) -> None:
     if merged == existing:
         return
     save_cookies(merged)
-
-    # Параллельно обновляем в БД для активного аккаунта.
-    # Делаем это «огонь и забыл» — если упадёт, пожар тушить не нужно,
-    # cookies.json уже сохранён и для текущей сессии этого достаточно.
-    aid = _active_account_id
-    if aid is not None:
-        try:
-            import asyncio as _aio
-            from src.database import update_account_cookies as _upd
-            try:
-                loop = _aio.get_running_loop()
-                loop.create_task(_upd(aid, merged))
-            except RuntimeError:
-                # Нет активного цикла (вызвано из синхронного кода) —
-                # тогда тут уже не сделать, при следующем запуске бота
-                # ситуация не критична: при загрузке из БД куки будут
-                # старее cookies.json, но cookies.json как раз свежий.
-                pass
-        except Exception:
-            logger.debug("Не удалось зеркалить свежие куки в БД",
-                         exc_info=True)
 
 
 async def _start_two_step(client: httpx.AsyncClient, redirect_url: str,
