@@ -382,6 +382,8 @@ async def _ensure_no_ddos(client: httpx.AsyncClient,
     DDOS_DELAY = 5.5
     for _ in range(max_retries):
         text = response.text
+        # DDoS-Guard может отдавать challenge как с HTTP 200, так и с 403.
+        # Поэтому проверяем по сигнатуре HTML, а не по статусу.
         if "vddosw3data" not in text and "slowAES" not in text:
             return response
         fresh = _solve_from_html(text)
@@ -461,13 +463,38 @@ async def forum_login(login: str, password: str) -> dict:
         await asyncio.sleep(0.3)
 
         # 1. Получаем CSRF и стартовые куки с /login/
+        # ВАЖНО: DDoS-Guard на BR может отдать challenge с HTTP 403 (а не 200).
+        # Поэтому сначала пробуем разрулить challenge на ответе, потом проверяем
+        # статус. Если и после этого 403 — значит реальный отказ доступа.
         r = await client.get(LOGIN_URL)
-        if r.status_code != 200:
-            logger.error("HTTP %s при загрузке /login/", r.status_code)
-            return {"status": "error",
-                    "message": f"Форум вернул HTTP {r.status_code} на странице входа."}
-
         r = await _ensure_no_ddos(client, r, LOGIN_URL, persist_cookie=True)
+
+        # Если DDoS-Guard всё ещё держит challenge — пробуем альтернативный
+        # путь /index.php?login/ — в некоторых конфигурациях BR XenForo
+        # этот path не блокируется DDoS-Guard'ом.
+        if (r.status_code == 403
+                or "vddosw3data" in r.text or "slowAES" in r.text):
+            alt_login_url = f"{FORUM_URL}/index.php?login/"
+            logger.warning("LOGIN_URL вернул %s — пробую альтернативный path %s",
+                            r.status_code, alt_login_url)
+            r2 = await client.get(alt_login_url)
+            r2 = await _ensure_no_ddos(client, r2, alt_login_url,
+                                          persist_cookie=True)
+            if r2.status_code == 200 and "vddosw3data" not in r2.text:
+                r = r2
+                logger.info("Альтернативный login path сработал.")
+
+        if r.status_code != 200:
+            logger.error("HTTP %s при загрузке страницы входа", r.status_code)
+            return {"status": "error",
+                    "message": (
+                        f"Форум вернул HTTP {r.status_code} на странице входа.\n\n"
+                        "Скорее всего IP сервера в чёрном списке DDoS-Guard "
+                        "(или временный rate-limit). Подождите 30-60 минут "
+                        "или экспортируйте свежий <code>cookies.json</code> "
+                        "из браузера и пришлите боту."
+                    )}
+
         if "vddosw3data.js" in r.text or "slowAES" in r.text:
             logger.error("DDoS-Guard заглушка остаётся даже после нового R3ACTLB.")
             return {"status": "error",
