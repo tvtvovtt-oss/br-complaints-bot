@@ -371,8 +371,15 @@ async def _ensure_no_ddos(client: httpx.AsyncClient,
     клиента и повторяет запрос. До max_retries раз.
 
     `persist_cookie=True` — дополнительно сохранит свежий R3ACTLB в
-    cookies.json (для случаев когда вызывается без _session()).
+    cookies.json.
+
+    ВАЖНО: между установкой R3ACTLB и retry-запросом ставим небольшую
+    задержку. JS-заглушка сама ждёт 5 секунд (`setTimeout(...,5000)`)
+    перед редиректом — DDoS-Guard может проверять «не делает ли клиент
+    запрос мгновенно», что выдаёт автомат и приводит к HTTP 403 на
+    следующем запросе. 5.5 секунд — с запасом.
     """
+    DDOS_DELAY = 5.5
     for _ in range(max_retries):
         text = response.text
         if "vddosw3data" not in text and "slowAES" not in text:
@@ -384,8 +391,11 @@ async def _ensure_no_ddos(client: httpx.AsyncClient,
         if persist_cookie:
             existing = load_cookies()
             save_cookies({**existing, "R3ACTLB": fresh})
-        logger.debug("DDoS-Guard challenge решён на текущем клиенте, "
-                     "ретрай GET %s", url)
+        logger.info("DDoS-Guard challenge решён, жду %.1f с перед retry GET %s",
+                     DDOS_DELAY, url)
+        # Ждём 5+ секунд — иначе DDoS-Guard видит «бот ретраит мгновенно»
+        # и на следующем запросе выдаёт 403.
+        await asyncio.sleep(DDOS_DELAY)
         try:
             response = await client.get(url)
         except httpx.RequestError as e:
@@ -514,7 +524,10 @@ async def forum_login(login: str, password: str) -> dict:
                 return two_step_data
 
             if redirect_url:
-                final = await client.get(_to_abs(redirect_url))
+                redirect_abs = _to_abs(redirect_url)
+                final = await client.get(redirect_abs)
+                final = await _ensure_no_ddos(client, final, redirect_abs,
+                                                 persist_cookie=True)
                 if _extract_user_id(final.text):
                     username = _extract_username(_soup(final.text))
                     logger.info("Вход успешен (без 2FA): «%s».", username)
@@ -523,6 +536,7 @@ async def forum_login(login: str, password: str) -> dict:
 
         # Фолбэк: проверим главную форума на data-logged-in
         r3 = await client.get(FORUM_URL)
+        r3 = await _ensure_no_ddos(client, r3, FORUM_URL, persist_cookie=True)
         if _extract_user_id(r3.text):
             username = _extract_username(_soup(r3.text))
             logger.info("Вход успешен (фолбэк): «%s».", username)
@@ -614,6 +628,16 @@ async def _start_two_step(client: httpx.AsyncClient, redirect_url: str,
     logger.info("Форум требует 2FA. Загружаю страницу подтверждения: %s", target)
 
     page = await client.get(target)
+    # DDoS-Guard может на странице 2FA снова отдать challenge — решим
+    # на ТОЙ ЖЕ сессии (иначе R3ACTLB не подойдёт и будет HTTP 403).
+    page = await _ensure_no_ddos(client, page, target, persist_cookie=True)
+    if page.status_code == 403:
+        logger.error("HTTP 403 на странице 2FA даже после DDoS-Guard challenge. "
+                     "Возможно, форум требует браузер с реальным JS.")
+        return {"status": "error",
+                "message": ("Форум вернул HTTP 403 на странице 2FA. "
+                            "Возможно, IP сервера в чёрном списке "
+                            "DDoS-Guard или временный rate-limit.")}
     if page.status_code != 200:
         logger.error("HTTP %s на странице 2FA.", page.status_code)
         return {"status": "error",
@@ -726,7 +750,9 @@ async def forum_submit_2fa(state: dict, code: str,
                     redirect_url = FORUM_URL + redirect_url
                 logger.debug("Делаю GET по redirect: %s", redirect_url)
                 try:
-                    await client.get(redirect_url)
+                    rr = await client.get(redirect_url)
+                    await _ensure_no_ddos(client, rr, redirect_url,
+                                             persist_cookie=True)
                 except httpx.RequestError as e:
                     logger.debug("GET redirect упал, но 2FA уже принят: %s", e)
 
