@@ -542,6 +542,22 @@ async def forum_login(login: str, password: str) -> dict:
             html_content = (resp_json.get("html") or {}).get("content", "")
             redirect_url = resp_json.get("redirect", "")
 
+            # Иногда XenForo на ошибочный логин/капчу/блок не пишет в errors,
+            # а кладёт текст в html.content внутри блока .blockMessage--error.
+            # Без этого парсинга мы возвращаем гипотетическое «неверный
+            # логин» хотя на самом деле форум сказал что-то конкретное.
+            if html_content and not redirect_url:
+                err_soup = _soup(html_content)
+                err_block = err_soup.find(class_=re.compile(
+                    r"blockMessage.*error|input-error|formRow-explain.*error"
+                ))
+                if err_block:
+                    err_text = err_block.get_text(" ", strip=True)
+                    if err_text:
+                        logger.warning("Форум вернул ошибку (HTML-блок): %s",
+                                        err_text)
+                        return {"status": "error", "message": err_text}
+
             if "two-step" in redirect_url or "two-step" in html_content:
                 # Загружаем страницу 2FA в этом же клиенте, оставляем его открытым
                 two_step_data = await _start_two_step(client, redirect_url, html_content)
@@ -578,9 +594,23 @@ async def forum_login(login: str, password: str) -> dict:
                 two_step_data["client"] = client
             return two_step_data
 
-        logger.warning("Вход не удался, форум не пустил.")
+        # Логируем что именно прислал форум — чтобы понять причину
+        if resp_json is not None:
+            logger.warning("Вход не удался. JSON-ответ форума: %r",
+                           str(resp_json)[:600])
+        else:
+            preview = r2.text[:600].replace("\n", " ")
+            logger.warning("Вход не удался. Не-JSON ответ HTTP %s: %s",
+                           r2.status_code, preview)
         return {"status": "error",
-                "message": "Неверный логин или пароль (либо форум потребовал капчу/действие в браузере)."}
+                "message": (
+                    "Форум не пустил (но и явной ошибки не вернул).\n\n"
+                    "Возможные причины:\n"
+                    "• Неверный логин или пароль (проверьте раскладку и пробелы).\n"
+                    "• Форум требует капчу или действие в браузере "
+                    "(тогда экспортируйте <code>cookies.json</code>).\n"
+                    "• Свежие подробности — в логах сервера."
+                )}
 
     except httpx.RequestError as e:
         logger.error("Сетевая ошибка при входе: %s", e)
