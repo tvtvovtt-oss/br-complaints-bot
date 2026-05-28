@@ -2,10 +2,9 @@ import asyncio
 import json
 import logging
 import re
-import threading
 import time
 from html import escape as escape_html
-from typing import Awaitable, Callable, Optional
+from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
@@ -40,19 +39,11 @@ HEADERS = {
         "image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
     ),
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
     "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
+    "Origin": FORUM_URL,
     "Referer": f"{FORUM_URL}/",
-    # Origin отдельно — отправляется только на POST (см. ajax_headers в forum_login).
-    # Браузер на GET-навигации Origin не шлёт; шаблон бот-без-Origin = бот с
-    # Origin на GET — последний DDoS-Guard ловит и отдаёт 403.
 }
 
 # Используем lxml, если установлен — он в 5-10 раз быстрее html.parser
@@ -151,28 +142,19 @@ async def save_cookies_async(cookies_dict: dict) -> None:
             logger.exception("Не удалось сохранить куки в файл: %s", e)
 
 
-# Лок для sync-версии save_cookies. asyncio.Lock в синхронном коде не работает,
-# а одновременная запись cookies.json из двух корутин может дать побитый файл.
-_save_cookies_sync_lock = threading.Lock()
-
-
 def save_cookies(cookies_dict: dict) -> None:
     """Синхронная обёртка над save_cookies_async для обратной совместимости.
     Если вызывается из async-контекста — лучше использовать save_cookies_async.
-
-    Атомарность записи файла защищена threading.Lock — даже если две корутины
-    пишут одновременно, они выстраиваются в очередь.
     """
     global _cookies_cache, _cookies_mtime
-    with _save_cookies_sync_lock:
-        try:
-            with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-                json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
-            _cookies_cache = dict(cookies_dict)
-            _cookies_mtime = COOKIES_PATH.stat().st_mtime
-            logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))
-        except Exception as e:
-            logger.exception("Не удалось сохранить куки в файл: %s", e)
+    try:
+        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+            json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
+        _cookies_cache = dict(cookies_dict)
+        _cookies_mtime = COOKIES_PATH.stat().st_mtime
+        logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))
+    except Exception as e:
+        logger.exception("Не удалось сохранить куки в файл: %s", e)
 
 
 def invalidate_cookies_cache() -> None:
@@ -243,18 +225,6 @@ class _session:
             await self._client.aclose()
 
 
-def _is_login_redirect(url) -> bool:
-    """Проверяет, перенаправлен ли запрос на страницу входа (из-за отсутствия/устаревания сессии)."""
-    url_str = str(url).lower()
-    if "/login/" in url_str or url_str.rstrip("/").endswith("/login"):
-        return True
-    if "?" in url_str:
-        query = url_str.split("?", 1)[1]
-        if query.startswith("login/") or query == "login":
-            return True
-    return False
-
-
 # ---------------- Авторизация ----------------
 
 def _extract_user_id(html: str) -> int:
@@ -277,30 +247,22 @@ def _extract_user_id(html: str) -> int:
 
 
 def _extract_username(soup: BeautifulSoup) -> str:
-    """Достаёт имя авторизованного пользователя из шапки XenForo.
-
-    Ищем строго внутри элементов навигации/шапки. Не идём по всем ссылкам
-    /members/ на странице — там могут быть имена других пользователей
-    (последние пользователи, авторы постов и т.п.).
-    """
+    """Достаёт имя авторизованного пользователя из шапки XenForo."""
     tag = soup.find("span", class_="p-navgroup-linkText")
     if tag and tag.text.strip():
         return tag.text.strip()
-
-    # data-username на элементе с класса .p-navgroup--member или похожих
-    nav = soup.find(class_=re.compile(r"\bp-navgroup\b.*member|p-account|p-nav-user"))
-    if nav:
-        # Любой <a href=/members/...> ВНУТРИ этой обёртки уже точно про
-        # самого пользователя, а не про чужого.
-        a = nav.find("a", href=re.compile(r"/members/"))
-        if a and a.text.strip():
-            return a.text.strip()
 
     avatar = soup.find("span", class_="avatar")
     if avatar and avatar.parent:
         sibling = avatar.parent.find("span")
         if sibling and sibling.text.strip():
             return sibling.text.strip()
+
+    for a in soup.find_all("a", href=True):
+        if "/members/" in a["href"]:
+            text = a.text.strip()
+            if text:
+                return text
 
     return "Авторизован (Имя не найдено)"
 
@@ -310,7 +272,13 @@ async def _resolve_username(client: httpx.AsyncClient) -> str:
     Если упирается в DDoS-Guard заглушку — обновляет R3ACTLB и пробует ещё раз.
     Возвращает имя или плейсхолдер."""
     try:
-        r = await _get_with_ddos(client, FORUM_URL)
+        r = await client.get(FORUM_URL)
+        if "vddosw3data.js" in r.text or "slowAES" in r.text:
+            fresh = await _solve_ddos_guard()
+            if fresh:
+                client.cookies.set("R3ACTLB", fresh,
+                                    domain=FORUM_HOST, path="/")
+                r = await client.get(FORUM_URL)
         return _extract_username(_soup(r.text))
     except httpx.RequestError as e:
         logger.debug("Не удалось получить имя пользователя: %s", e)
@@ -319,9 +287,9 @@ async def _resolve_username(client: httpx.AsyncClient) -> str:
 
 # ---------------- Авторизация ----------------
 
-LOGIN_URL = f"{FORUM_URL}/index.php?login/"
-LOGIN_POST_URL = f"{FORUM_URL}/index.php?login/login"
-TWO_STEP_URL = f"{FORUM_URL}/index.php?login/two-step"
+LOGIN_URL = f"{FORUM_URL}/login/"
+LOGIN_POST_URL = f"{FORUM_URL}/login/login"
+TWO_STEP_URL = f"{FORUM_URL}/login/two-step"
 
 # Регулярка для извлечения трёх hex-строк AES (a, b, c) из заглушки DDoS-Guard
 _DDOS_KEYS_RE = re.compile(
@@ -338,27 +306,37 @@ _USER_ID_RE = re.compile(r'data-user-id\s*=\s*"(\d+)"', re.IGNORECASE)
 _CSRF_RE = re.compile(r'data-csrf\s*=\s*"([^"]+)"', re.IGNORECASE)
 
 
-def _solve_ddos_guard_from_html(html: str) -> Optional[str]:
-    """Решает JS-челлендж DDoS-Guard по уже полученному HTML заглушки.
+async def _solve_ddos_guard() -> Optional[str]:
+    """Решает JS-челлендж DDoS-Guard и возвращает значение cookie R3ACTLB.
+    Возвращает None если страница не оказалась челленджем или решить не вышло.
 
-    Возвращает hex(R3ACTLB) или None. Не делает сетевых запросов — может
-    быть вызвано на тех же байтах, которые форум только что отдал твоему
-    клиенту, чтобы не получить новый набор ключей с другого запроса
-    (DDoS-Guard может выдавать a/b/c с привязкой к сессии и IP).
+    Заглушка содержит три 32-символьные hex-строки a, b, c. Cookie вычисляется
+    как hex(AES-128-CBC.decrypt(ciphertext=c, key=a, iv=b)).
     """
-    if "slowAES" not in html and "vddosw3data" not in html:
+    try:
+        async with httpx.AsyncClient(
+            headers=HEADERS, follow_redirects=False, timeout=15.0,
+        ) as client:
+            r = await client.get(FORUM_URL)
+            html = r.text
+            if "slowAES" not in html and "vddosw3data" not in html:
+                # Уже не челлендж — нечего решать
+                return None
+            m = _DDOS_KEYS_RE.search(html)
+            if not m:
+                logger.debug("В заглушке DDoS-Guard не нашлись AES-ключи.")
+                return None
+            a_hex, b_hex, c_hex = m.group(1), m.group(2), m.group(3)
+    except httpx.RequestError as e:
+        logger.warning("Сетевая ошибка при загрузке заглушки DDoS-Guard: %s", e)
         return None
-    m = _DDOS_KEYS_RE.search(html)
-    if not m:
-        logger.debug("В заглушке DDoS-Guard не нашлись AES-ключи.")
-        return None
-    a_hex, b_hex, c_hex = m.group(1), m.group(2), m.group(3)
 
     try:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         from cryptography.hazmat.backends import default_backend
     except ImportError:
-        logger.warning("Для решателя DDoS-Guard нужен пакет cryptography.")
+        logger.warning("Для решателя DDoS-Guard нужен пакет cryptography. "
+                       "Установите: pip install cryptography")
         return None
 
     try:
@@ -372,56 +350,6 @@ def _solve_ddos_guard_from_html(html: str) -> Optional[str]:
     except Exception as e:
         logger.warning("Не удалось расшифровать DDoS-Guard challenge: %s", e)
         return None
-
-
-async def _solve_ddos_guard() -> Optional[str]:
-    """Решает JS-челлендж DDoS-Guard и возвращает значение cookie R3ACTLB.
-    Возвращает None если страница не оказалась челленджем или решить не вышло.
-
-    Заглушка содержит три 32-символьные hex-строки a, b, c. Cookie вычисляется
-    как hex(AES-128-CBC.decrypt(ciphertext=c, key=a, iv=b)).
-
-    ВАЖНО: эта функция делает СВОЙ httpx-запрос, поэтому полученный
-    R3ACTLB подходит только для нового клиента (с теми же IP/UA/headers).
-    Если нужен R3ACTLB для уже открытого клиента — используй
-    `_solve_ddos_guard_from_html(html)` на содержимом ответа того клиента.
-    """
-    try:
-        async with httpx.AsyncClient(
-            headers=HEADERS, follow_redirects=False, timeout=15.0,
-        ) as client:
-            r = await client.get(FORUM_URL)
-            return _solve_ddos_guard_from_html(r.text)
-    except httpx.RequestError as e:
-        logger.warning("Сетевая ошибка при загрузке заглушки DDoS-Guard: %s", e)
-        return None
-
-
-async def _get_with_ddos(client: httpx.AsyncClient, url: str,
-                          attempts: int = 2, **kw) -> httpx.Response:
-    """GET с авторазруливанием DDoS-Guard challenge на ТОМ ЖЕ клиенте.
-
-    Если сервер вернул заглушку, решаем challenge на полученном HTML
-    (НЕ делаем отдельный запрос, у которого был бы другой ключевой
-    сет a/b/c) и ретраим запрос. До 2 попыток по умолчанию.
-
-    Это правильный способ обходить DDoS-Guard в существующей сессии:
-    решение из отдельного httpx-запроса (`_solve_ddos_guard()`) часто
-    не подходит этому же клиенту и приводит к 403 на следующем запросе.
-    """
-    r = await client.get(url, **kw)
-    for _ in range(attempts):
-        if ("vddosw3data.js" not in r.text
-                and "slowAES" not in r.text):
-            return r
-        fresh = _solve_ddos_guard_from_html(r.text)
-        if not fresh:
-            return r
-        client.cookies.set("R3ACTLB", fresh, domain=FORUM_HOST, path="/")
-        logger.debug("DDoS-Guard challenge решён на текущем клиенте, "
-                     "ретрай GET %s", url)
-        r = await client.get(url, **kw)
-    return r
 
 
 async def forum_login(login: str, password: str) -> dict:
@@ -438,17 +366,22 @@ async def forum_login(login: str, password: str) -> dict:
     """
     logger.info("Начинаю вход на форум по паролю (логин: %r).", login)
 
-    # Стартуем БЕЗ R3ACTLB. Прогревочный запрос на главную сам получит
-    # JS-челлендж от DDoS-Guard, мы решим его на тех же байтах и поставим
-    # R3ACTLB ИМЕННО НА ЭТОТ ЖЕ клиент. Если решать через отдельный запрос
-    # (как раньше через _solve_ddos_guard()), DDoS-Guard может выдать
-    # другой набор a/b/c — итоговый R3ACTLB не подойдёт нашей сессии и
-    # последующий /login/ упадёт в 403.
+    # DDoS-Guard на BR обязательно требует cookie R3ACTLB, который выдаётся после
+    # JS-челленджа. Сами решаем челлендж AES-128-CBC, чтобы не зависеть от ручного
+    # экспорта кук. Если по какой-то причине не получилось — пробуем взять
+    # существующий R3ACTLB из cookies.json (вдруг сработает).
     initial_cookies: dict = {}
-    existing = load_cookies()
-    if existing.get("R3ACTLB"):
-        # Если в cookies.json уже есть свежий R3ACTLB — пробуем сначала с ним
-        initial_cookies["R3ACTLB"] = existing["R3ACTLB"]
+    solved = await _solve_ddos_guard()
+    if solved:
+        initial_cookies["R3ACTLB"] = solved
+        logger.info("DDoS-Guard челлендж решён, R3ACTLB получен.")
+    else:
+        existing = load_cookies()
+        if existing.get("R3ACTLB"):
+            initial_cookies["R3ACTLB"] = existing["R3ACTLB"]
+            logger.warning("Решатель не отработал, использую R3ACTLB из cookies.json.")
+        else:
+            logger.warning("R3ACTLB получить не удалось — продолжаю без него (скорее всего, упадёт).")
 
     client = httpx.AsyncClient(
         cookies=initial_cookies,
@@ -459,105 +392,16 @@ async def forum_login(login: str, password: str) -> dict:
     # Только успешный 2FA-ответ оставляет клиент открытым (его закроет submit_2fa).
     keep_open = False
     try:
-        # 0. Прогрев главной — чтобы DDoS-Guard либо отдал реальную страницу
-        # (R3ACTLB уже подходит), либо отдал JS-челлендж — мы решим его НА
-        # ЭТОМ ЖЕ КЛИЕНТЕ и попробуем ещё раз.
-        for warmup_attempt in range(3):
-            try:
-                warmup = await client.get(FORUM_URL)
-            except httpx.RequestError as e:
-                logger.warning("Прогрев главной упал: %s", e)
-                return {"status": "error",
-                        "message": f"Сетевая ошибка при прогреве: {e}"}
-
-            if warmup.status_code == 403:
-                logger.error("DDoS-Guard заблокировал главную (HTTP 403). "
-                              "IP сервера в чёрном списке.")
-                return {"status": "error",
-                        "message": (
-                            "🚫 DDoS-Guard вернул 403 на главную страницу — "
-                            "IP вашего сервера в чёрном списке. Используйте "
-                            "другой хостинг или запустите бота локально."
-                        )}
-
-            if "vddosw3data.js" not in warmup.text and "slowAES" not in warmup.text:
-                # Нормальная страница, R3ACTLB подходит — выходим из прогрева
-                break
-
-            # Получили JS-челлендж — решаем НА ЕГО ЖЕ HTML
-            fresh = _solve_ddos_guard_from_html(warmup.text)
-            if not fresh:
-                logger.error("Не смог решить DDoS-Guard challenge.")
-                return {"status": "error",
-                        "message": "Не удалось решить DDoS-Guard challenge."}
-
-            client.cookies.set("R3ACTLB", fresh,
-                                domain=FORUM_HOST, path="/")
-            logger.info("DDoS-Guard challenge решён (попытка %d). Повторяю запрос.",
-                         warmup_attempt + 1)
-            await asyncio.sleep(1.0)
-        else:
-            # 3 попытки — заглушка осталась
-            logger.error("DDoS-Guard challenge не разруливается за 3 попытки.")
-            return {"status": "error",
-                    "message": (
-                        "DDoS-Guard форума не пропускает запросы. "
-                        "Возможно изменилась защита либо IP в чёрном списке."
-                    )}
-
-        # Маленькая пауза — браузер тоже не молниеносно навигирует
-        await asyncio.sleep(0.5)
-
-        # 1. Получаем CSRF и стартовые куки со страницы входа
+        # 1. Получаем CSRF и стартовые куки с /login/
         r = await client.get(LOGIN_URL)
-        if r.status_code == 403:
-            # Снимаем подробную диагностику — что именно прислал форум.
-            body_preview = (r.text or "")[:800].replace("\n", " ")
-            resp_headers = dict(r.headers)
-            request_headers = dict(r.request.headers) if r.request else {}
-            jar_names = sorted([c.name for c in client.cookies.jar])
-            logger.error(
-                "HTTP 403 на странице входа после прогрева главной.\n"
-                "  resp.headers: %r\n"
-                "  body[:800]: %r\n"
-                "  request.headers: %r\n"
-                "  jar cookies: %s",
-                resp_headers, body_preview, request_headers, jar_names,
-            )
-            # Попытка №2: повторим с заголовком как у обычной навигации
-            # Chrome (без X-Requested-With и т.п.). Уже в HEADERS, но
-            # phpMyAdmin и nginx иногда хотят явно `Cache-Control: max-age=0`.
-            try:
-                retry = await client.get(LOGIN_URL, headers={
-                    **HEADERS,
-                    "Cache-Control": "max-age=0",
-                    "Sec-Fetch-Site": "same-origin",
-                })
-                if retry.status_code == 200:
-                    r = retry
-                    logger.info("Вторая попытка входа прошла (Cache-Control max-age=0).")
-                else:
-                    logger.warning("Вторая попытка входа — HTTP %s.",
-                                    retry.status_code)
-            except Exception:
-                logger.exception("Вторая попытка входа упала.")
-
-        if r.status_code == 403:
-            return {"status": "error",
-                    "message": (
-                        "Форум вернул 403 на странице входа "
-                        "(после успешного прогрева главной).\n\n"
-                        "Скорее всего IP вашего сервера заблокирован. "
-                        "Залейте свежий cookies.json вручную как обходной путь."
-                    )}
         if r.status_code != 200:
-            logger.error("HTTP %s при загрузке страницы входа", r.status_code)
+            logger.error("HTTP %s при загрузке /login/", r.status_code)
             return {"status": "error",
                     "message": f"Форум вернул HTTP {r.status_code} на странице входа."}
 
         if "vddosw3data.js" in r.text or "slowAES" in r.text:
-            logger.warning("На странице входа снова DDoS-Guard заглушка — решаю на её HTML.")
-            fresh = _solve_ddos_guard_from_html(r.text)
+            logger.warning("На /login/ снова DDoS-Guard заглушка — пробую обновить R3ACTLB.")
+            fresh = await _solve_ddos_guard()
             if fresh:
                 client.cookies.set("R3ACTLB", fresh,
                                     domain=FORUM_HOST, path="/")
@@ -574,10 +418,10 @@ async def forum_login(login: str, password: str) -> dict:
 
         csrf = _extract_csrf(r.text)
         if not csrf:
-            logger.error("CSRF-токен не найден на странице входа.")
+            logger.error("CSRF-токен не найден на /login/.")
             return {"status": "error", "message": "Не удалось получить CSRF-токен формы входа."}
 
-        # 2. Отправляем форму входа
+        # 2. Отправляем форму /login/login
         payload = {
             "login": login,
             "password": password,
@@ -585,16 +429,11 @@ async def forum_login(login: str, password: str) -> dict:
             "register": "0",
             "_xfToken": csrf,
             "_xfRedirect": f"{FORUM_URL}/",
-            "_xfRequestUri": "/index.php?login/login",
+            "_xfRequestUri": "/login/login",
             "_xfWithData": "1",
             "_xfResponseType": "json",
         }
-        ajax = {
-            **HEADERS,
-            "X-Requested-With": "XMLHttpRequest",
-            "Origin": FORUM_URL,
-            "Referer": LOGIN_URL,
-        }
+        ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": LOGIN_URL}
         r2 = await client.post(LOGIN_POST_URL, data=payload, headers=ajax)
         logger.debug("POST /login/login -> HTTP %s, content-type %s",
                      r2.status_code, r2.headers.get("content-type"))
@@ -613,14 +452,6 @@ async def forum_login(login: str, password: str) -> dict:
 
             html_content = (resp_json.get("html") or {}).get("content", "")
             redirect_url = resp_json.get("redirect", "")
-
-            if html_content:
-                soup = _soup(html_content)
-                err_div = soup.find(class_=re.compile("blockMessage.*error"))
-                if err_div:
-                    msg = err_div.text.strip()
-                    logger.warning("Форум вернул ошибку входа из HTML-блока: %s", msg)
-                    return {"status": "error", "message": msg}
 
             if "two-step" in redirect_url or "two-step" in html_content:
                 # Загружаем страницу 2FA в этом же клиенте, оставляем его открытым
@@ -708,10 +539,10 @@ def _persist_cookies_from_client(client: httpx.AsyncClient) -> None:
     вызывать часто — на старые значения просто перезаписывает.
 
     Зеркалирование в БД для конкретного аккаунта делается явно через
-    `update_account_cookies(account_id, cookies)` после успешной операции
-    (см. `process_confirm` в `complaint.py`). Здесь мы НЕ зеркалим в БД,
-    потому что параллельные операции с разными аккаунтами могли бы
-    записать чужие куки в чужую запись (race на глобальной переменной).
+    `update_account_cookies(account_id, cookies)` после успешной операции.
+    Здесь мы НЕ зеркалим в БД, потому что параллельные операции с
+    разными аккаунтами могли бы записать чужие куки в чужую запись
+    (race на глобальной _active_account_id).
     """
     fresh = _flatten_cookies(client)
     if not fresh:
@@ -807,14 +638,13 @@ async def forum_submit_2fa(state: dict, code: str,
             "confirm": "1",
             "_xfToken": csrf,
             "_xfRedirect": f"{FORUM_URL}/",
-            "_xfRequestUri": "/index.php?login/two-step",
+            "_xfRequestUri": "/login/two-step",
             "_xfWithData": "1",
             "_xfResponseType": "json",
         }
         ajax = {
             **HEADERS,
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": FORUM_URL,
             "Referer": two_step_url,
         }
         r = await client.post(two_step_url, data=payload, headers=ajax)
@@ -861,7 +691,14 @@ async def forum_submit_2fa(state: dict, code: str,
             return {"status": "ok", "username": username, "cookies": cookies_dict}
 
         # JSON не вернулся вообще — fallback на парсинг главной
-        final = await _get_with_ddos(client, FORUM_URL)
+        final = await client.get(FORUM_URL)
+        if "vddosw3data.js" in final.text or "slowAES" in final.text:
+            logger.debug("Финальная страница показала DDoS-Guard заглушку, обновляю R3ACTLB.")
+            fresh = await _solve_ddos_guard()
+            if fresh:
+                client.cookies.set("R3ACTLB", fresh,
+                                    domain=FORUM_HOST, path="/")
+                final = await client.get(FORUM_URL)
 
         if _extract_user_id(final.text):
             username = _extract_username(_soup(final.text))
@@ -920,7 +757,7 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
         cookies=cookies, headers=HEADERS, follow_redirects=True, timeout=15.0,
     ) as client:
         try:
-            response = await _get_with_ddos(client, FORUM_URL)
+            response = await client.get(FORUM_URL)
             elapsed = time.monotonic() - started
             logger.debug("GET %s -> HTTP %s за %.2f с", FORUM_URL, response.status_code, elapsed)
 
@@ -930,11 +767,17 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
 
             html = response.text
 
-            # Зеркалим свежий R3ACTLB в cookies.json (если он у клиента
-            # обновился) — чтобы следующая операция не упёрлась в challenge.
-            updated_r3 = client.cookies.get("R3ACTLB", domain=FORUM_HOST)
-            if updated_r3 and updated_r3 != cookies.get("R3ACTLB"):
-                save_cookies({**cookies, "R3ACTLB": updated_r3})
+            # Если упёрлись в DDoS-Guard заглушку — обновляем R3ACTLB и пробуем ещё раз
+            if "vddosw3data.js" in html or "slowAES" in html:
+                logger.info("На главной DDoS-Guard заглушка — обновляю R3ACTLB.")
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain=FORUM_HOST, path="/")
+                    response = await client.get(FORUM_URL)
+                    html = response.text
+                    # Обновим cookies.json со свежим R3ACTLB
+                    save_cookies({**cookies, "R3ACTLB": fresh})
 
             user_id = _extract_user_id(html)
             if user_id == 0:
@@ -945,67 +788,19 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
                 title_tag = soup.find("title")
                 title = title_tag.text.strip() if title_tag else "?"
 
-                # Особый случай: DDoS-Guard заглушка. На ней нет data-logged-in,
-                # потому что это вообще не страница форума — это challenge-страница.
-                ddg_blocked = (
-                    "vddosw3data" in html or "slowAES" in html
-                    or "ddos-guard" in html.lower()
-                    or "checking your browser" in html.lower()
-                )
-                if ddg_blocked:
-                    logger.warning("DDoS-Guard блокирует доступ к форуму "
-                                    "(IP %s в чёрном списке).", "сервера бота")
-                    return False, (
-                        "🚫 <b>DDoS-Guard блокирует IP сервера бота.</b>\n\n"
-                        "Куки сами по себе валидные, но форум подсунул "
-                        "заглушку защиты (а не страницу форума), потому что "
-                        "IP вашего хостинга в чёрном списке.\n\n"
-                        "<b>Что делать:</b>\n"
-                        "• Подождите 30–60 минут — обычно блок снимается.\n"
-                        "• Перезапустите бота на хостинге (часто меняет IP).\n"
-                        "• Если не помогло — поменяйте хостинг."
-                    )
-
-                names = sorted(cookies.keys())
-                names_str = ", ".join(names) or "(пусто)"
-                has_user = "xf_user" in cookies
-                has_session = "xf_session" in cookies
-                has_ddg = "R3ACTLB" in cookies
+                names = ", ".join(sorted(cookies.keys()))
                 logger.warning(
                     "Форум не считает сессию авторизованной. data-logged-in=%r, "
-                    "title=%r, имеющиеся куки: %s, xf_user=%s, xf_session=%s, R3ACTLB=%s",
-                    logged_in_attr, title, names_str,
-                    has_user, has_session, has_ddg,
+                    "title=%r, имеющиеся куки: %s",
+                    logged_in_attr, title, names,
                 )
-
-                missing = []
-                if not has_user:
-                    missing.append("<code>xf_user</code>")
-                if not has_session:
-                    missing.append("<code>xf_session</code>")
-
-                hints = ["Возможные причины:"]
-                if missing:
-                    hints.append(
-                        f"• <b>Не хватает кук:</b> {', '.join(missing)}. "
-                        "Часто Cookie-Editor пропускает HttpOnly-куки. Возьмите "
-                        "<b>все</b> через DevTools → Application → Cookies."
-                    )
-                hints.extend([
-                    "• <b>Куки привязаны к IP</b> — экспортируете с домашнего IP, "
-                    "а бот сидит на хостинге с другим. DDoS-Guard это видит и режет.",
-                    "• <b>Куки истекли</b> — войдите в браузере заново и экспортируйте.",
-                    "• <b>User-Agent не совпадает</b> с браузером, где брали куки. "
-                    f"Сейчас в .env: <code>{escape_html(USER_AGENT)}</code>",
-                    "• Куки взяты в инкогнито — после закрытия они умирают.",
-                ])
-
                 return False, (
-                    "Форум не принял сессию "
-                    f"(<code>data-logged-in={escape_html(str(logged_in_attr))}</code>).\n\n"
-                    f"<b>Что прислал бот в куках:</b> "
-                    f"<code>{escape_html(names_str)}</code>\n\n"
-                    + "\n".join(hints)
+                    "Форум не принял сессию (<code>data-logged-in != true</code>).\n\n"
+                    "Возможные причины:\n"
+                    "• <b>Куки истекли</b> — экспортируйте свежие из браузера.\n"
+                    "• <b>User-Agent не совпадает</b> с браузером, где брали куки. "
+                    f"Сейчас в .env: <code>{escape_html(USER_AGENT)}</code>\n"
+                    "• Куки взяты из режима инкогнито — после закрытия они умирают."
                 )
 
             updated = _flatten_cookies(client)
@@ -1101,9 +896,9 @@ async def post_complaint(section_id: int, title: str, message: str,
     свежие куки пишутся обратно в cookies.json.
 
     Возвращает (успех, результат). При успехе — ссылка на тему. При
-    ошибке — текст; для ошибок «нужен перелогин» (403/redirect на /login/)
-    префикс ответа = 'AUTH: ', чтобы вызывающий мог пометить аккаунт как
-    needs_reauth и не дёргать его в следующих запросах.
+    ошибке — текст; для ошибок «нужен перелогин» (редирект на /login/)
+    префикс ответа = 'AUTH: ', для «нет прав / DDoS-Guard в разделе» —
+    'NOPERM: '. Хелперы `is_auth_error()` / `is_noperm_error()`.
     """
     started = time.monotonic()
     logger.info("Публикую жалобу в раздел node_id=%s. Заголовок: «%s», длина тела: %d симв.",
@@ -1124,146 +919,136 @@ async def post_complaint(section_id: int, title: str, message: str,
     if use_session:
         client_ctx = _session()
     else:
-        # Изолированный клиент: куки только локально, в файл не пишем.
         client_ctx = httpx.AsyncClient(
             cookies=cookies, headers=HEADERS,
             follow_redirects=True, timeout=20.0,
         )
 
-    try:
-        async with client_ctx as client:
+    async with client_ctx as client:
+        try:
+            # 1. Загружаем форму создания темы (CSRF + список префиксов)
+            logger.debug("Шаг 1/3: запрашиваю форму создания темы — %s", post_url)
+            get_response = await client.get(post_url)
+
+            # DDoS-Guard?
+            if (get_response.status_code == 200 and
+                    ("vddosw3data.js" in get_response.text or "slowAES" in get_response.text)):
+                logger.info("На форме создания темы DDoS-Guard заглушка — обновляю R3ACTLB.")
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain=FORUM_HOST, path="/")
+                    if use_session:
+                        save_cookies({**cookies, "R3ACTLB": fresh})
+                    get_response = await client.get(post_url)
+
+            # Редирект на /login/ — куки протухли, нужен перелогин.
+            if "/login/" in str(get_response.url):
+                logger.warning("При открытии формы (раздел %s) редирект "
+                                "на /login/ — куки протухли.", section_id)
+                return False, ("AUTH: сессия истекла. Куки протухли, "
+                                "нужен повторный /login.")
+
+            if get_response.status_code != 200:
+                if get_response.status_code == 403:
+                    # 403 после успешного challenge — куки валидны, но в
+                    # этом разделе аккаунт не имеет прав, либо DDoS-Guard
+                    # на хостинге режет POST-метод. Возвращаем NOPERM —
+                    # вызывающий просто пробует другой аккаунт.
+                    logger.warning("HTTP 403 при открытии формы (раздел %s).",
+                                    section_id)
+                    return False, (
+                        f"NOPERM: HTTP 403 в разделе {section_id}. "
+                        "Нет прав на публикацию в этом разделе либо "
+                        "DDoS-Guard блокирует запрос с IP сервера."
+                    )
+                logger.error("HTTP %s при открытии формы создания темы.", get_response.status_code)
+                return False, f"Не удалось открыть страницу создания темы. HTTP {get_response.status_code}."
+
+            soup = _soup(get_response.text)
+
+            csrf_token = _extract_csrf(get_response.text)
+            if not csrf_token:
+                logger.error("CSRF-токен не найден на странице создания темы.")
+                return False, "Не удалось найти CSRF-токен защиты XenForo на странице."
+            logger.debug("Шаг 2/3: CSRF-токен получен (длина %d).", len(csrf_token))
+
+            prefix_id = _extract_required_prefix(soup)
+
+            payload = {
+                "title": title,
+                "message": message,
+                "_xfToken": csrf_token,
+                "_xfRequestUri": f"/forums/{section_id}/post-thread",
+                "_xfWithData": "1",
+                "_xfResponseType": "json",
+            }
+            if prefix_id is not None:
+                payload["prefix_id"] = prefix_id
+
+            ajax_headers = {**HEADERS, "X-Requested-With": "XMLHttpRequest"}
+            logger.debug("Шаг 3/3: POST %s (AJAX, %d полей)...", post_url, len(payload))
+            post_response = await client.post(post_url, data=payload, headers=ajax_headers)
+
+            if use_session:
+                updated = _flatten_cookies(client)
+                if updated:
+                    save_cookies({**cookies, **updated})
+
+            elapsed = time.monotonic() - started
+            if post_response.status_code != 200:
+                logger.error("Форум вернул HTTP %s при отправке жалобы (за %.2f с).",
+                             post_response.status_code, elapsed)
+                return False, f"Ошибка отправки формы. HTTP {post_response.status_code}."
+
             try:
-                # 1. Загружаем форму создания темы (CSRF + список префиксов)
-                logger.debug("Шаг 1/3: запрашиваю форму создания темы — %s", post_url)
-                # _get_with_ddos автоматически решает DDoS-Guard challenge
-                # на ТОМ ЖЕ клиенте — без race на куках между нашим
-                # клиентом и отдельным «решателем».
-                get_response = await _get_with_ddos(client, post_url)
+                result_json = post_response.json()
+            except (ValueError, json.JSONDecodeError):
+                snippet = post_response.text[:200].replace("\n", " ")
+                logger.error("Форум вернул не-JSON ответ. Начало: %s", snippet)
+                return False, f"Форум вернул некорректный ответ (не JSON): {snippet}"
 
-                # Редирект на /login/ — куки протухли, нужен перелогин.
-                if _is_login_redirect(get_response.url):
-                    logger.warning("При открытии формы (раздел %s) редирект "
-                                    "на /login/ — куки протухли.", section_id)
-                    return False, ("AUTH: сессия истекла. Куки протухли, "
-                                    "нужен повторный /login.")
+            if "errors" in result_json:
+                errors = result_json["errors"]
+                if isinstance(errors, list):
+                    error_msg = "; ".join(errors)
+                elif isinstance(errors, dict):
+                    error_msg = "; ".join(str(v) for v in errors.values())
+                else:
+                    error_msg = str(errors)
+                logger.warning("Форум вернул ошибку валидации формы: %s", error_msg)
+                return False, f"Ошибка форума: {error_msg}"
 
-                if get_response.status_code != 200:
-                    if get_response.status_code == 403:
-                        # 403 после успешного DDoS-Guard challenge ≠ протухшие
-                        # куки. Возможные причины:
-                        #   1) аккаунт не имеет прав публикации в разделе;
-                        #   2) DDoS-Guard режет POST-методы с этого IP даже
-                        #      когда GET главной открывается;
-                        #   3) форум поставил «гостевой» режим на раздел.
-                        # Возвращаем NOPERM — вызывающий просто пробует
-                        # другой аккаунт без needs_reauth.
-                        logger.warning("HTTP 403 при открытии формы (раздел %s).",
-                                        section_id)
-                        return False, (
-                            f"NOPERM: HTTP 403 в разделе {section_id}. "
-                            "Нет прав на публикацию в этом разделе либо "
-                            "DDoS-Guard блокирует запрос с IP сервера."
-                        )
-                    logger.error("HTTP %s при открытии формы создания темы.", get_response.status_code)
-                    return False, f"Не удалось открыть страницу создания темы. HTTP {get_response.status_code}."
+            redirect_url = result_json.get("redirect")
+            if redirect_url:
+                if redirect_url.startswith("/"):
+                    redirect_url = FORUM_URL + redirect_url
+                logger.info("Жалоба успешно опубликована за %.2f с. URL темы: %s",
+                            elapsed, redirect_url)
+                return True, redirect_url
 
-                soup = _soup(get_response.text)
+            logger.warning("Форум принял запрос, но не вернул URL новой темы. Ответ: %s",
+                           str(result_json)[:300])
+            return False, "Тема отправлена, но форум не вернул ссылку перенаправления."
 
-                csrf_token = _extract_csrf(get_response.text)
-                if not csrf_token:
-                    logger.error("CSRF-токен не найден на странице создания темы.")
-                    return False, "Не удалось найти CSRF-токен защиты XenForo на странице."
-                logger.debug("Шаг 2/3: CSRF-токен получен (длина %d).", len(csrf_token))
-
-                prefix_id = _extract_required_prefix(soup)
-
-                payload = {
-                    "title": title,
-                    "message": message,
-                    "_xfToken": csrf_token,
-                    "_xfRequestUri": f"/forums/{section_id}/post-thread",
-                    "_xfWithData": "1",
-                    "_xfResponseType": "json",
-                }
-                if prefix_id is not None:
-                    payload["prefix_id"] = prefix_id
-
-                ajax_headers = {
-                    **HEADERS,
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Origin": FORUM_URL,
-                }
-                logger.debug("Шаг 3/3: POST %s (AJAX, %d полей)...", post_url, len(payload))
-                post_response = await client.post(post_url, data=payload, headers=ajax_headers)
-
-                if use_session:
-                    updated = _flatten_cookies(client)
-                    if updated:
-                        save_cookies({**cookies, **updated})
-
-                elapsed = time.monotonic() - started
-                if post_response.status_code != 200:
-                    logger.error("Форум вернул HTTP %s при отправке жалобы (за %.2f с).",
-                                 post_response.status_code, elapsed)
-                    return False, f"Ошибка отправки формы. HTTP {post_response.status_code}."
-
-                try:
-                    result_json = post_response.json()
-                except (ValueError, json.JSONDecodeError):
-                    snippet = post_response.text[:200].replace("\n", " ")
-                    logger.error("Форум вернул не-JSON ответ. Начало: %s", snippet)
-                    return False, f"Форум вернул некорректный ответ (не JSON): {snippet}"
-
-                if "errors" in result_json:
-                    errors = result_json["errors"]
-                    if isinstance(errors, list):
-                        error_msg = "; ".join(errors)
-                    elif isinstance(errors, dict):
-                        error_msg = "; ".join(str(v) for v in errors.values())
-                    else:
-                        error_msg = str(errors)
-                    logger.warning("Форум вернул ошибку валидации формы: %s", error_msg)
-                    return False, f"Ошибка форума: {error_msg}"
-
-                redirect_url = result_json.get("redirect")
-                if redirect_url:
-                    if redirect_url.startswith("/"):
-                        redirect_url = FORUM_URL + redirect_url
-                    logger.info("Жалоба успешно опубликована за %.2f с. URL темы: %s",
-                                elapsed, redirect_url)
-                    return True, redirect_url
-
-                logger.warning("Форум принял запрос, но не вернул URL новой темы. Ответ: %s",
-                               str(result_json)[:300])
-                return False, "Тема отправлена, но форум не вернул ссылку перенаправления."
-
-            except httpx.RequestError as e:
-                logger.error("Сетевая ошибка при отправке жалобы: %s", e)
-                return False, f"Ошибка сети при связи с форумом: {e}"
-            except Exception as e:
-                logger.exception("Неизвестная ошибка при отправке жалобы")
-                return False, f"Внутренняя ошибка отправки: {e}"
-    finally:
-        # _session() сам закрывает в __aexit__; для изолированного клиента
-        # async with тоже сам всё сделает — finally здесь только для
-        # симметрии и чтобы PyCharm не ругался.
-        pass
+        except httpx.RequestError as e:
+            logger.error("Сетевая ошибка при отправке жалобы: %s", e)
+            return False, f"Ошибка сети при связи с форумом: {e}"
+        except Exception as e:
+            logger.exception("Неизвестная ошибка при отправке жалобы")
+            return False, f"Внутренняя ошибка отправки: {e}"
 
 
 def is_auth_error(error_text: str) -> bool:
-    """Проверяет, что ошибка от post_complaint означает «нужен перелогин».
-    Только AUTH: префикс — куки реально протухли (редирект на /login/).
-    Используется queue_processor / complaint handler чтобы автоматически
-    помечать аккаунт needs_reauth и переключаться на следующий из пула."""
+    """Ошибка означает «нужен ручной перелогин» (редирект на /login/)."""
     if not error_text:
         return False
     return error_text.startswith("AUTH:") or error_text.startswith("AUTH ")
 
 
 def is_noperm_error(error_text: str) -> bool:
-    """Проверяет, что ошибка означает «у этого аккаунта нет прав в этом
-    разделе» (или DDoS-Guard режет path). Куки валидны — менять needs_reauth
-    НЕ нужно. Достаточно перейти к следующему аккаунту в пуле."""
+    """Ошибка означает «нет прав в разделе / DDoS-Guard режет path».
+    Куки валидны, нужно просто пробовать другой аккаунт."""
     if not error_text:
         return False
     return error_text.startswith("NOPERM:") or error_text.startswith("NOPERM ")
@@ -1337,10 +1122,21 @@ async def discover_servers() -> tuple[bool, list[tuple[str, int]] | str]:
 
     async with _session() as client:
         try:
-            response = await _get_with_ddos(client, FORUM_URL)
+            response = await client.get(FORUM_URL)
             if response.status_code != 200:
                 logger.error("HTTP %s при загрузке главной страницы.", response.status_code)
                 return False, f"HTTP {response.status_code} при загрузке главной страницы."
+
+            # Если форум показал DDoS-Guard заглушку — решаем и повторяем
+            if "vddosw3data.js" in response.text or "slowAES" in response.text:
+                logger.info("На главной DDoS-Guard заглушка — обновляю R3ACTLB.")
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain=FORUM_HOST, path="/")
+                    cookies = load_cookies()
+                    save_cookies({**cookies, "R3ACTLB": fresh})
+                    response = await client.get(FORUM_URL)
 
             servers = _parse_servers_from_html(response.text)
             if not servers:
@@ -1420,7 +1216,7 @@ async def _discover_categories_with_client(
     Полезно при массовой синхронизации, чтобы не плодить новые соединения."""
     try:
         server_url = f"{FORUM_URL}/forums/{server_node_id}/"
-        response = await _get_with_ddos(client, server_url)
+        response = await client.get(server_url)
         if response.status_code != 200:
             logger.warning("Сервер node=%s: HTTP %s при загрузке раздела.",
                            server_node_id, response.status_code)
@@ -1439,7 +1235,7 @@ async def _discover_categories_with_client(
             complaints_url = _find_complaints_link(soup)
             if complaints_url:
                 logger.debug("Сервер node=%s: схема B → %s", server_node_id, complaints_url)
-                response2 = await _get_with_ddos(client, complaints_url)
+                response2 = await client.get(complaints_url)
                 if response2.status_code == 200:
                     categories = _parse_categories_from_soup(_soup(response2.text))
                 else:
@@ -1475,7 +1271,7 @@ async def discover_complaint_categories(
 async def discover_all_complaint_categories(
     servers: list[tuple[str, int]],
     concurrency: int = 6,
-    progress: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
+    progress: Optional[callable] = None,
 ) -> dict[int, dict[str, tuple[str, int]]]:
     """Параллельно сканирует категории жалоб для всех серверов одним клиентом.
 
@@ -1522,7 +1318,6 @@ async def discover_all_complaint_categories(
 # Сопоставление текста префикса темы (lowercase) на стандартный статус.
 # Статусы в боте:
 #   "pending"  — Ожидание (или префикс не найден)
-#   "review"   — На рассмотрении (промежуточный, админ форума уже взял)
 #   "accepted" — принята/одобрена/удовлетворена
 #   "rejected" — отклонена/отказ
 #   "closed"   — закрыта (без явного решения)
@@ -1546,89 +1341,13 @@ _STATUS_KEYWORDS = {
         "закрыт", "закрыто", "закрыта",
         "архив",
     ),
-    "review":   (
-        "на рассмотрении", "рассматривается", "рассмотрении",
-        "в работе",
-    ),
     "pending":  (
         "ожидание", "ожидан",
         "новая", "новое",
+        "в работе",
+        "рассматривается", "рассмотрении",
     ),
 }
-
-
-async def fetch_thread_admin_comment(
-    thread_url: str,
-    cookies: dict | None = None,
-) -> str | None:
-    """Заходит на страницу темы и возвращает текст последнего ответа
-    админа/модератора (или None если нет).
-
-    Используется в админской карточке жалобы для on-demand подтягивания
-    комментария — даже если мониторинг ещё не успел его записать в БД.
-    """
-    if not thread_url:
-        return None
-
-    if cookies is not None:
-        client_ctx = httpx.AsyncClient(
-            cookies=cookies, headers=HEADERS,
-            follow_redirects=True, timeout=15.0,
-        )
-    else:
-        client_ctx = _session(timeout=15.0)
-
-    try:
-        async with client_ctx as client:
-            try:
-                r = await _get_with_ddos(client, thread_url)
-                if r.status_code != 200:
-                    return None
-                if _is_login_redirect(r.url):
-                    return None
-                return _extract_last_admin_comment(_soup(r.text))
-            except httpx.RequestError as e:
-                logger.debug("fetch_thread_admin_comment: сеть %s", e)
-                return None
-            except Exception:
-                logger.exception("fetch_thread_admin_comment: ошибка")
-                return None
-    except Exception:
-        return None
-
-
-_PREFIX_LABEL_RE = re.compile(
-    r'<span[^>]*class="[^"]*\blabel\b[^"]*"[^>]*>\s*([^<]{2,40})\s*</span>',
-    re.IGNORECASE,
-)
-
-
-def _fast_prefix_from_html(html: str) -> str | None:
-    """Быстрое извлечение префикса темы регексом, без BeautifulSoup.
-
-    Ищем первый <span class="...label...">текст</span> внутри блока
-    p-title-value. Возвращаем текст, если он не похож на blacklist
-    (плейсхолдеры XenForo вроде «Искать только в заголовках»).
-    """
-    # Ограничиваем поиск блоком заголовка (грубо, но достаточно для пути fast)
-    title_start = html.find('p-title-value')
-    if title_start < 0:
-        return None
-    # Берём окно ~2КБ вокруг — заголовок туда вместе с label-ами влезет.
-    chunk = html[title_start:title_start + 2000]
-    m = _PREFIX_LABEL_RE.search(chunk)
-    if not m:
-        return None
-    text = m.group(1).strip()
-    if not text:
-        return None
-    BLACKLIST = (
-        "искать только в заголовках", "поиск", "title only", "filter by",
-    )
-    lowered = text.lower()
-    if any(b in lowered for b in BLACKLIST):
-        return None
-    return text
 
 
 async def fetch_complaint_status(
@@ -1663,7 +1382,7 @@ async def fetch_complaint_status(
     try:
         async with client_ctx as client:
             try:
-                r = await _get_with_ddos(client, thread_url)
+                r = await client.get(thread_url)
                 if r.status_code == 403:
                     logger.info("Тема %s — HTTP 403 (нет прав видеть тему).",
                                 thread_url)
@@ -1672,29 +1391,19 @@ async def fetch_complaint_status(
                     logger.debug("Тема %s — HTTP %s.", thread_url, r.status_code)
                     return None, None, None
                 html = r.text
+                if "vddosw3data.js" in html or "slowAES" in html:
+                    fresh = await _solve_ddos_guard()
+                    if fresh:
+                        client.cookies.set("R3ACTLB", fresh,
+                                            domain=FORUM_HOST, path="/")
+                        r = await client.get(thread_url)
+                        html = r.text
 
                 # Если переадресовало в /login/ — значит куки не подходят
-                if _is_login_redirect(r.url) or "log-in" in html.lower()[:5000]:
+                if "/login/" in str(r.url) or "log-in" in html.lower()[:5000]:
                     logger.info("Тема %s — куки не пускают (редирект на login).",
                                 thread_url)
                     return None, None, None
-
-                # Быстрый путь: пытаемся извлечь префикс регексом без
-                # BeautifulSoup — это в 5-10 раз быстрее. Если не нашли —
-                # fallback на полноценный парсинг.
-                fast_prefix = _fast_prefix_from_html(html)
-                if fast_prefix:
-                    soup = _soup(html)
-                    admin_comment = _extract_last_admin_comment(soup)
-                    lowered = fast_prefix.lower()
-                    for status, keywords in _STATUS_KEYWORDS.items():
-                        if any(k in lowered for k in keywords):
-                            comment = admin_comment if status != "pending" else None
-                            logger.info("Тема %s: префикс=%r (быстрый путь, status=%s)",
-                                         thread_url, fast_prefix, status)
-                            return status, fast_prefix, comment
-                    # Префикс есть, но в keywords не попал — упадём в pending
-                    return "pending", fast_prefix, None
 
                 soup = _soup(html)
 
@@ -1789,10 +1498,8 @@ async def fetch_complaint_status(
                     lowered = prefix_text.lower()
                     for status, keywords in _STATUS_KEYWORDS.items():
                         if any(k in lowered for k in keywords):
-                            # Комментарий админа возвращаем для всех
-                            # нефинальных статусов кроме pending — он
-                            # пригодится и в карточке жалобы, и в
-                            # уведомлении пользователю.
+                            # Для нефинальных статусов (pending) комментарий
+                            # не нужен — нечего пользователю слать
                             comment = admin_comment if status != "pending" else None
                             return status, prefix_text, comment
                     logger.info("Тема %s: префикс «%s» не распознан, считаю pending.",
@@ -1838,12 +1545,20 @@ def _extract_thread_id(thread_url: str) -> int | None:
 async def _get_first_post_id(client: httpx.AsyncClient,
                               thread_url: str) -> int | None:
     """Открывает страницу темы и берёт id первого поста."""
-    r = await _get_with_ddos(client, thread_url)
+    r = await client.get(thread_url)
     if r.status_code != 200:
         logger.warning("Тема %s — HTTP %s, post_id не получен.",
                        thread_url, r.status_code)
         return None
-    m = _FIRST_POST_ID_RE.search(r.text)
+    html = r.text
+    if "vddosw3data.js" in html or "slowAES" in html:
+        fresh = await _solve_ddos_guard()
+        if fresh:
+            client.cookies.set("R3ACTLB", fresh,
+                                domain=FORUM_HOST, path="/")
+            r = await client.get(thread_url)
+            html = r.text
+    m = _FIRST_POST_ID_RE.search(html)
     return int(m.group(1)) if m else None
 
 
@@ -1867,7 +1582,7 @@ async def delete_thread(thread_url: str,
     async with _session() as client:
         try:
             # 1. Открываем страницу подтверждения удаления — получаем CSRF
-            r = await _get_with_ddos(client, delete_url)
+            r = await client.get(delete_url)
             if r.status_code != 200:
                 if r.status_code == 403:
                     return False, ("Доступ запрещён (HTTP 403). Тема не принадлежит "
@@ -1875,7 +1590,16 @@ async def delete_thread(thread_url: str,
                                    "правилами форума.")
                 return False, f"HTTP {r.status_code} при открытии формы удаления."
 
-            csrf = _extract_csrf(r.text)
+            html = r.text
+            if "vddosw3data.js" in html or "slowAES" in html:
+                fresh = await _solve_ddos_guard()
+                if fresh:
+                    client.cookies.set("R3ACTLB", fresh,
+                                        domain=FORUM_HOST, path="/")
+                    r = await client.get(delete_url)
+                    html = r.text
+
+            csrf = _extract_csrf(html)
             if not csrf:
                 return False, "Не удалось получить CSRF-токен для удаления."
 
@@ -1888,12 +1612,8 @@ async def delete_thread(thread_url: str,
                 "_xfWithData": "1",
                 "_xfResponseType": "json",
             }
-            ajax = {
-                **HEADERS,
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": FORUM_URL,
-                "Referer": delete_url,
-            }
+            ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
+                    "Referer": delete_url}
             r2 = await client.post(delete_url, data=payload, headers=ajax)
 
             try:
@@ -1948,7 +1668,7 @@ async def edit_thread_post(thread_url: str, new_message: str,
 
             # 2. Открываем форму редактирования поста — для CSRF
             edit_url = f"{FORUM_URL}/posts/{post_id}/edit"
-            r = await _get_with_ddos(client, edit_url)
+            r = await client.get(edit_url)
             if r.status_code != 200:
                 if r.status_code == 403:
                     return False, ("Доступ запрещён (HTTP 403). Тему может "
@@ -1967,12 +1687,8 @@ async def edit_thread_post(thread_url: str, new_message: str,
                 "_xfWithData": "1",
                 "_xfResponseType": "json",
             }
-            ajax = {
-                **HEADERS,
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": FORUM_URL,
-                "Referer": edit_url,
-            }
+            ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
+                    "Referer": edit_url}
             r2 = await client.post(f"{FORUM_URL}/posts/{post_id}/save",
                                      data=payload, headers=ajax)
             try:
@@ -1989,7 +1705,7 @@ async def edit_thread_post(thread_url: str, new_message: str,
             # 4. (Опционально) меняем заголовок темы
             if new_title:
                 edit_thread_url = f"{FORUM_URL}/threads/{thread_id}/edit"
-                rt = await _get_with_ddos(client, edit_thread_url)
+                rt = await client.get(edit_thread_url)
                 if rt.status_code == 200:
                     csrf2 = _extract_csrf(rt.text) or csrf
                     title_payload = {
@@ -1999,12 +1715,8 @@ async def edit_thread_post(thread_url: str, new_message: str,
                         "_xfWithData": "1",
                         "_xfResponseType": "json",
                     }
-                    ajax_t = {
-                        **HEADERS,
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Origin": FORUM_URL,
-                        "Referer": edit_thread_url,
-                    }
+                    ajax_t = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
+                              "Referer": edit_thread_url}
                     rt2 = await client.post(edit_thread_url, data=title_payload,
                                               headers=ajax_t)
                     try:
