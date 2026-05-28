@@ -483,6 +483,15 @@ async def check_forum_status(message: types.Message):
         full = await get_account(acc["id"])
         cookies = full["cookies"] if full else {}
         ok, name_or_err = await check_auth_for_cookies(cookies)
+        # Если куки живы, но в БД стоит needs_reauth — снимаем его.
+        # Это самовосстановление от ложноположительных пометок (например,
+        # 403 от DDoS-Guard на конкретном path при валидной сессии).
+        if ok and acc.get("needs_reauth"):
+            try:
+                from src.database import clear_account_needs_reauth
+                await clear_account_needs_reauth(acc["id"])
+            except Exception:
+                logger.exception("clear_account_needs_reauth failed")
         return acc, ok, name_or_err
 
     results = await asyncio.gather(*[_check(a) for a in accounts])

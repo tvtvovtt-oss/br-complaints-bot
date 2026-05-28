@@ -1150,16 +1150,23 @@ async def post_complaint(section_id: int, title: str, message: str,
 
                 if get_response.status_code != 200:
                     if get_response.status_code == 403:
-                        # Не критическая ошибка — логируем как WARNING, чтобы
-                        # error_reporter не дёргал админа: возможно, аккаунт
-                        # просто не имеет прав в этом разделе и хендлер сейчас
-                        # переключится на следующий из пула.
+                        # 403 на конкретном разделе ≠ протухшие куки.
+                        # Чаще всего это:
+                        #   1) аккаунт не имеет прав публикации в разделе;
+                        #   2) DDoS-Guard на хостинге режет именно этот path
+                        #      (главная при этом открывается, check_auth ок).
+                        # Раньше мы помечали аккаунт needs_reauth — это
+                        # ложноположительно валило весь пул. Возвращаем
+                        # отдельный префикс NOPERM, на который вызывающий
+                        # просто пробует другой аккаунт без needs_reauth.
                         logger.warning("HTTP 403 при открытии формы (раздел %s). "
-                                        "Возможно, у аккаунта нет прав.",
+                                        "Возможно, нет прав в разделе или "
+                                        "DDoS-Guard блокирует path.",
                                         section_id)
                         return False, (
-                            f"AUTH: HTTP 403. У аккаунта нет прав в разделе "
-                            f"{section_id}, или сессия истекла."
+                            f"NOPERM: HTTP 403 в разделе {section_id}. "
+                            "Нет прав на публикацию в этом разделе либо "
+                            "DDoS-Guard блокирует запрос с IP сервера."
                         )
                     logger.error("HTTP %s при открытии формы создания темы.", get_response.status_code)
                     return False, f"Не удалось открыть страницу создания темы. HTTP {get_response.status_code}."
@@ -1249,11 +1256,21 @@ async def post_complaint(section_id: int, title: str, message: str,
 
 def is_auth_error(error_text: str) -> bool:
     """Проверяет, что ошибка от post_complaint означает «нужен перелогин».
+    Только AUTH: префикс — куки реально протухли (редирект на /login/).
     Используется queue_processor / complaint handler чтобы автоматически
     помечать аккаунт needs_reauth и переключаться на следующий из пула."""
     if not error_text:
         return False
     return error_text.startswith("AUTH:") or error_text.startswith("AUTH ")
+
+
+def is_noperm_error(error_text: str) -> bool:
+    """Проверяет, что ошибка означает «у этого аккаунта нет прав в этом
+    разделе» (или DDoS-Guard режет path). Куки валидны — менять needs_reauth
+    НЕ нужно. Достаточно перейти к следующему аккаунту в пуле."""
+    if not error_text:
+        return False
+    return error_text.startswith("NOPERM:") or error_text.startswith("NOPERM ")
 
 
 # ---------------- Автообнаружение структуры форума ----------------

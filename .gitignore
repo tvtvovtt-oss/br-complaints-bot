@@ -10,6 +10,7 @@ bot_database.db-journal
 bot_database.db-wal
 bot_database.db-shm
 logs/
+logs.*.log
 *.log
 
 # --- Python ---

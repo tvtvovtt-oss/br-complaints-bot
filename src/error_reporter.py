@@ -25,9 +25,33 @@ def _resolve_target_chat_id() -> Optional[int]:
     raw = os.getenv("ERROR_LOG_CHAT_ID", "").strip()
     if raw:
         try:
-            return int(raw.replace("'", "").replace('"', ""))
+            cid = int(raw.replace("'", "").replace('"', ""))
         except ValueError:
-            pass
+            cid = None
+        else:
+            # Проверяем, что значение хотя бы похоже на настоящий Telegram
+            # chat_id. Личные чаты — положительные id обычно ≥ 1e6;
+            # каналы/супергруппы — id < -100_000_000_000. Значения вроде
+            # '0', '1' — явный мусор (часто пользователь ставит '1' как
+            # замену булева). Молча игнорируем такие.
+            if cid is None or cid == 0:
+                pass
+            elif cid > 0 and cid < 100_000:
+                logger.warning(
+                    "ERROR_LOG_CHAT_ID=%s выглядит невалидно (слишком "
+                    "маленький id). Telegram-уведомления об ошибках "
+                    "отключены.", cid,
+                )
+                cid = None
+            elif cid < 0 and cid > -100_000:
+                logger.warning(
+                    "ERROR_LOG_CHAT_ID=%s выглядит невалидно (слишком "
+                    "маленький отрицательный id). Telegram-уведомления "
+                    "об ошибках отключены.", cid,
+                )
+                cid = None
+            if cid:
+                return cid
     if os.getenv("LOG_TO_ADMIN", "").strip() == "1":
         from src.config import ADMIN_IDS
         if ADMIN_IDS:
@@ -166,11 +190,23 @@ class TelegramErrorHandler(logging.Handler):
                 disable_notification=False,
             )
         except (TelegramBadRequest, TelegramForbiddenError) as e:
-            # Telegram отказал (форматирование, чат закрыт) — пишем в stderr
-            # обычным root-логгером в обход самих себя, чтобы не зацикливаться.
-            import sys
-            print(f"[error_reporter] Telegram API отверг отчёт: {e}",
-                  file=sys.stderr)
+            # Telegram отказал. Если это «chat not found» / «bot was blocked»
+            # — chat_id некорректный; больше слать туда нет смысла.
+            # Отключаем handler, чтобы не спамить stderr на каждый ERROR.
+            err_text = str(e).lower()
+            if ("chat not found" in err_text
+                    or "bot was blocked" in err_text
+                    or "user is deactivated" in err_text):
+                TelegramErrorHandler._enabled = False
+                import sys
+                print(f"[error_reporter] {e} — отключаю Telegram-уведомления "
+                      f"об ошибках до перезапуска.", file=sys.stderr)
+            else:
+                # Прочие отказы (битый HTML и т.п.) — пишем в stderr но
+                # handler не вырубаем.
+                import sys
+                print(f"[error_reporter] Telegram API отверг отчёт: {e}",
+                      file=sys.stderr)
         except Exception as e:
             # Не вызываем logger.exception — он триггернёт нас же. Пишем в
             # stderr напрямую: это последний шанс увидеть ошибку.

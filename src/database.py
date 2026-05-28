@@ -1141,6 +1141,23 @@ async def mark_account_needs_reauth(account_id: int) -> None:
     await _trigger_backup_immediate()
 
 
+async def clear_account_needs_reauth(account_id: int) -> None:
+    """Снимает флаг needs_reauth и сбрасывает кулдаун. Используется когда
+    периодическая проверка обнаруживает, что куки на самом деле живы
+    (это значит флаг был поставлен ложно, например на 403 от DDoS-Guard)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE accounts "
+            "SET needs_reauth = 0, "
+            "    cooldown_until = NULL "
+            "WHERE id = ?",
+            (account_id,),
+        )
+        await db.commit()
+    logger.info("Аккаунт id=%s: needs_reauth снят (куки живы).", account_id)
+    await _trigger_backup_immediate()
+
+
 # ---------- Шифрованный пароль для авто-перелогина ----------
 
 async def set_account_encrypted_password(account_id: int,

@@ -28,7 +28,7 @@ from src.database import (
     update_account_cookies,
     mark_account_needs_reauth,
 )
-from src.forum.xenforo import post_complaint, is_auth_error
+from src.forum.xenforo import post_complaint, is_auth_error, is_noperm_error
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,19 @@ async def _process_one(bot: Bot, item: dict) -> None:
                 "Жалоба #%s: аккаунт «%s» нуждается в перелогине, "
                 "пробуем другим на следующей итерации.",
                 qid, account["username"],
+            )
+            return
+
+        # NOPERM — нет прав в разделе или DDoS-Guard на path.
+        # Аккаунт валиден, просто не подходит для этой жалобы. Не считаем
+        # это «провалом попытки» (иначе после 3 разных аккаунтов жалоба
+        # уйдёт в failed) — оставляем в pending, на следующей итерации
+        # claim_available_account даст следующий по rotation.
+        if is_noperm_error(str(result)):
+            logger.info(
+                "Жалоба #%s: аккаунт «%s» не имеет прав в разделе %s — "
+                "оставляю в pending для другого аккаунта.",
+                qid, account["username"], section_id,
             )
             return
 

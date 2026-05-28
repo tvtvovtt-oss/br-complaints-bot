@@ -8,7 +8,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from src.config import COMPLAINT_CATEGORY_LABELS
-from src.forum.xenforo import post_complaint, delete_thread, edit_thread_post, is_auth_error
+from src.forum.xenforo import (
+    post_complaint, delete_thread, edit_thread_post,
+    is_auth_error, is_noperm_error,
+)
 from src.forum.templates import (
     RULES,
     NEEDS_DATE,
@@ -1150,15 +1153,21 @@ async def process_confirm(message: types.Message, state: FSMContext):
             used_account_id, last_error,
         )
 
-        # AUTH-ошибка: куки протухли — помечаем аккаунт как нужный перелогин
-        # и переключаемся на следующий аккаунт пула.
-        if is_auth_error(last_error) and used_account_id:
+        # AUTH-ошибка: куки реально протухли (редирект на /login/) — помечаем
+        # аккаунт как нужный перелогин и переключаемся на следующий.
+        # NOPERM-ошибка: 403 в разделе. Куки валидны, но нет прав ИЛИ
+        # DDoS-Guard. Переключаемся на следующий аккаунт БЕЗ needs_reauth —
+        # иначе при первой же 403-ке весь пул сгорит.
+        is_auth = is_auth_error(last_error)
+        is_noperm = is_noperm_error(last_error)
+
+        if is_auth and used_account_id:
             try:
                 await mark_account_needs_reauth(used_account_id)
             except Exception:
                 logger.exception("mark_account_needs_reauth failed")
-        elif not is_auth_error(last_error):
-            # Не AUTH-ошибка — нет смысла пробовать другой аккаунт
+        elif not (is_auth or is_noperm):
+            # Не AUTH/NOPERM — нет смысла пробовать другой аккаунт
             # (валидация формы, сетевая ошибка, форум упал и т.п.).
             break
 
