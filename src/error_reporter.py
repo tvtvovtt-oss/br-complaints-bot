@@ -41,6 +41,11 @@ _recent_keys: deque = deque(maxlen=100)
 _recent_lock = asyncio.Lock()
 SUPPRESS_REPEAT_SECONDS = 60
 
+# Удерживаем ссылки на запущенные задачи отправки, иначе сборщик мусора
+# Python может убить task до завершения отправки (asyncio предупреждает
+# в логах: "Task was destroyed but it is pending!").
+_inflight_tasks: set[asyncio.Task] = set()
+
 
 class TelegramErrorHandler(logging.Handler):
     """Шлёт ERROR/CRITICAL в Telegram. Использует bot который ему выдадут
@@ -98,9 +103,12 @@ class TelegramErrorHandler(logging.Handler):
         except RuntimeError:
             return
         try:
-            loop.create_task(self._send(record, text))
+            task = loop.create_task(self._send(record, text))
         except RuntimeError:
-            pass
+            return
+        # Сохраняем сильную ссылку, чтобы task не сжёг GC до завершения.
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
 
     @staticmethod
     async def _send(record: logging.LogRecord, text: str) -> None:

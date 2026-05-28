@@ -33,7 +33,9 @@ BACKUP_DEBOUNCE_SECONDS = 30
 # это именно наш бэкап.
 BACKUP_FILE_NAME = "bot_database.db"
 
-# Внутренний state — задача дебаунса
+# Внутренний state — задача дебаунса для schedule_backup() (30-секундный коалесcинг).
+# Это НЕ тот же таск, что хвостовой таск force_backup() (см. ниже _pending_tail_task) —
+# исторически они путались под одним именем и затирали друг друга.
 _pending_backup_task: Optional[asyncio.Task] = None
 _pending_lock = asyncio.Lock()
 # Ссылка на бот — устанавливается через set_bot() при старте, чтобы хендлеры
@@ -114,6 +116,35 @@ async def restore_db_from_channel(bot: Bot) -> bool:
         # Скачиваем сразу в файл по DB_PATH
         await bot.download(pinned.document, destination=str(db_path))
         size = db_path.stat().st_size if db_path.exists() else 0
+
+        # Проверяем целостность скачанного файла. Битый бэкап (например,
+        # обрезался при загрузке в канал) лучше удалить и стартовать с
+        # чистой БД, чем падать посреди работы.
+        def _integrity_check() -> bool:
+            import sqlite3
+            try:
+                with sqlite3.connect(str(db_path)) as conn:
+                    cur = conn.execute("PRAGMA integrity_check")
+                    row = cur.fetchone()
+                    return bool(row and row[0] == "ok")
+            except Exception:
+                logger.exception("integrity_check упал — считаю файл битым")
+                return False
+
+        try:
+            ok = await asyncio.to_thread(_integrity_check)
+        except Exception:
+            ok = False
+
+        if not ok:
+            logger.error("Восстановленная БД не прошла integrity_check — "
+                         "удаляю файл и запускаю с пустой схемой.")
+            try:
+                db_path.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("Не удалось удалить битый файл БД.")
+            return False
+
         logger.info("✅ База восстановлена из канала: %d байт → %s",
                     size, db_path)
         return True
@@ -135,15 +166,23 @@ async def _send_backup_now(bot: Bot) -> None:
 
     # SQLite в WAL-режиме держит часть данных в .db-wal/.db-shm. Чтобы
     # снимок .db был согласован, делаем checkpoint(TRUNCATE) перед чтением.
-    try:
+    # Делаем это в отдельном потоке: на крупной БД sqlite3.connect() и
+    # checkpoint могут блокировать event loop на сотни мс.
+    def _checkpoint() -> None:
         import sqlite3
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        except Exception:
+            # Не страшно если PRAGMA упала — checkpoint всё равно происходит
+            # автоматически при закрытии последнего соединения.
+            logger.debug("WAL checkpoint перед бэкапом не удался",
+                         exc_info=True)
+
+    try:
+        await asyncio.to_thread(_checkpoint)
     except Exception:
-        # Не страшно если PRAGMA упала — checkpoint всё равно происходит
-        # автоматически при закрытии последнего соединения. В худшем случае
-        # бэкап будет немного устаревшим.
-        logger.debug("WAL checkpoint перед бэкапом не удался", exc_info=True)
+        logger.debug("asyncio.to_thread(_checkpoint) упал", exc_info=True)
 
     try:
         # SQLite может писать в файл прямо сейчас. Чтобы не получить
@@ -232,7 +271,11 @@ async def schedule_backup(bot: Bot | None = None) -> None:
 
 _force_backup_lock = asyncio.Lock()
 _last_force_backup_at: float = 0.0
-_pending_backup_task: Optional[asyncio.Task] = None
+# Хвостовой таск ТОЛЬКО для force_backup(). Раньше переиспользовалась
+# переменная _pending_backup_task — это приводило к тому, что schedule_backup
+# и force_backup мешали друг другу (один видел незавершённый таск другого
+# и пропускал свою отправку). Теперь они независимы.
+_pending_tail_task: Optional[asyncio.Task] = None
 # Минимальный интервал между forced-бэкапами. Адаптивный: первое событие
 # после паузы — flush сразу. Если события идут чаще — последующие
 # отправляются «в хвост» через отложенный таск, чтобы не флудить канал.
@@ -254,7 +297,7 @@ async def force_backup(bot: Bot | None = None) -> None:
     if target_bot is None:
         return
 
-    global _last_force_backup_at, _pending_backup_task
+    global _last_force_backup_at, _pending_tail_task
     explicit_bot = bot is not None  # True для shutdown-сценария
 
     async with _force_backup_lock:
@@ -275,7 +318,7 @@ async def force_backup(bot: Bot | None = None) -> None:
         # Слишком часто — отправим в хвосте через отложенный таск.
         # Если такой таск уже запланирован — оставляем его (он подхватит
         # самые свежие данные на момент срабатывания).
-        if _pending_backup_task is not None and not _pending_backup_task.done():
+        if _pending_tail_task is not None and not _pending_tail_task.done():
             logger.debug("force_backup: уже запланирован хвостовой бэкап.")
             return
 
@@ -293,7 +336,7 @@ async def force_backup(bot: Bot | None = None) -> None:
             except Exception:
                 logger.exception("Ошибка хвостового бэкапа")
 
-        _pending_backup_task = asyncio.create_task(_delayed_flush())
+        _pending_tail_task = asyncio.create_task(_delayed_flush())
         logger.debug("force_backup: запланирован хвостовой бэкап через %.1f с.",
                      delay)
 

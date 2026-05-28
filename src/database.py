@@ -51,9 +51,15 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Миграции для существующих БД
-        async with db.execute("PRAGMA table_info(complaints)") as cur:
-            cols = [row[1] for row in await cur.fetchall()]
+        # Миграции для существующих БД. cols пересчитываем после каждого
+        # успешного ALTER — на случай если миграция упала посередине и
+        # повторно запустилась, чтобы не пытаться добавить уже существующую
+        # колонку. На всякий ловим OperationalError "duplicate column name"
+        # как идемпотентную операцию.
+        async def _column_exists(table: str, col: str) -> bool:
+            async with db.execute(f"PRAGMA table_info({table})") as cur:
+                return any(row[1] == col for row in await cur.fetchall())
+
         for col, ddl in [
             ("status", "ALTER TABLE complaints ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"),
             ("last_status_check", "ALTER TABLE complaints ADD COLUMN last_status_check TIMESTAMP"),
@@ -67,9 +73,17 @@ async def init_db():
             ("server_name", "ALTER TABLE complaints ADD COLUMN server_name TEXT"),
             ("admin_comment", "ALTER TABLE complaints ADD COLUMN admin_comment TEXT"),
         ]:
-            if col not in cols:
-                logger.info("Миграция: добавляю колонку '%s' в complaints.", col)
+            if await _column_exists("complaints", col):
+                continue
+            logger.info("Миграция: добавляю колонку '%s' в complaints.", col)
+            try:
                 await db.execute(ddl)
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                if "duplicate column" in msg:
+                    logger.debug("Колонка %s уже существует — пропускаю.", col)
+                else:
+                    raise
 
         # Кэш серверов форума (RED, GREEN и т.д.)
         await db.execute("""
@@ -81,11 +95,15 @@ async def init_db():
             )
         """)
         # Совместимость со старыми БД: добавляем колонку position, если ее нет
-        async with db.execute("PRAGMA table_info(servers)") as cur:
-            cols = [row[1] for row in await cur.fetchall()]
-        if "position" not in cols:
+        if not await _column_exists("servers", "position"):
             logger.info("Миграция: добавляю колонку 'position' в таблицу servers.")
-            await db.execute("ALTER TABLE servers ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+            try:
+                await db.execute(
+                    "ALTER TABLE servers ADD COLUMN position INTEGER NOT NULL DEFAULT 0"
+                )
+            except aiosqlite.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
 
         # Кэш подразделов жалоб для каждого сервера
         # category_key — короткий ключ (players / admins / leaders / appeals)
@@ -119,18 +137,37 @@ async def init_db():
             )
         """)
         # Миграция: добавляем cooldown_until если её ещё нет (старые БД)
-        async with db.execute("PRAGMA table_info(accounts)") as cur:
-            cols = [row[1] for row in await cur.fetchall()]
-        if "cooldown_until" not in cols:
+        if not await _column_exists("accounts", "cooldown_until"):
             logger.info("Миграция: добавляю колонку 'cooldown_until' в accounts.")
-            await db.execute(
-                "ALTER TABLE accounts ADD COLUMN cooldown_until TIMESTAMP"
-            )
-        if "encrypted_password" not in cols:
+            try:
+                await db.execute(
+                    "ALTER TABLE accounts ADD COLUMN cooldown_until TIMESTAMP"
+                )
+            except aiosqlite.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+        if not await _column_exists("accounts", "encrypted_password"):
             logger.info("Миграция: добавляю колонку 'encrypted_password' в accounts.")
-            await db.execute(
-                "ALTER TABLE accounts ADD COLUMN encrypted_password TEXT"
-            )
+            try:
+                await db.execute(
+                    "ALTER TABLE accounts ADD COLUMN encrypted_password TEXT"
+                )
+            except aiosqlite.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+        # needs_reauth — флаг «куки протухли, нужен ручной перелогин».
+        # Ставится при HTTP 403/redirect на /login/ при попытке публикации.
+        # Снимается при upsert_account (новый успешный логин).
+        if not await _column_exists("accounts", "needs_reauth"):
+            logger.info("Миграция: добавляю колонку 'needs_reauth' в accounts.")
+            try:
+                await db.execute(
+                    "ALTER TABLE accounts ADD COLUMN needs_reauth INTEGER "
+                    "NOT NULL DEFAULT 0"
+                )
+            except aiosqlite.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_active
                 ON accounts(telegram_id, is_active)
@@ -494,12 +531,13 @@ async def upsert_account(telegram_id: int, username: str, login: str | None,
 
             await db.execute(
                 """
-                INSERT INTO accounts (telegram_id, username, login, cookies_json, is_active)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO accounts (telegram_id, username, login, cookies_json, is_active, needs_reauth)
+                VALUES (?, ?, ?, ?, ?, 0)
                 ON CONFLICT(telegram_id, username) DO UPDATE SET
                     login = excluded.login,
                     cookies_json = excluded.cookies_json,
                     is_active = excluded.is_active,
+                    needs_reauth = 0,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (telegram_id, username, login, cookies_str, 1 if make_active else 0),
@@ -523,12 +561,14 @@ async def upsert_account(telegram_id: int, username: str, login: str | None,
 
 async def list_accounts(telegram_id: int) -> list[dict]:
     """Возвращает список аккаунтов пользователя:
-    [{id, username, login, is_active, cooldown_until, created_at, updated_at}, ...]
+    [{id, username, login, is_active, cooldown_until, needs_reauth,
+      created_at, updated_at}, ...]
     Активный аккаунт идёт первым."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """
-            SELECT id, username, login, is_active, cooldown_until, created_at, updated_at
+            SELECT id, username, login, is_active, cooldown_until,
+                   COALESCE(needs_reauth, 0), created_at, updated_at
             FROM accounts
             WHERE telegram_id = ?
             ORDER BY is_active DESC, updated_at DESC
@@ -543,8 +583,9 @@ async def list_accounts(telegram_id: int) -> list[dict]:
                     "login": r[2],
                     "is_active": bool(r[3]),
                     "cooldown_until": r[4],
-                    "created_at": r[5],
-                    "updated_at": r[6],
+                    "needs_reauth": bool(r[5]),
+                    "created_at": r[6],
+                    "updated_at": r[7],
                 }
                 for r in rows
             ]
@@ -708,6 +749,9 @@ async def find_available_account(telegram_id: int) -> dict | None:
     Если все аккаунты в кулдауне — возвращает тот, у которого ближайшее
     окончание кулдауна (с полем cooldown_remaining_seconds).
 
+    Аккаунты с needs_reauth=1 в выборку не попадают — после ручного
+    перелогина флаг сбрасывается и аккаунт снова доступен.
+
     Использует BEGIN IMMEDIATE чтобы исключить гонку при параллельной
     подаче нескольких жалоб разными пользователями.
     """
@@ -723,6 +767,7 @@ async def find_available_account(telegram_id: int) -> dict | None:
                        AS remaining
                 FROM accounts
                 WHERE telegram_id = ?
+                  AND COALESCE(needs_reauth, 0) = 0
                   AND (cooldown_until IS NULL
                        OR cooldown_until <= datetime('now'))
                 ORDER BY updated_at ASC
@@ -744,7 +789,8 @@ async def find_available_account(telegram_id: int) -> dict | None:
                     await db.commit()
                     return result
 
-            # Все аккаунты в кулдауне — возвращаем с минимальным остатком
+            # Все аккаунты в кулдауне — возвращаем с минимальным остатком.
+            # Аккаунты с needs_reauth=1 не предлагаем — они всё равно не сработают.
             async with db.execute(
                 """
                 SELECT id, username, login, cookies_json, cooldown_until,
@@ -752,6 +798,7 @@ async def find_available_account(telegram_id: int) -> dict | None:
                        AS remaining
                 FROM accounts
                 WHERE telegram_id = ?
+                  AND COALESCE(needs_reauth, 0) = 0
                 ORDER BY cooldown_until ASC
                 LIMIT 1
                 """,
@@ -1028,6 +1075,7 @@ async def claim_available_account(telegram_id: int,
                 WHERE id = (
                     SELECT id FROM accounts
                     WHERE telegram_id = ?
+                      AND COALESCE(needs_reauth, 0) = 0
                       AND (cooldown_until IS NULL
                            OR cooldown_until <= datetime('now'))
                     ORDER BY updated_at ASC
@@ -1065,6 +1113,32 @@ async def release_account_cooldown(account_id: int) -> None:
         )
         await db.commit()
     logger.info("Кулдаун аккаунта id=%s сброшен.", account_id)
+
+
+async def mark_account_needs_reauth(account_id: int) -> None:
+    """Помечает аккаунт как требующий ручного перелогина.
+
+    Вызывается когда форум вернул 403 / редирект на /login/ при попытке
+    публикации. Такие аккаунты исключаются из пула (find_available_account /
+    claim_available_account) до тех пор, пока админ не сделает повторный
+    /login — upsert_account автоматически сбрасывает флаг needs_reauth=0.
+
+    Дополнительно ставим длинный кулдаун (24 часа), чтобы даже если флаг
+    каким-то образом не отработал в фильтре — аккаунт хотя бы не дёргался
+    в каждой жалобе.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE accounts "
+            "SET needs_reauth = 1, "
+            "    cooldown_until = datetime('now', '+86400 seconds') "
+            "WHERE id = ?",
+            (account_id,),
+        )
+        await db.commit()
+    logger.warning("Аккаунт id=%s помечен needs_reauth=1 — нужен ручной "
+                   "перелогин (/login).", account_id)
+    await _trigger_backup_immediate()
 
 
 # ---------- Шифрованный пароль для авто-перелогина ----------

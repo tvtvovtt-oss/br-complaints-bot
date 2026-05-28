@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from src.config import COMPLAINT_CATEGORY_LABELS
-from src.forum.xenforo import post_complaint, delete_thread, edit_thread_post
+from src.forum.xenforo import post_complaint, delete_thread, edit_thread_post, is_auth_error
 from src.forum.templates import (
     RULES,
     NEEDS_DATE,
@@ -40,13 +40,14 @@ from src.database import (
     get_draft,
     delete_draft,
     enqueue_complaint,
+    mark_account_needs_reauth,
 )
 from src.handlers.common import (
     check_access, _menu_for, is_admin, account_owner_id,
 )
 from src.logger import describe_user
 from src.effects import EFFECT_CONFETTI
-from src.forum.xenforo import apply_account_cookies, load_cookies
+from src.forum.xenforo import apply_account_cookies
 from src.status_monitor import status_label
 from src.validation import (
     validate_nickname,
@@ -106,10 +107,10 @@ async def _pick_account_for_complaint(telegram_id: int) -> tuple[dict | None, st
             f"Самый ранний освободится через <b>{_format_cooldown(remaining)}</b>."
         )
 
-    # Активируем выбранный аккаунт у его владельца (админа), куки в файл —
-    # тоже общие, так что подача жалобы пройдёт от имени этого аккаунта.
-    await set_active_account(owner_id, candidate["id"])
-    apply_account_cookies(candidate["cookies"], account_id=candidate["id"])
+    # Активным аккаунт глобально не делаем — куки публикации передаются
+    # в post_complaint напрямую через cookies=, а cookies.json остаётся
+    # под админскими сценариями (просмотр статусов, ручные команды).
+    # Это критично для параллельной работы нескольких пользователей.
     logger.info("Жалоба будет подана от имени аккаунта «%s» (id=%s, owner=%s).",
                 candidate["username"], candidate["id"], owner_id)
     return candidate, None
@@ -1079,13 +1080,9 @@ async def process_confirm(message: types.Message, state: FSMContext):
     account_name = data.get("complaint_account_name", "?")
     owner_id = account_owner_id(message.from_user.id)
 
-    # Применим куки именно того аккаунта, который выбрали на старте
-    # (вдруг пользователь переключал аккаунт вручную между шагами).
-    if account_id:
-        acc_full = await get_account(account_id)
-        if acc_full:
-            apply_account_cookies(acc_full["cookies"], account_id=account_id)
-            await set_active_account(owner_id, account_id)
+    # Куки берём напрямую из БД — они попадут в post_complaint(cookies=...).
+    # set_active_account / apply_account_cookies глобально не трогаем,
+    # это исключает race на cookies.json при параллельной работе.
 
     logger.info(
         "Пользователь %s подтвердил отправку жалобы. "
@@ -1102,14 +1099,24 @@ async def process_confirm(message: types.Message, state: FSMContext):
     )
 
     # Пытаемся отправить с авто-перебором аккаунтов: если первый аккаунт
-    # получил 403 (нет прав в этом разделе) или другую ошибку, пробуем
-    # ещё один из пула. Лимит — 3 попытки, чтобы не зациклиться.
+    # получил 403 / редирект на /login (нет прав в этом разделе или куки
+    # протухли), пробуем ещё один из пула. Лимит — 3 попытки.
+    #
+    # Куки передаются в post_complaint напрямую: это исключает race на
+    # cookies.json при параллельной работе нескольких пользователей.
     from src.database import list_accounts as _list_accounts
 
     success = False
     result: str = ""
     used_account_id = account_id
     used_account_name = account_name
+    used_account_cookies: dict | None = None
+    if account_id:
+        # Берём свежие куки из БД на момент публикации
+        acc_full = await get_account(account_id)
+        if acc_full and acc_full.get("cookies"):
+            used_account_cookies = acc_full["cookies"]
+
     tried_ids: set[int] = set()
     if account_id:
         tried_ids.add(account_id)
@@ -1118,10 +1125,18 @@ async def process_confirm(message: types.Message, state: FSMContext):
     last_error = ""
 
     for attempt in range(1, 4):
+        if not used_account_cookies:
+            logger.warning("Нет куков для аккаунта id=%s — прерываю.",
+                           used_account_id)
+            success = False
+            result = "Не удалось получить куки выбранного аккаунта."
+            break
+
         success, result = await post_complaint(
             section_id=data["section_id"],
             title=data["title"],
             message=data["bb_code"],
+            cookies=used_account_cookies,
         )
 
         if success:
@@ -1135,17 +1150,24 @@ async def process_confirm(message: types.Message, state: FSMContext):
             used_account_id, last_error,
         )
 
-        # Стоит ли пробовать другой аккаунт
-        retryable_markers = ("403", "Доступ запрещён", "куки", "cookies",
-                              "не авторизован", "csrf", "сессия")
-        is_retryable = any(m.lower() in last_error.lower() for m in retryable_markers)
-        if not is_retryable:
+        # AUTH-ошибка: куки протухли — помечаем аккаунт как нужный перелогин
+        # и переключаемся на следующий аккаунт пула.
+        if is_auth_error(last_error) and used_account_id:
+            try:
+                await mark_account_needs_reauth(used_account_id)
+            except Exception:
+                logger.exception("mark_account_needs_reauth failed")
+        elif not is_auth_error(last_error):
+            # Не AUTH-ошибка — нет смысла пробовать другой аккаунт
+            # (валидация формы, сетевая ошибка, форум упал и т.п.).
             break
 
         # Ищем следующий аккаунт из пула, который ещё не пробовали
         next_acc_full = None
         for acc_short in pool:
             if acc_short["id"] in tried_ids:
+                continue
+            if acc_short.get("needs_reauth"):
                 continue
             full = await get_account(acc_short["id"])
             if full and full.get("cookies"):
@@ -1158,11 +1180,11 @@ async def process_confirm(message: types.Message, state: FSMContext):
 
         used_account_id = next_acc_full["id"]
         used_account_name = next_acc_full["username"]
+        used_account_cookies = next_acc_full["cookies"]
         tried_ids.add(used_account_id)
-        apply_account_cookies(
-            next_acc_full["cookies"], account_id=used_account_id,
-        )
-        await set_active_account(owner_id, used_account_id)
+        # set_active_account здесь не делаем — это глобальный shared state,
+        # который мешает параллельной работе. Аккаунт «активен» только для
+        # этой публикации, в скоупе локальной переменной used_account_cookies.
         logger.info("Переключился на «%s» (id=%s) для повторной попытки %d.",
                     used_account_name, used_account_id, attempt + 1)
         try:
@@ -1182,14 +1204,13 @@ async def process_confirm(message: types.Message, state: FSMContext):
         logger.info("Жалоба от %s опубликована. URL: %s",
                     describe_user(message.from_user), result)
 
-        # Кулдаун на использованный аккаунт + сохранение свежих кук в БД
+        # Кулдаун на использованный аккаунт. Свежие куки в БД не зеркалим:
+        # post_complaint(cookies=...) не модифицирует cookies.json, а
+        # `load_cookies()` тут вернул бы куки совсем другого аккаунта
+        # (того, кто последним вызывал apply_account_cookies из админки).
+        # Значит, перезапись в БД старого/чужого набора — реальный риск.
         if account_id:
             await set_account_cooldown(account_id, COMPLAINT_COOLDOWN_SECONDS)
-            try:
-                await update_account_cookies(account_id, load_cookies())
-            except Exception:
-                logger.debug("Не удалось обновить куки аккаунта в БД",
-                             exc_info=True)
 
         await add_complaint(
             telegram_id=message.from_user.id,
@@ -1208,19 +1229,18 @@ async def process_confirm(message: types.Message, state: FSMContext):
         # Жалоба отправлена — можно удалить черновик
         await delete_draft(message.from_user.id)
 
-        # Подбираем следующий свободный аккаунт — для удобства следующей жалобы
+        # Подбираем следующий свободный аккаунт — только для информации.
+        # Глобальный «активный» в cookies.json больше не переключаем
+        # (это глобальный side effect, мешающий параллельной работе).
         next_acc = await find_available_account(owner_id)
         next_info = ""
         if next_acc:
             if next_acc["available"]:
-                # Сразу переключаем на свободный
-                await set_active_account(owner_id, next_acc["id"])
-                apply_account_cookies(next_acc["cookies"], account_id=next_acc["id"])
                 if is_admin(message.from_user.id):
                     next_info = (
-                        f"\n\n🔄 Активный аккаунт переключён на "
-                        f"<b>{escape(next_acc['username'])}</b> "
-                        f"— можно сразу подать следующую жалобу."
+                        f"\n\n🔄 В пуле есть свободный аккаунт "
+                        f"<b>{escape(next_acc['username'])}</b> — "
+                        f"можно сразу подать следующую жалобу."
                     )
             else:
                 rem = _format_cooldown(next_acc["cooldown_remaining_seconds"])

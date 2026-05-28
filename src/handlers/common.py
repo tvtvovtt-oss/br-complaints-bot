@@ -769,6 +769,11 @@ def _format_accounts_list(accounts: list[dict]) -> str:
 
         lines.append(f"{marker}<b>{escape(acc['username'])}</b> "
                      f"<code>id={acc['id']}</code>{login}")
+        if acc.get("needs_reauth"):
+            lines.append(
+                "   ⚠️ <b>Куки протухли — нужен повторный /login.</b>\n"
+                "   <i>Аккаунт временно исключён из пула публикации.</i>"
+            )
         if cd_str:
             lines.append(cd_str)
         lines.append(f"   <i>обновлён: {escape(str(acc['updated_at']))}</i>")

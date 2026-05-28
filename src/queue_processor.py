@@ -26,8 +26,9 @@ from src.database import (
     claim_available_account,
     add_complaint,
     update_account_cookies,
+    mark_account_needs_reauth,
 )
-from src.forum.xenforo import post_complaint, apply_account_cookies, load_cookies
+from src.forum.xenforo import post_complaint, is_auth_error
 
 logger = logging.getLogger(__name__)
 
@@ -87,17 +88,24 @@ async def _process_one(bot: Bot, item: dict) -> None:
 
     logger.info("Жалоба из очереди #%s публикуется от имени «%s» (попытка %d).",
                 qid, account["username"], item["attempts"] + 1)
-    apply_account_cookies(account["cookies"], account_id=account["id"])
 
+    # Передаём куки явно — это исключает race на cookies.json при
+    # параллельных воркерах. post_complaint не трогает общий файл,
+    # работает в изолированном httpx-клиенте.
     success, result = await post_complaint(
         section_id=section_id,
         title=item["title"],
         message=item["bb_code"],
+        cookies=account["cookies"],
     )
 
     if success:
-        # Обновляем БД, сохраняем в complaints, шлём пользователю ссылку
-        await update_account_cookies(account["id"], load_cookies())
+        # Сохраняем в БД ссылку на тему и шлём пользователю уведомление.
+        # Свежие куки (xf_session/xf_csrf могли обновиться) не зеркалим —
+        # post_complaint в режиме cookies= не имеет доступа к свежему jar.
+        # Это компромисс: альтернатива — race на cookies.json. Куки в БД
+        # остаются «как при логине» — XenForo сам обновит при следующем
+        # запросе через apply_account_cookies в админских сценариях.
         await mark_queue_done(qid, result)
         await add_complaint(
             telegram_id=telegram_id,
@@ -112,9 +120,20 @@ async def _process_one(bot: Bot, item: dict) -> None:
             f"🎯 Цель: <b>{escape(target)}</b>\n"
             f"🔗 <a href=\"{escape(result)}\">Открыть тему на форуме</a>")
     else:
+        # AUTH-ошибка — куки протухли, помечаем аккаунт как нужный перелогин.
+        # Жалобу возвращаем в pending (не failed) — другой аккаунт её
+        # подхватит на следующей итерации.
+        if is_auth_error(str(result)):
+            await mark_account_needs_reauth(account["id"])
+            await increment_queue_attempt(qid, error=str(result))
+            logger.warning(
+                "Жалоба #%s: аккаунт «%s» нуждается в перелогине, "
+                "пробуем другим на следующей итерации.",
+                qid, account["username"],
+            )
+            return
+
         # increment_queue_attempt поднимает attempts на 1.
-        # После инкремента у нас будет item["attempts"] + 1 попытка.
-        # Если это последняя — помечаем failed.
         await increment_queue_attempt(qid, error=str(result))
         new_attempts = item["attempts"] + 1
         logger.warning("Жалоба #%s провалила попытку %d/%d: %s",

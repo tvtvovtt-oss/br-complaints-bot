@@ -243,6 +243,18 @@ class _session:
             await self._client.aclose()
 
 
+def _is_login_redirect(url) -> bool:
+    """Проверяет, перенаправлен ли запрос на страницу входа (из-за отсутствия/устаревания сессии)."""
+    url_str = str(url).lower()
+    if "/login/" in url_str or url_str.rstrip("/").endswith("/login"):
+        return True
+    if "?" in url_str:
+        query = url_str.split("?", 1)[1]
+        if query.startswith("login/") or query == "login":
+            return True
+    return False
+
+
 # ---------------- Авторизация ----------------
 
 def _extract_user_id(html: str) -> int:
@@ -313,9 +325,9 @@ async def _resolve_username(client: httpx.AsyncClient) -> str:
 
 # ---------------- Авторизация ----------------
 
-LOGIN_URL = f"{FORUM_URL}/login/"
-LOGIN_POST_URL = f"{FORUM_URL}/login/login"
-TWO_STEP_URL = f"{FORUM_URL}/login/two-step"
+LOGIN_URL = f"{FORUM_URL}/index.php?login/"
+LOGIN_POST_URL = f"{FORUM_URL}/index.php?login/login"
+TWO_STEP_URL = f"{FORUM_URL}/index.php?login/two-step"
 
 # Регулярка для извлечения трёх hex-строк AES (a, b, c) из заглушки DDoS-Guard
 _DDOS_KEYS_RE = re.compile(
@@ -475,25 +487,55 @@ async def forum_login(login: str, password: str) -> dict:
         # Маленькая пауза — браузер тоже не молниеносно навигирует
         await asyncio.sleep(0.5)
 
-        # 1. Получаем CSRF и стартовые куки с /login/
+        # 1. Получаем CSRF и стартовые куки со страницы входа
         r = await client.get(LOGIN_URL)
         if r.status_code == 403:
-            logger.error("HTTP 403 при загрузке /login/ — даже после прогрева. "
-                          "Возможно, /login/ защищён отдельно или IP блокируется.")
+            # Снимаем подробную диагностику — что именно прислал форум.
+            body_preview = (r.text or "")[:800].replace("\n", " ")
+            resp_headers = dict(r.headers)
+            request_headers = dict(r.request.headers) if r.request else {}
+            jar_names = sorted([c.name for c in client.cookies.jar])
+            logger.error(
+                "HTTP 403 на странице входа после прогрева главной.\n"
+                "  resp.headers: %r\n"
+                "  body[:800]: %r\n"
+                "  request.headers: %r\n"
+                "  jar cookies: %s",
+                resp_headers, body_preview, request_headers, jar_names,
+            )
+            # Попытка №2: повторим с заголовком как у обычной навигации
+            # Chrome (без X-Requested-With и т.п.). Уже в HEADERS, но
+            # phpMyAdmin и nginx иногда хотят явно `Cache-Control: max-age=0`.
+            try:
+                retry = await client.get(LOGIN_URL, headers={
+                    **HEADERS,
+                    "Cache-Control": "max-age=0",
+                    "Sec-Fetch-Site": "same-origin",
+                })
+                if retry.status_code == 200:
+                    r = retry
+                    logger.info("Вторая попытка входа прошла (Cache-Control max-age=0).")
+                else:
+                    logger.warning("Вторая попытка входа — HTTP %s.",
+                                    retry.status_code)
+            except Exception:
+                logger.exception("Вторая попытка входа упала.")
+
+        if r.status_code == 403:
             return {"status": "error",
                     "message": (
-                        "Форум вернул 403 на странице /login/ "
+                        "Форум вернул 403 на странице входа "
                         "(после успешного прогрева главной).\n\n"
-                        "Скорее всего IP в чёрном списке только для /login/. "
+                        "Скорее всего IP вашего сервера заблокирован. "
                         "Залейте свежий cookies.json вручную как обходной путь."
                     )}
         if r.status_code != 200:
-            logger.error("HTTP %s при загрузке /login/", r.status_code)
+            logger.error("HTTP %s при загрузке страницы входа", r.status_code)
             return {"status": "error",
                     "message": f"Форум вернул HTTP {r.status_code} на странице входа."}
 
         if "vddosw3data.js" in r.text or "slowAES" in r.text:
-            logger.warning("На /login/ снова DDoS-Guard заглушка — решаю на её HTML.")
+            logger.warning("На странице входа снова DDoS-Guard заглушка — решаю на её HTML.")
             fresh = _solve_ddos_guard_from_html(r.text)
             if fresh:
                 client.cookies.set("R3ACTLB", fresh,
@@ -511,10 +553,10 @@ async def forum_login(login: str, password: str) -> dict:
 
         csrf = _extract_csrf(r.text)
         if not csrf:
-            logger.error("CSRF-токен не найден на /login/.")
+            logger.error("CSRF-токен не найден на странице входа.")
             return {"status": "error", "message": "Не удалось получить CSRF-токен формы входа."}
 
-        # 2. Отправляем форму /login/login
+        # 2. Отправляем форму входа
         payload = {
             "login": login,
             "password": password,
@@ -522,7 +564,7 @@ async def forum_login(login: str, password: str) -> dict:
             "register": "0",
             "_xfToken": csrf,
             "_xfRedirect": f"{FORUM_URL}/",
-            "_xfRequestUri": "/login/login",
+            "_xfRequestUri": "/index.php?login/login",
             "_xfWithData": "1",
             "_xfResponseType": "json",
         }
@@ -550,6 +592,14 @@ async def forum_login(login: str, password: str) -> dict:
 
             html_content = (resp_json.get("html") or {}).get("content", "")
             redirect_url = resp_json.get("redirect", "")
+
+            if html_content:
+                soup = _soup(html_content)
+                err_div = soup.find(class_=re.compile("blockMessage.*error"))
+                if err_div:
+                    msg = err_div.text.strip()
+                    logger.warning("Форум вернул ошибку входа из HTML-блока: %s", msg)
+                    return {"status": "error", "message": msg}
 
             if "two-step" in redirect_url or "two-step" in html_content:
                 # Загружаем страницу 2FA в этом же клиенте, оставляем его открытым
@@ -736,7 +786,7 @@ async def forum_submit_2fa(state: dict, code: str,
             "confirm": "1",
             "_xfToken": csrf,
             "_xfRedirect": f"{FORUM_URL}/",
-            "_xfRequestUri": "/login/two-step",
+            "_xfRequestUri": "/index.php?login/two-step",
             "_xfWithData": "1",
             "_xfResponseType": "json",
         }
@@ -1030,128 +1080,180 @@ def _extract_required_prefix(soup: BeautifulSoup) -> Optional[str]:
     return chosen
 
 
-async def post_complaint(section_id: int, title: str, message: str) -> tuple[bool, str]:
+async def post_complaint(section_id: int, title: str, message: str,
+                           cookies: dict | None = None) -> tuple[bool, str]:
     """Публикация темы (жалобы) в указанный раздел форума.
-    Возвращает (успех, ссылка_на_тему/текст_ошибки)."""
+
+    Если `cookies` переданы — публикация идёт ИМЕННО с этими куками,
+    а cookies.json не используется и не перезаписывается. Это нужно для
+    параллельной работы пула (queue_processor): несколько корутин могут
+    публиковать одновременно от имени разных аккаунтов, не мешая друг другу.
+
+    Если `cookies=None` — старое поведение: куки читаются из cookies.json,
+    свежие куки пишутся обратно в cookies.json.
+
+    Возвращает (успех, результат). При успехе — ссылка на тему. При
+    ошибке — текст; для ошибок «нужен перелогин» (403/redirect на /login/)
+    префикс ответа = 'AUTH: ', чтобы вызывающий мог пометить аккаунт как
+    needs_reauth и не дёргать его в следующих запросах.
+    """
     started = time.monotonic()
     logger.info("Публикую жалобу в раздел node_id=%s. Заголовок: «%s», длина тела: %d симв.",
                 section_id, title, len(message))
 
-    cookies = load_cookies()
-    if not cookies:
-        logger.warning("Невозможно отправить жалобу: куки отсутствуют.")
-        return False, "Отсутствуют куки. Загрузите файл cookies.json."
+    use_session = cookies is None
+    if use_session:
+        cookies = load_cookies()
+        if not cookies:
+            logger.warning("Невозможно отправить жалобу: куки отсутствуют.")
+            return False, "Отсутствуют куки. Загрузите файл cookies.json."
+    else:
+        if not cookies:
+            return False, "AUTH: переданы пустые куки."
 
     post_url = f"{FORUM_URL}/forums/{section_id}/post-thread"
 
-    async with _session() as client:
-        try:
-            # 1. Загружаем форму создания темы (CSRF + список префиксов)
-            logger.debug("Шаг 1/3: запрашиваю форму создания темы — %s", post_url)
-            get_response = await client.get(post_url)
+    if use_session:
+        client_ctx = _session()
+    else:
+        # Изолированный клиент: куки только локально, в файл не пишем.
+        client_ctx = httpx.AsyncClient(
+            cookies=cookies, headers=HEADERS,
+            follow_redirects=True, timeout=20.0,
+        )
 
-            # DDoS-Guard?
-            if (get_response.status_code == 200 and
-                    ("vddosw3data.js" in get_response.text or "slowAES" in get_response.text)):
-                logger.info("На форме создания темы DDoS-Guard заглушка — обновляю R3ACTLB.")
-                fresh = await _solve_ddos_guard()
-                if fresh:
-                    client.cookies.set("R3ACTLB", fresh,
-                                        domain=FORUM_HOST, path="/")
-                    save_cookies({**cookies, "R3ACTLB": fresh})
-                    get_response = await client.get(post_url)
-
-            if get_response.status_code != 200:
-                if get_response.status_code == 403:
-                    # Не критическая ошибка — логируем как WARNING, чтобы
-                    # error_reporter не дёргал админа: возможно, аккаунт
-                    # просто не имеет прав в этом разделе и хендлер сейчас
-                    # переключится на следующий из пула.
-                    logger.warning("HTTP 403 при открытии формы (раздел %s). "
-                                    "Возможно, у аккаунта нет прав.",
-                                    section_id)
-                    return False, (
-                        f"Доступ запрещён (HTTP 403). У аккаунта нет прав "
-                        f"в разделе {section_id}, или сессия истекла."
-                    )
-                logger.error("HTTP %s при открытии формы создания темы.", get_response.status_code)
-                return False, f"Не удалось открыть страницу создания темы. HTTP {get_response.status_code}."
-
-            soup = _soup(get_response.text)
-
-            csrf_token = _extract_csrf(get_response.text)
-            if not csrf_token:
-                logger.error("CSRF-токен не найден на странице создания темы.")
-                return False, "Не удалось найти CSRF-токен защиты XenForo на странице."
-            logger.debug("Шаг 2/3: CSRF-токен получен (длина %d).", len(csrf_token))
-
-            prefix_id = _extract_required_prefix(soup)
-
-            payload = {
-                "title": title,
-                "message": message,
-                "_xfToken": csrf_token,
-                "_xfRequestUri": f"/forums/{section_id}/post-thread",
-                "_xfWithData": "1",
-                "_xfResponseType": "json",
-            }
-            if prefix_id is not None:
-                payload["prefix_id"] = prefix_id
-
-            ajax_headers = {
-                **HEADERS,
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": FORUM_URL,
-            }
-            logger.debug("Шаг 3/3: POST %s (AJAX, %d полей)...", post_url, len(payload))
-            post_response = await client.post(post_url, data=payload, headers=ajax_headers)
-
-            updated = _flatten_cookies(client)
-            if updated:
-                save_cookies({**cookies, **updated})
-
-            elapsed = time.monotonic() - started
-            if post_response.status_code != 200:
-                logger.error("Форум вернул HTTP %s при отправке жалобы (за %.2f с).",
-                             post_response.status_code, elapsed)
-                return False, f"Ошибка отправки формы. HTTP {post_response.status_code}."
-
+    try:
+        async with client_ctx as client:
             try:
-                result_json = post_response.json()
-            except (ValueError, json.JSONDecodeError):
-                snippet = post_response.text[:200].replace("\n", " ")
-                logger.error("Форум вернул не-JSON ответ. Начало: %s", snippet)
-                return False, f"Форум вернул некорректный ответ (не JSON): {snippet}"
+                # 1. Загружаем форму создания темы (CSRF + список префиксов)
+                logger.debug("Шаг 1/3: запрашиваю форму создания темы — %s", post_url)
+                get_response = await client.get(post_url)
 
-            if "errors" in result_json:
-                errors = result_json["errors"]
-                if isinstance(errors, list):
-                    error_msg = "; ".join(errors)
-                elif isinstance(errors, dict):
-                    error_msg = "; ".join(str(v) for v in errors.values())
-                else:
-                    error_msg = str(errors)
-                logger.warning("Форум вернул ошибку валидации формы: %s", error_msg)
-                return False, f"Ошибка форума: {error_msg}"
+                # DDoS-Guard?
+                if (get_response.status_code == 200 and
+                        ("vddosw3data.js" in get_response.text or "slowAES" in get_response.text)):
+                    logger.info("На форме создания темы DDoS-Guard заглушка — обновляю R3ACTLB.")
+                    fresh = await _solve_ddos_guard()
+                    if fresh:
+                        client.cookies.set("R3ACTLB", fresh,
+                                            domain=FORUM_HOST, path="/")
+                        if use_session:
+                            save_cookies({**cookies, "R3ACTLB": fresh})
+                        get_response = await client.get(post_url)
 
-            redirect_url = result_json.get("redirect")
-            if redirect_url:
-                if redirect_url.startswith("/"):
-                    redirect_url = FORUM_URL + redirect_url
-                logger.info("Жалоба успешно опубликована за %.2f с. URL темы: %s",
-                            elapsed, redirect_url)
-                return True, redirect_url
+                # Редирект на /login/ — куки протухли, нужен перелогин.
+                if _is_login_redirect(get_response.url):
+                    logger.warning("При открытии формы (раздел %s) редирект "
+                                    "на /login/ — куки протухли.", section_id)
+                    return False, ("AUTH: сессия истекла. Куки протухли, "
+                                    "нужен повторный /login.")
 
-            logger.warning("Форум принял запрос, но не вернул URL новой темы. Ответ: %s",
-                           str(result_json)[:300])
-            return False, "Тема отправлена, но форум не вернул ссылку перенаправления."
+                if get_response.status_code != 200:
+                    if get_response.status_code == 403:
+                        # Не критическая ошибка — логируем как WARNING, чтобы
+                        # error_reporter не дёргал админа: возможно, аккаунт
+                        # просто не имеет прав в этом разделе и хендлер сейчас
+                        # переключится на следующий из пула.
+                        logger.warning("HTTP 403 при открытии формы (раздел %s). "
+                                        "Возможно, у аккаунта нет прав.",
+                                        section_id)
+                        return False, (
+                            f"AUTH: HTTP 403. У аккаунта нет прав в разделе "
+                            f"{section_id}, или сессия истекла."
+                        )
+                    logger.error("HTTP %s при открытии формы создания темы.", get_response.status_code)
+                    return False, f"Не удалось открыть страницу создания темы. HTTP {get_response.status_code}."
 
-        except httpx.RequestError as e:
-            logger.error("Сетевая ошибка при отправке жалобы: %s", e)
-            return False, f"Ошибка сети при связи с форумом: {e}"
-        except Exception as e:
-            logger.exception("Неизвестная ошибка при отправке жалобы")
-            return False, f"Внутренняя ошибка отправки: {e}"
+                soup = _soup(get_response.text)
+
+                csrf_token = _extract_csrf(get_response.text)
+                if not csrf_token:
+                    logger.error("CSRF-токен не найден на странице создания темы.")
+                    return False, "Не удалось найти CSRF-токен защиты XenForo на странице."
+                logger.debug("Шаг 2/3: CSRF-токен получен (длина %d).", len(csrf_token))
+
+                prefix_id = _extract_required_prefix(soup)
+
+                payload = {
+                    "title": title,
+                    "message": message,
+                    "_xfToken": csrf_token,
+                    "_xfRequestUri": f"/forums/{section_id}/post-thread",
+                    "_xfWithData": "1",
+                    "_xfResponseType": "json",
+                }
+                if prefix_id is not None:
+                    payload["prefix_id"] = prefix_id
+
+                ajax_headers = {
+                    **HEADERS,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Origin": FORUM_URL,
+                }
+                logger.debug("Шаг 3/3: POST %s (AJAX, %d полей)...", post_url, len(payload))
+                post_response = await client.post(post_url, data=payload, headers=ajax_headers)
+
+                if use_session:
+                    updated = _flatten_cookies(client)
+                    if updated:
+                        save_cookies({**cookies, **updated})
+
+                elapsed = time.monotonic() - started
+                if post_response.status_code != 200:
+                    logger.error("Форум вернул HTTP %s при отправке жалобы (за %.2f с).",
+                                 post_response.status_code, elapsed)
+                    return False, f"Ошибка отправки формы. HTTP {post_response.status_code}."
+
+                try:
+                    result_json = post_response.json()
+                except (ValueError, json.JSONDecodeError):
+                    snippet = post_response.text[:200].replace("\n", " ")
+                    logger.error("Форум вернул не-JSON ответ. Начало: %s", snippet)
+                    return False, f"Форум вернул некорректный ответ (не JSON): {snippet}"
+
+                if "errors" in result_json:
+                    errors = result_json["errors"]
+                    if isinstance(errors, list):
+                        error_msg = "; ".join(errors)
+                    elif isinstance(errors, dict):
+                        error_msg = "; ".join(str(v) for v in errors.values())
+                    else:
+                        error_msg = str(errors)
+                    logger.warning("Форум вернул ошибку валидации формы: %s", error_msg)
+                    return False, f"Ошибка форума: {error_msg}"
+
+                redirect_url = result_json.get("redirect")
+                if redirect_url:
+                    if redirect_url.startswith("/"):
+                        redirect_url = FORUM_URL + redirect_url
+                    logger.info("Жалоба успешно опубликована за %.2f с. URL темы: %s",
+                                elapsed, redirect_url)
+                    return True, redirect_url
+
+                logger.warning("Форум принял запрос, но не вернул URL новой темы. Ответ: %s",
+                               str(result_json)[:300])
+                return False, "Тема отправлена, но форум не вернул ссылку перенаправления."
+
+            except httpx.RequestError as e:
+                logger.error("Сетевая ошибка при отправке жалобы: %s", e)
+                return False, f"Ошибка сети при связи с форумом: {e}"
+            except Exception as e:
+                logger.exception("Неизвестная ошибка при отправке жалобы")
+                return False, f"Внутренняя ошибка отправки: {e}"
+    finally:
+        # _session() сам закрывает в __aexit__; для изолированного клиента
+        # async with тоже сам всё сделает — finally здесь только для
+        # симметрии и чтобы PyCharm не ругался.
+        pass
+
+
+def is_auth_error(error_text: str) -> bool:
+    """Проверяет, что ошибка от post_complaint означает «нужен перелогин».
+    Используется queue_processor / complaint handler чтобы автоматически
+    помечать аккаунт needs_reauth и переключаться на следующий из пула."""
+    if not error_text:
+        return False
+    return error_text.startswith("AUTH:") or error_text.startswith("AUTH ")
 
 
 # ---------------- Автообнаружение структуры форума ----------------
@@ -1488,7 +1590,7 @@ async def fetch_thread_admin_comment(
                                             domain=FORUM_HOST, path="/")
                         r = await client.get(thread_url)
                         html = r.text
-                if "/login/" in str(r.url):
+                if _is_login_redirect(r.url):
                     return None
                 return _extract_last_admin_comment(_soup(html))
             except httpx.RequestError as e:
@@ -1585,7 +1687,7 @@ async def fetch_complaint_status(
                         html = r.text
 
                 # Если переадресовало в /login/ — значит куки не подходят
-                if "/login/" in str(r.url) or "log-in" in html.lower()[:5000]:
+                if _is_login_redirect(r.url) or "log-in" in html.lower()[:5000]:
                     logger.info("Тема %s — куки не пускают (редирект на login).",
                                 thread_url)
                     return None, None, None

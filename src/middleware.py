@@ -314,19 +314,35 @@ class UserTrackingMiddleware(BaseMiddleware):
 
     Используется для статистики и рассылки. Подключается ПОСЛЕ Throttle/Ban
     чтобы заблокированные/спамящие не попадали в счётчики.
+
+    Чтобы не дёргать БД на каждое сообщение, держим in-memory кеш:
+    user_id -> last_track_at_monotonic. Обновляем запись в БД не чаще
+    раза в TRACK_REFRESH_SECONDS — этого достаточно для статистики.
     """
+
+    TRACK_REFRESH_SECONDS = 5 * 60
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_track: dict[int, float] = {}
 
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
         if user is not None:
-            try:
-                from src.database import track_user
-                await track_user(
-                    telegram_id=user.id,
-                    username=user.username,
-                    full_name=user.full_name,
-                    language_code=getattr(user, "language_code", None),
-                )
-            except Exception:
-                logger.debug("track_user failed", exc_info=True)
+            now = time.monotonic()
+            last = self._last_track.get(user.id, 0.0)
+            if (now - last) >= self.TRACK_REFRESH_SECONDS:
+                self._last_track[user.id] = now
+                try:
+                    from src.database import track_user
+                    await track_user(
+                        telegram_id=user.id,
+                        username=user.username,
+                        full_name=user.full_name,
+                        language_code=getattr(user, "language_code", None),
+                    )
+                except Exception:
+                    logger.debug("track_user failed", exc_info=True)
+                    # Откатываем отметку, чтобы попробовать снова в следующий раз
+                    self._last_track.pop(user.id, None)
         return await handler(event, data)
