@@ -336,7 +336,22 @@ def _solve_from_html(html: str) -> Optional[str]:
         return None
     m = _DDOS_KEYS_RE.search(html)
     if not m:
-        logger.debug("В заглушке DDoS-Guard не нашлись AES-ключи.")
+        # Поднято с DEBUG до WARNING: это решающий признак того, что формат
+        # челленджа сменился (наша регулярка из трёх 32-hex строк больше не
+        # подходит). Логируем срез страницы вокруг сигнатуры, чтобы увидеть
+        # новый формат ключей и не гадать вслепую.
+        anchor = html.find("vddosw3data")
+        if anchor < 0:
+            anchor = html.find("slowAES")
+        snippet = html[max(0, anchor - 100): anchor + 400] if anchor >= 0 else html[:400]
+        # Сколько вообще длинных hex-строк на странице и какой они длины —
+        # покажет, сменилась ли длина ключа (было 32).
+        hex_lens = sorted({len(h) for h in re.findall(r'"([0-9a-fA-F]{8,})"', html)})
+        logger.warning(
+            "DDoS-Guard: AES-ключи не найдены регуляркой (формат челленджа мог "
+            "смениться). Длины hex-строк на странице: %s. Срез: %r",
+            hex_lens or "—", snippet,
+        )
         return None
     a_hex, b_hex, c_hex = m.group(1), m.group(2), m.group(3)
 
@@ -472,6 +487,10 @@ async def forum_login(login: str, password: str) -> dict:
         # Если DDoS-Guard всё ещё держит challenge — пробуем альтернативный
         # путь /index.php?login/ — в некоторых конфигурациях BR XenForo
         # этот path не блокируется DDoS-Guard'ом.
+        # URL формы входа — может смениться на alt-path если /login/ заблокирован.
+        active_login_get_url = LOGIN_URL
+        active_login_post_url = LOGIN_POST_URL
+
         if (r.status_code == 403
                 or "vddosw3data" in r.text or "slowAES" in r.text):
             alt_login_url = f"{FORUM_URL}/index.php?login/"
@@ -482,7 +501,11 @@ async def forum_login(login: str, password: str) -> dict:
                                           persist_cookie=True)
             if r2.status_code == 200 and "vddosw3data" not in r2.text:
                 r = r2
-                logger.info("Альтернативный login path сработал.")
+                active_login_get_url = alt_login_url
+                # POST тоже должен идти на alt-path — иначе DDoS-Guard режет его 403
+                active_login_post_url = f"{FORUM_URL}/index.php?login/login"
+                logger.info("Альтернативный login path сработал, POST → %s",
+                            active_login_post_url)
 
         if r.status_code != 200:
             logger.error("HTTP %s при загрузке страницы входа", r.status_code)
@@ -507,10 +530,11 @@ async def forum_login(login: str, password: str) -> dict:
 
         csrf = _extract_csrf(r.text)
         if not csrf:
-            logger.error("CSRF-токен не найден на /login/.")
+            logger.error("CSRF-токен не найден на %s.", active_login_get_url)
             return {"status": "error", "message": "Не удалось получить CSRF-токен формы входа."}
 
-        # 2. Отправляем форму /login/login
+        # 2. Отправляем форму входа
+        _post_uri = active_login_post_url.replace(FORUM_URL, "") or "/login/login"
         payload = {
             "login": login,
             "password": password,
@@ -518,14 +542,16 @@ async def forum_login(login: str, password: str) -> dict:
             "register": "0",
             "_xfToken": csrf,
             "_xfRedirect": f"{FORUM_URL}/",
-            "_xfRequestUri": "/login/login",
+            "_xfRequestUri": _post_uri,
             "_xfWithData": "1",
             "_xfResponseType": "json",
         }
-        ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": LOGIN_URL}
-        r2 = await client.post(LOGIN_POST_URL, data=payload, headers=ajax)
-        logger.debug("POST /login/login -> HTTP %s, content-type %s",
-                     r2.status_code, r2.headers.get("content-type"))
+        ajax = {**HEADERS, "X-Requested-With": "XMLHttpRequest",
+                "Referer": active_login_get_url}
+        r2 = await client.post(active_login_post_url, data=payload, headers=ajax)
+        logger.debug("POST %s -> HTTP %s, content-type %s",
+                     active_login_post_url, r2.status_code,
+                     r2.headers.get("content-type"))
 
         try:
             resp_json = r2.json()
@@ -688,9 +714,36 @@ async def _start_two_step(client: httpx.AsyncClient, redirect_url: str,
     # DDoS-Guard может на странице 2FA снова отдать challenge — решим
     # на ТОЙ ЖЕ сессии (иначе R3ACTLB не подойдёт и будет HTTP 403).
     page = await _ensure_no_ddos(client, page, target, persist_cookie=True)
+
+    # Если /login/two-step заблокирован DDoS-Guard'ом — пробуем alt-path.
+    # Тот же трюк что с /index.php?login/ для страницы входа.
+    if page.status_code == 403 or "vddosw3data" in page.text or "slowAES" in page.text:
+        # Вычленяем query-string из оригинального URL чтобы не потерять
+        # _xfRedirect и remember параметры
+        parsed = httpx.URL(target)
+        _raw_qs = parsed.query  # bytes в httpx
+        _qs_str = (_raw_qs.decode() if isinstance(_raw_qs, bytes) else _raw_qs) or ""
+        # КРИТИЧНО: в форме index.php?ROUTE параметры присоединяются через "&",
+        # а НЕ через второй "?". Иначе query-string получается
+        # "login/two-step?_xfRedirect=...&remember=1" — XenForo видит "=" в
+        # сегменте маршрута, считает маршрут пустым и роутит на главную доски.
+        # На GET это маскировалось redirect'ом pending-2FA (httpx его
+        # отслеживает и форма всё же грузилась), но AJAX-POST с кодом уходил
+        # на главную: ответ {html: индекс доски, status: ok} без redirect, и
+        # сессия не активировалась («код принят, но логина нет»).
+        qs = ("&" + _qs_str) if _qs_str else ""
+        alt_two_step = f"{FORUM_URL}/index.php?login/two-step{qs}"
+        logger.warning("2FA URL вернул %s — пробую alt-path %s",
+                       page.status_code, alt_two_step)
+        page2 = await client.get(alt_two_step)
+        page2 = await _ensure_no_ddos(client, page2, alt_two_step, persist_cookie=True)
+        if page2.status_code == 200 and "vddosw3data" not in page2.text:
+            page = page2
+            target = alt_two_step
+            logger.info("Alt 2FA path сработал: %s", target)
+
     if page.status_code == 403:
-        logger.error("HTTP 403 на странице 2FA даже после DDoS-Guard challenge. "
-                     "Возможно, форум требует браузер с реальным JS.")
+        logger.error("HTTP 403 на странице 2FA даже после DDoS-Guard challenge и alt-path.")
         return {"status": "error",
                 "message": ("Форум вернул HTTP 403 на странице 2FA. "
                             "Возможно, IP сервера в чёрном списке "
@@ -763,6 +816,18 @@ async def forum_submit_2fa(state: dict, code: str,
     two_step_url = state.get("two_step_url", TWO_STEP_URL)
 
     try:
+        # _xfRequestUri должен указывать на ЛОГИЧЕСКИЙ роут two-step, а не на
+        # "/index.php". Когда страница 2FA пришла через alt-path
+        # (/index.php?login/two-step?...), httpx.URL(...).path == "/index.php" —
+        # и XenForo, получив POST с _xfRequestUri=/index.php, не находит
+        # отложенного 2FA-пользователя в контексте и просто редиректит на
+        # /login/, не активируя сессию (код «принят», но логина нет).
+        _ts_path = httpx.URL(two_step_url).path or ""
+        if "two-step" in _ts_path:
+            _two_step_uri = _ts_path
+        else:
+            # alt-path: реальный роут зашит в query (?login/two-step?...)
+            _two_step_uri = "/login/two-step"
         payload = {
             "code": code,
             "provider": provider,
@@ -771,7 +836,7 @@ async def forum_submit_2fa(state: dict, code: str,
             "confirm": "1",
             "_xfToken": csrf,
             "_xfRedirect": f"{FORUM_URL}/",
-            "_xfRequestUri": "/login/two-step",
+            "_xfRequestUri": _two_step_uri,
             "_xfWithData": "1",
             "_xfResponseType": "json",
         }
@@ -781,8 +846,8 @@ async def forum_submit_2fa(state: dict, code: str,
             "Referer": two_step_url,
         }
         r = await client.post(two_step_url, data=payload, headers=ajax)
-        logger.debug("POST %s -> HTTP %s, content-type=%s",
-                     two_step_url, r.status_code, r.headers.get("content-type"))
+        logger.info("2FA POST %s -> HTTP %s (_xfRequestUri=%s, провайдер=%s)",
+                    two_step_url, r.status_code, _two_step_uri, provider)
 
         try:
             resp_json = r.json()
@@ -800,6 +865,30 @@ async def forum_submit_2fa(state: dict, code: str,
                 return {"status": "error", "message": msg}
 
             redirect_url = resp_json.get("redirect")
+            # redirect — ГЛАВНЫЙ диагностический признак. Если форум принял код
+            # и реально залогинил — redirect ведёт на "/" или профиль. Если же
+            # POST не нашёл отложенного 2FA-состояния в сессии (сломалась
+            # преемственность сессии или роут) — XenForo без ошибки редиректит
+            # обратно на /login/. Логируем на INFO, чтобы видеть в проде.
+            logger.info("2FA принят форумом без ошибок. redirect=%r, ключи ответа: %s",
+                        redirect_url, sorted(resp_json.keys()))
+            if not redirect_url:
+                # РЕШАЮЩАЯ ДИАГНОСТИКА: форум вернул html-перерисовку вместо
+                # redirect. errors пуст, но логина нет — настоящая причина
+                # лежит в этом html (например «срок действия кода истёк»,
+                # «неверный код», скрытое поле, требование капчи и т.п.).
+                # Раньше мы его выбрасывали. Достаём content/h1 и логируем.
+                _html = resp_json.get("html")
+                if isinstance(_html, dict):
+                    _content = _html.get("content") or _html.get("h1") or ""
+                else:
+                    _content = _html or ""
+                _txt = re.sub(r"<[^>]+>", " ", str(_content))
+                _txt = re.sub(r"\s+", " ", _txt).strip()
+                logger.warning(
+                    "2FA: форум вернул html без redirect (status=%r). Текст диалога: %r",
+                    resp_json.get("status"), _txt[:600],
+                )
             if redirect_url:
                 # Дёргаем redirect, чтобы XenForo дописал в jar финальные куки
                 # (иногда новые xf_session/xf_user приходят именно на этом шаге)
@@ -808,20 +897,51 @@ async def forum_submit_2fa(state: dict, code: str,
                 logger.debug("Делаю GET по redirect: %s", redirect_url)
                 try:
                     rr = await client.get(redirect_url)
-                    await _ensure_no_ddos(client, rr, redirect_url,
-                                             persist_cookie=True)
+                    rr = await _ensure_no_ddos(client, rr, redirect_url,
+                                               persist_cookie=True)
                 except httpx.RequestError as e:
                     logger.debug("GET redirect упал, но 2FA уже принят: %s", e)
 
             cookies_dict = _flatten_cookies(client)
-            # Минимальный признак рабочей сессии: есть xf_user
-            if "xf_user" not in cookies_dict:
-                logger.warning("В jar нет xf_user после 2FA, что-то не так. Куки: %s",
-                               ", ".join(sorted(cookies_dict.keys())))
-                return {"status": "error",
-                        "message": "Форум принял код, но не выдал сессионную куку xf_user."}
 
-            username = await _resolve_username(client)
+            # XenForo выдаёт xf_user (долгоживущий «remember me») только когда
+            # сервер реально дописал постоянную сессию. Часто после 2FA в jar
+            # лежит лишь xf_session — это ВАЛИДНАЯ сессия, просто без remember-
+            # куки. Поэтому отсутствие xf_user — не провал: проверяем настоящий
+            # признак авторизации, data-logged-in=true на главной, и оттуда же
+            # берём имя пользователя (одним запросом).
+            home_html = None
+            try:
+                r_home = await client.get(FORUM_URL)
+                r_home = await _ensure_no_ddos(client, r_home, FORUM_URL,
+                                               persist_cookie=True)
+                home_html = r_home.text
+                cookies_dict = _flatten_cookies(client)
+            except httpx.RequestError as e:
+                logger.debug("GET главной после 2FA упал: %s", e)
+
+            logged_in = bool(home_html and _extract_user_id(home_html))
+
+            if not logged_in and "xf_user" not in cookies_dict:
+                logger.warning(
+                    "После 2FA сессия не подтверждена: data-logged-in!=true и нет "
+                    "xf_user. Куки: %s",
+                    ", ".join(sorted(cookies_dict.keys())) or "—",
+                )
+                return {"status": "error",
+                        "message": ("Форум принял код, но сессия не активировалась. "
+                                    "Попробуйте ещё раз — возможно, код устарел.")}
+
+            if "xf_user" not in cookies_dict:
+                logger.warning(
+                    "2FA пройден, но форум не выдал xf_user (в jar только %s). "
+                    "Сессия рабочая; после истечения xf_session понадобится "
+                    "повторный вход.",
+                    ", ".join(sorted(cookies_dict.keys())) or "—",
+                )
+
+            username = (_extract_username(_soup(home_html)) if home_html
+                        else await _resolve_username(client))
             logger.info("2FA пройден, аккаунт: «%s».", username)
             return {"status": "ok", "username": username, "cookies": cookies_dict}
 
@@ -876,11 +996,16 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
 
     if "xf_user" not in cookies:
         names = ", ".join(sorted(cookies.keys())) or "—"
-        logger.warning("В куках нет xf_user. Имеется: %s", names)
-        return False, (
-            f"В файле нет ключа <code>xf_user</code>.\n"
-            f"Найдено: <code>{names}</code>"
-        )
+        if "xf_session" not in cookies:
+            # Без xf_session И без xf_user сессии заведомо нет — не тратим запрос.
+            logger.warning("В куках нет ни xf_user, ни xf_session. Имеется: %s", names)
+            return False, (
+                f"В файле нет ни <code>xf_user</code>, ни <code>xf_session</code>.\n"
+                f"Найдено: <code>{names}</code>"
+            )
+        # xf_session есть — это может быть валидная сессия без «remember me».
+        # Не отказываем заранее: ниже GET / проверит data-logged-in по факту.
+        logger.info("В куках нет xf_user, но есть xf_session — проверяю сессию запросом.")
 
     async with httpx.AsyncClient(
         cookies=cookies, headers=HEADERS, follow_redirects=True, timeout=15.0,
@@ -890,15 +1015,16 @@ async def _check_auth_with_cookies(cookies: dict) -> tuple[bool, str]:
             elapsed = time.monotonic() - started
             logger.debug("GET %s -> HTTP %s за %.2f с", FORUM_URL, response.status_code, elapsed)
 
+            # Сначала пробуем решить DDoS-Guard challenge (если он есть) —
+            # только после этого проверяем статус-код. Иначе 403 от DDoS-Guard
+            # сразу роняет проверку, не дав шанса на solve.
+            response = await _ensure_no_ddos(client, response, FORUM_URL,
+                                                persist_cookie=True)
+
             if response.status_code != 200:
                 logger.warning("Форум вернул HTTP %s при проверке авторизации.", response.status_code)
                 return False, f"Форум вернул ошибку HTTP {response.status_code}."
 
-            # Если упёрлись в DDoS-Guard заглушку — решаем challenge на ТОЙ ЖЕ
-            # сессии и повторяем запрос. Не делаем отдельный _solve_ddos_guard():
-            # его R3ACTLB не подойдёт нашему клиенту.
-            response = await _ensure_no_ddos(client, response, FORUM_URL,
-                                                persist_cookie=True)
             html = response.text
 
             user_id = _extract_user_id(html)
@@ -1153,6 +1279,39 @@ async def post_complaint(section_id: int, title: str, message: str,
         except Exception as e:
             logger.exception("Неизвестная ошибка при отправке жалобы")
             return False, f"Внутренняя ошибка отправки: {e}"
+
+
+async def fetch_thread_admin_comment(
+    thread_url: str,
+    cookies: dict | None = None,
+) -> Optional[str]:
+    """Открывает страницу темы и возвращает текст последнего поста (комментарий
+    администратора). None — если тема недоступна или ответа ещё нет."""
+    if not thread_url:
+        return None
+
+    if cookies is not None:
+        client_ctx = httpx.AsyncClient(
+            cookies=cookies, headers=HEADERS,
+            follow_redirects=True, timeout=15.0,
+        )
+    else:
+        client_ctx = _session(timeout=15.0)
+
+    try:
+        async with client_ctx as client:
+            r = await client.get(thread_url)
+            if r.status_code == 403:
+                return None
+            if r.status_code != 200:
+                return None
+            r = await _ensure_no_ddos(client, r, thread_url)
+            if "/login/" in str(r.url):
+                return None
+            return _extract_last_admin_comment(_soup(r.text))
+    except Exception:
+        logger.exception("Ошибка при получении комментария админа для %s", thread_url)
+        return None
 
 
 def is_auth_error(error_text: str) -> bool:

@@ -836,9 +836,9 @@ async def _try_import_existing_session(telegram_id: int) -> bool:
     if not data:
         logger.info("Авто-импорт пропущен: cookies.json пуст.")
         return False
-    if "xf_user" not in data:
-        logger.info("Авто-импорт пропущен: в cookies.json нет xf_user. Ключи: %s",
-                    ", ".join(data.keys()) or "—")
+    if "xf_user" not in data and "xf_session" not in data:
+        logger.info("Авто-импорт пропущен: в cookies.json нет ни xf_user, ни "
+                    "xf_session. Ключи: %s", ", ".join(data.keys()) or "—")
         return False
 
     logger.info("Авто-импорт: проверяю сессию для telegram_id=%s ...", telegram_id)
