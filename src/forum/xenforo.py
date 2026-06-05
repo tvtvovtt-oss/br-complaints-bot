@@ -815,6 +815,13 @@ async def forum_submit_2fa(state: dict, code: str,
     provider = state["provider"]
     two_step_url = state.get("two_step_url", TWO_STEP_URL)
 
+    # По умолчанию клиент закрывается в finally. Но если код можно ввести
+    # повторно (неверный код, не активировалась сессия) — оставляем клиент
+    # открытым: FSM остаётся в waiting_for_2fa_code, и следующая попытка
+    # должна идти по той же сессии. Иначе client.post упадёт на закрытом
+    # клиенте. Закроет его _login_cancel/global_cancel или успешный возврат.
+    keep_open = False
+
     try:
         # _xfRequestUri должен указывать на ЛОГИЧЕСКИЙ роут two-step, а не на
         # "/index.php". Когда страница 2FA пришла через alt-path
@@ -862,6 +869,9 @@ async def forum_submit_2fa(state: dict, code: str,
             if errors:
                 msg = "; ".join(errors) if isinstance(errors, list) else str(errors)
                 logger.warning("Форум отверг 2FA-код: %s", msg)
+                # Сессия 2FA ещё жива — пользователь может ввести код заново.
+                # НЕ закрываем клиент, иначе следующий POST упадёт.
+                keep_open = True
                 return {"status": "error", "message": msg}
 
             redirect_url = resp_json.get("redirect")
@@ -928,6 +938,9 @@ async def forum_submit_2fa(state: dict, code: str,
                     "xf_user. Куки: %s",
                     ", ".join(sorted(cookies_dict.keys())) or "—",
                 )
+                # Приглашаем повторить ввод — значит клиент должен пережить
+                # этот возврат, иначе следующий POST упадёт на закрытом клиенте.
+                keep_open = True
                 return {"status": "error",
                         "message": ("Форум принял код, но сессия не активировалась. "
                                     "Попробуйте ещё раз — возможно, код устарел.")}
@@ -960,6 +973,8 @@ async def forum_submit_2fa(state: dict, code: str,
         logged = html_tag.get("data-logged-in") if html_tag else "?"
         logger.warning("После 2FA: data-logged-in=%r, кук в jar: %s",
                        logged, ", ".join(sorted(_flatten_cookies(client).keys())))
+        # Приглашаем повторить — оставляем клиент живым для следующей попытки.
+        keep_open = True
         return {"status": "error",
                 "message": "Код принят, но форум не активировал сессию. "
                            "Попробуйте ещё раз — возможно, код устарел."}
@@ -971,7 +986,12 @@ async def forum_submit_2fa(state: dict, code: str,
         logger.exception("Непредвиденная ошибка 2FA")
         return {"status": "error", "message": f"Ошибка: {e}"}
     finally:
-        await client.aclose()
+        # Закрываем клиент, КРОМЕ случаев когда пользователь может ввести код
+        # заново (keep_open=True): тогда FSM остаётся в waiting_for_2fa_code и
+        # следующая попытка пойдёт по этой же сессии. Клиент в итоге закроют
+        # _login_cancel/global_cancel при выходе из сценария.
+        if not keep_open:
+            await client.aclose()
 
 
 async def check_auth() -> tuple[bool, str]:
