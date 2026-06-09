@@ -1014,57 +1014,25 @@ async def cmd_me(message: types.Message):
     user = message.from_user
 
     stats = await get_user_complaint_stats(user.id)
-    role = "👑 Администратор" if is_admin(user.id) else "👤 Пользователь"
+    
+    import asyncio
+    from src.image_generator import generate_profile_card
+    from aiogram.types import BufferedInputFile
+    
+    user_info = {
+        "name": user.full_name or "Без имени",
+        "id": user.id,
+        "role": "Администратор" if is_admin(user.id) else "Пользователь"
+    }
+    
+    status_msg = await message.answer("⏳ Рисую карточку профиля...")
+    
+    image_bytes = await asyncio.to_thread(generate_profile_card, user_info, stats)
+    photo = BufferedInputFile(image_bytes, filename="profile.jpg")
 
-    parts = [
-        "<b>Ваш профиль</b>\n",
-        f"🆔 <code>{user.id}</code>",
-        f"👤 {escape(user.full_name or '—')}",
-    ]
-    if user.username:
-        parts.append(f"📛 @{escape(user.username)}")
-    parts.append(f"🛡 Роль: {role}")
-    parts.append("")
-    parts.append("<b>📊 Статистика жалоб:</b>")
-    parts.append(f"   📝 Всего: <b>{stats['total']}</b>")
-    if stats["queue"]:
-        parts.append(f"   📦 В очереди: <b>{stats['queue']}</b>")
-    if stats["pending"]:
-        parts.append(f"   ⏳ Ожидание: <b>{stats['pending']}</b>")
-    if stats["review"]:
-        parts.append(f"   🔎 На рассмотрении: <b>{stats['review']}</b>")
-    if stats["accepted"]:
-        parts.append(f"   ✅ Принято: <b>{stats['accepted']}</b>")
-    if stats["rejected"]:
-        parts.append(f"   ❌ Отклонено: <b>{stats['rejected']}</b>")
-    if stats["closed"]:
-        parts.append(f"   🔒 Закрыто: <b>{stats['closed']}</b>")
-
-    if stats["total"] > 0:
-        pct = stats["success_pct"]
-        bar_filled = round(pct / 10)
-        bar = "🟩" * bar_filled + "⬜" * (10 - bar_filled)
-        parts.append(f"\n   🎯 Успешность: {bar} <b>{pct}%</b>")
-
-    achievements = []
-    if stats.get("accepted", 0) >= 1:
-        achievements.append("🟢 Новичок")
-    if stats.get("accepted", 0) >= 5:
-        achievements.append("👮‍♂️ Следящий за порядком")
-    if stats.get("accepted", 0) >= 20:
-        achievements.append("🕵️‍♂️ Детектив")
-    if stats.get("accepted", 0) >= 50:
-        achievements.append("🦸‍♂️ Гроза сервера")
-    if stats.get("accepted", 0) >= 100:
-        achievements.append("👑 Легенда форума")
-
-    if achievements:
-        parts.append("\n<b>🏅 Достижения:</b>")
-        for ach in achievements:
-            parts.append(f"   • {ach}")
-
+    parts = []
     if stats["top_targets"]:
-        parts.append("\n<b>🏆 Топ целей:</b>")
+        parts.append("<b>🏆 Ваш Топ нарушителей:</b>")
         medals = ["🥇", "🥈", "🥉"]
         for i, t in enumerate(stats["top_targets"]):
             medal = medals[i] if i < len(medals) else "•"
@@ -1077,4 +1045,5 @@ async def cmd_me(message: types.Message):
         "\n<i>💡 Используйте <code>/find Ник</code> для поиска жалоб по игроку.</i>"
     )
 
-    await message.answer("\n".join(parts), disable_web_page_preview=True)
+    await status_msg.delete()
+    await message.answer_photo(photo, caption="\n".join(parts), parse_mode="HTML")
