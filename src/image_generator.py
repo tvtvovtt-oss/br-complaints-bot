@@ -26,8 +26,13 @@ def get_font(size: int):
         except Exception:
             pass
             
-    # Если скачать не удалось, используем системные шрифты
-    fallback_fonts = ["arial.ttf", "segoeui.ttf", "tahoma.ttf", "DejaVuSans.ttf"]
+    # Если скачать не удалось, используем системные шрифты (укажем абсолютные пути для Windows)
+    fallback_fonts = [
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\tahoma.ttf",
+        "arial.ttf"
+    ]
     for f in fallback_fonts:
         try:
             return ImageFont.truetype(f, size)
@@ -58,9 +63,9 @@ def generate_profile_card(user_info: dict, stats: dict) -> bytes:
     
     draw = ImageDraw.Draw(bg)
     
-    font_large = get_font(42)
-    font_med = get_font(26)
-    font_small = get_font(20)
+    font_large = get_font(56)  # Увеличено
+    font_med = get_font(34)    # Увеличено
+    font_small = get_font(26)  # Увеличено
     
     # Цвета
     TEXT_MAIN = (255, 255, 255, 255)
@@ -72,38 +77,38 @@ def generate_profile_card(user_info: dict, stats: dict) -> bytes:
     # 2. Шапка профиля
     name = user_info.get("name", "Игрок")
     # Ограничиваем длину ника, чтобы не сломать вёрстку
-    if len(name) > 25: name = name[:22] + "..."
-    draw.text((40, 40), name, font=font_large, fill=TEXT_MAIN)
-    draw.text((40, 95), f"ID: {user_info.get('id', '???')} | {user_info.get('role', 'Пользователь')}", font=font_small, fill=TEXT_DIM)
+    if len(name) > 20: name = name[:18] + "..."
+    draw.text((40, 30), name, font=font_large, fill=TEXT_MAIN)
+    draw.text((40, 100), f"ID: {user_info.get('id', '???')} | {user_info.get('role', 'Пользователь')}", font=font_small, fill=TEXT_DIM)
     
     # Разделитель
-    draw.line([(40, 135), (760, 135)], fill=(255, 255, 255, 50), width=2)
+    draw.line([(40, 145), (760, 145)], fill=(255, 255, 255, 50), width=2)
     
     # 3. Колонки со статистикой
-    draw.text((40, 160), f"Всего подано: {stats.get('total', 0)}", font=font_med, fill=TEXT_MAIN)
-    draw.text((40, 205), f"Ожидают: {stats.get('pending', 0) + stats.get('queue', 0)}", font=font_med, fill=TEXT_DIM)
-    draw.text((40, 250), f"На рассмотрении: {stats.get('review', 0)}", font=font_med, fill=(255, 200, 80, 255))
+    draw.text((40, 170), f"Всего подано: {stats.get('total', 0)}", font=font_med, fill=TEXT_MAIN)
+    draw.text((40, 215), f"Ожидают: {stats.get('pending', 0) + stats.get('queue', 0)}", font=font_med, fill=TEXT_DIM)
+    draw.text((40, 260), f"На рассмотрении: {stats.get('review', 0)}", font=font_med, fill=(255, 200, 80, 255))
     
-    draw.text((450, 160), f"✅ Одобрено: {stats.get('accepted', 0)}", font=font_med, fill=SUCCESS)
-    draw.text((450, 205), f"❌ Отклонено: {stats.get('rejected', 0)}", font=font_med, fill=ACCENT)
+    draw.text((450, 170), f"✅ Одобрено: {stats.get('accepted', 0)}", font=font_med, fill=SUCCESS)
+    draw.text((450, 215), f"❌ Отклонено: {stats.get('rejected', 0)}", font=font_med, fill=ACCENT)
     
     # 4. Прогресс-бар успешности
-    draw.text((40, 310), "Рейтинг успешности", font=font_med, fill=TEXT_MAIN)
+    draw.text((40, 315), "Рейтинг успешности", font=font_med, fill=TEXT_MAIN)
     pct = stats.get("success_pct", 0)
-    draw.text((690, 310), f"{pct}%", font=font_med, fill=SUCCESS if pct >= 50 else ACCENT)
+    draw.text((670, 315), f"{pct}%", font=font_med, fill=SUCCESS if pct >= 50 else ACCENT)
     
-    bar_x, bar_y = 40, 350
-    bar_w, bar_h = 720, 22
+    bar_x, bar_y = 40, 360
+    bar_w, bar_h = 720, 24
     # Рисуем подложку
-    draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], radius=11, fill=(50, 50, 50, 255))
+    draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], radius=12, fill=(50, 50, 50, 255))
     
     # Рисуем заполнение
     if pct > 0:
         fill_w = int((pct / 100) * bar_w)
         # Убедимся, что ширина хотя бы минимальная (для красивого скругления)
-        if fill_w < 22: fill_w = 22
+        if fill_w < 24: fill_w = 24
         fill_color = SUCCESS if pct >= 50 else (255, 180, 60, 255) if pct >= 20 else ACCENT
-        draw.rounded_rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], radius=11, fill=fill_color)
+        draw.rounded_rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], radius=12, fill=fill_color)
         
     # 5. Медали / Достижения
     accepted = stats.get("accepted", 0)
@@ -115,11 +120,11 @@ def generate_profile_card(user_info: dict, stats: dict) -> bytes:
     if accepted >= 100: medals.append("Легенда")
     
     if medals:
-        draw.text((40, 400), "Достижения:", font=font_med, fill=TEXT_MAIN)
+        draw.text((40, 405), "Достижения:", font=font_med, fill=TEXT_MAIN)
         medals_str = " • ".join(medals)
-        draw.text((40, 440), medals_str, font=font_small, fill=GOLD)
+        draw.text((40, 445), medals_str, font=font_small, fill=GOLD)
     else:
-        draw.text((40, 400), "Достижения: Пока нет. Время наводить порядок!", font=font_med, fill=TEXT_DIM)
+        draw.text((40, 405), "Достижения: Пока нет.", font=font_med, fill=TEXT_DIM)
     
     # 6. Конвертация в JPEG
     final_img = bg.convert("RGB")
