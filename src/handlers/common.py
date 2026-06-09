@@ -1046,6 +1046,23 @@ async def cmd_me(message: types.Message):
         bar = "🟩" * bar_filled + "⬜" * (10 - bar_filled)
         parts.append(f"\n   🎯 Успешность: {bar} <b>{pct}%</b>")
 
+    achievements = []
+    if stats.get("accepted", 0) >= 1:
+        achievements.append("🟢 Новичок")
+    if stats.get("accepted", 0) >= 5:
+        achievements.append("👮‍♂️ Следящий за порядком")
+    if stats.get("accepted", 0) >= 20:
+        achievements.append("🕵️‍♂️ Детектив")
+    if stats.get("accepted", 0) >= 50:
+        achievements.append("🦸‍♂️ Гроза сервера")
+    if stats.get("accepted", 0) >= 100:
+        achievements.append("👑 Легенда форума")
+
+    if achievements:
+        parts.append("\n<b>🏅 Достижения:</b>")
+        for ach in achievements:
+            parts.append(f"   • {ach}")
+
     if stats["top_targets"]:
         parts.append("\n<b>🏆 Топ целей:</b>")
         medals = ["🥇", "🥈", "🥉"]

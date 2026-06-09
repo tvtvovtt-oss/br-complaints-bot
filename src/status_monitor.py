@@ -16,6 +16,7 @@ from src.database import (
     update_complaint_status,
     mark_complaint_notified,
     get_account,
+    get_user_complaint_stats,
 )
 from src.forum.xenforo import fetch_complaint_status
 from src.effects import EFFECT_CONFETTI
@@ -64,9 +65,24 @@ async def _notify_user(bot: Bot, complaint: dict, new_status: str,
         )
 
     if new_status == "accepted":
+        stats = await get_user_complaint_stats(complaint["telegram_id"])
+        accepted = stats.get("accepted", 0)
+        achievement_msg = ""
+        if accepted == 1:
+            achievement_msg = "\n\n🏅 <b>Открыто достижение:</b> 🟢 Новичок (1+ принятая жалоба)!"
+        elif accepted == 5:
+            achievement_msg = "\n\n🏅 <b>Открыто достижение:</b> 👮‍♂️ Следящий за порядком (5+ принятых)!"
+        elif accepted == 20:
+            achievement_msg = "\n\n🏅 <b>Открыто достижение:</b> 🕵️‍♂️ Детектив (20+ принятых)!"
+        elif accepted == 50:
+            achievement_msg = "\n\n🏅 <b>Открыто достижение:</b> 🦸‍♂️ Гроза сервера (50+ принятых)!"
+        elif accepted == 100:
+            achievement_msg = "\n\n🏅 <b>Открыто достижение:</b> 👑 Легенда форума (100+ принятых)!"
+
         text = (
             f"🎉 <b>Ваша жалоба на «{nickname}» принята!</b>\n\n"
             f"Статус: <b>{label}</b>{link_part}{comment_part}"
+            f"{achievement_msg}"
         )
         effect = EFFECT_CONFETTI
     elif new_status == "rejected":
