@@ -331,6 +331,98 @@ async def get_user_complaints(telegram_id: int):
             ]
 
 
+async def search_complaints_by_nick(
+    nickname: str,
+    telegram_id: int | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Поиск жалоб по нику цели (частичное совпадение, без учёта регистра).
+
+    Если telegram_id задан — ищем только в жалобах этого пользователя.
+    Если None — по всем (для админов).
+    Возвращает не более `limit` записей, новые первыми.
+    """
+    like = f"%{nickname.strip()}%"
+    async with aiosqlite.connect(DB_PATH) as db:
+        if telegram_id is not None:
+            async with db.execute(
+                "SELECT id, telegram_id, nickname, forum_thread_url, "
+                "status, created_at, summary "
+                "FROM complaints "
+                "WHERE LOWER(nickname) LIKE LOWER(?) AND telegram_id = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (like, telegram_id, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT id, telegram_id, nickname, forum_thread_url, "
+                "status, created_at, summary "
+                "FROM complaints "
+                "WHERE LOWER(nickname) LIKE LOWER(?) "
+                "ORDER BY id DESC LIMIT ?",
+                (like, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [
+        {
+            "id": r[0],
+            "telegram_id": r[1],
+            "nickname": r[2],
+            "forum_thread_url": r[3],
+            "status": r[4] or "pending",
+            "created_at": r[5],
+            "summary": r[6],
+        }
+        for r in rows
+    ]
+
+
+async def get_user_complaint_stats(telegram_id: int) -> dict:
+    """Расширенная статистика жалоб пользователя: счётчики по статусам,
+    процент успеха и топ-3 цели (по числу жалоб)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Счётчики по статусам
+        async with db.execute(
+            "SELECT status, COUNT(*) FROM complaints "
+            "WHERE telegram_id = ? GROUP BY status",
+            (telegram_id,),
+        ) as cur:
+            status_rows = await cur.fetchall()
+
+        # Топ-3 ника, на которого больше всего жалоб
+        async with db.execute(
+            "SELECT nickname, COUNT(*) AS cnt FROM complaints "
+            "WHERE telegram_id = ? "
+            "GROUP BY LOWER(nickname) ORDER BY cnt DESC LIMIT 3",
+            (telegram_id,),
+        ) as cur:
+            top_rows = await cur.fetchall()
+
+    counts = {row[0]: row[1] for row in status_rows}
+    total = sum(counts.values())
+    accepted = counts.get("accepted", 0)
+    rejected = counts.get("rejected", 0)
+    review = counts.get("review", 0)
+    pending = counts.get("pending", 0)
+    closed = counts.get("closed", 0)
+    queue = counts.get("queue", 0)
+
+    success_pct = round(accepted / total * 100) if total else 0
+
+    return {
+        "total": total,
+        "accepted": accepted,
+        "rejected": rejected,
+        "review": review,
+        "pending": pending,
+        "closed": closed,
+        "queue": queue,
+        "success_pct": success_pct,
+        "top_targets": [{"nickname": r[0], "count": r[1]} for r in top_rows],
+    }
+
+
 async def get_complaint(complaint_id: int) -> dict | None:
     """Возвращает жалобу по id (или None)."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -626,7 +718,7 @@ async def get_account(account_id: int) -> dict | None:
         async with db.execute(
             """
             SELECT id, telegram_id, username, login, cookies_json, is_active,
-                   cooldown_until
+                   cooldown_until, COALESCE(needs_reauth, 0)
             FROM accounts WHERE id = ?
             """,
             (account_id,),
@@ -642,6 +734,7 @@ async def get_account(account_id: int) -> dict | None:
                 "cookies": _json.loads(row[4]),
                 "is_active": bool(row[5]),
                 "cooldown_until": row[6],
+                "needs_reauth": bool(row[7]),
             }
 
 
@@ -1807,7 +1900,7 @@ async def track_user(telegram_id: int, username: str | None = None,
                       language_code: str | None = None) -> None:
     """Отмечает пользователя как взаимодействовавшего с ботом. Если первый
     раз — создаёт запись, иначе обновляет last_seen_at и инкрементит счётчик."""
-    if not telegram_id:
+    if not telegram_id or telegram_id <= 0:
         return
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_users_table(db)

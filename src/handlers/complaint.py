@@ -44,13 +44,13 @@ from src.database import (
     delete_draft,
     enqueue_complaint,
     mark_account_needs_reauth,
+    search_complaints_by_nick,
 )
 from src.handlers.common import (
     check_access, _menu_for, is_admin, account_owner_id,
 )
 from src.logger import describe_user
 from src.effects import EFFECT_CONFETTI
-from src.forum.xenforo import apply_account_cookies
 from src.status_monitor import status_label
 from src.validation import (
     validate_nickname,
@@ -168,9 +168,13 @@ def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
         row = []
         for entry in chunk[i:i + 2]:
             name, node_id = entry[0], entry[1]
+            # В callback_data кладём ТОЛЬКО node_id: Telegram ограничивает
+            # callback_data 64 байтами, а имя сервера приходит из HTML форума
+            # и может быть длинным/кириллическим (2 байта на символ) — это
+            # роняло бы отрисовку всей клавиатуры. Имя достаём из state по id.
             row.append(types.InlineKeyboardButton(
                 text=name,
-                callback_data=f"srv_pick:{node_id}:{name}",
+                callback_data=f"srv_pick:{node_id}",
             ))
         rows.append(row)
 
@@ -275,11 +279,23 @@ async def srv_pick(call: types.CallbackQuery, state: FSMContext):
         return
 
     try:
-        _, node_id_str, name = call.data.split(":", 2)
-        node_id = int(node_id_str)
-    except (ValueError, AttributeError):
+        node_id = int(call.data.split(":", 1)[1])
+    except (ValueError, AttributeError, IndexError):
         logger.warning("srv_pick: некорректный callback data %r", call.data)
         await call.answer("Ошибка данных кнопки.", show_alert=True)
+        return
+
+    # Имя сервера берём из state (в callback_data его больше нет — лимит 64Б)
+    data = await state.get_data()
+    servers_list = data.get("servers_list", [])
+    name = next(
+        (entry[0] for entry in servers_list
+         if len(entry) >= 2 and entry[1] == node_id),
+        None,
+    )
+    if name is None:
+        logger.warning("srv_pick: node_id=%s не найден в servers_list.", node_id)
+        await call.answer("Сервер не найден, начните заново.", show_alert=True)
         return
 
     categories = await get_complaint_categories(node_id)
@@ -1053,6 +1069,13 @@ async def process_enqueue(message: types.Message, state: FSMContext):
     if not check_access(message.from_user.id):
         return
     data = await state.get_data()
+    # Защита от двойного тапа: между нажатием и state.clear() есть await
+    # (запись в БД). Троттлинг пропускает повторное нажатие уже через 0.4с,
+    # а aiogram обрабатывает апдейты конкурентно — без этого флага один
+    # двойной тап создал бы две записи в очереди.
+    if data.get("_publishing"):
+        return
+    await state.update_data(_publishing=True)
     qid = await enqueue_complaint(
         telegram_id=message.from_user.id,
         section_id=data["section_id"],
@@ -1079,6 +1102,15 @@ async def process_confirm(message: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    # Защита от двойного тапа «✅ Отправить на форум». Публикация делает
+    # несколько сетевых запросов с паузами (до 3 попыток), а state.clear()
+    # происходит только в самом конце. Троттлинг пропускает повторное
+    # нажатие через 0.4с, и без этого флага две корутины опубликовали бы
+    # ДВЕ одинаковые темы на форуме. Флаг ставим атомарно до любых await.
+    if data.get("_publishing"):
+        return
+    await state.update_data(_publishing=True)
+
     account_id = data.get("complaint_account_id")
     account_name = data.get("complaint_account_name", "?")
     owner_id = account_owner_id(message.from_user.id)
@@ -1455,9 +1487,6 @@ async def cmpl_open(call: types.CallbackQuery):
                 acc_full = await get_account(comp["account_id"])
                 if acc_full and acc_full.get("cookies"):
                     cookies_to_use = acc_full["cookies"]
-                    apply_account_cookies(
-                        cookies_to_use, account_id=acc_full["id"],
-                    )
             fetched = await fetch_thread_admin_comment(
                 comp["forum_thread_url"], cookies=cookies_to_use,
             )
@@ -1513,18 +1542,20 @@ async def cmpl_delete_from_forum(call: types.CallbackQuery):
         await call.answer("У жалобы нет ссылки на форум.", show_alert=True)
         return
 
-    # Активируем тот аккаунт, под которым она была подана. Если по какой-то
-    # причине account_id отсутствует — используем активный.
+    # Берём куки того аккаунта, под которым жалоба была подана, и передаём их
+    # в delete_thread напрямую — без apply_account_cookies, чтобы не было
+    # гонки на глобальном cookies.json при параллельной работе. Если по
+    # какой-то причине account_id отсутствует — фолбэк на активный аккаунт.
     owner_id = account_owner_id(call.from_user.id)
-    account_used = None
+    cookies_to_use = None
     if comp.get("account_id"):
         account_used = await get_account(comp["account_id"])
-    if account_used and account_used.get("cookies"):
-        apply_account_cookies(account_used["cookies"], account_id=account_used["id"])
-    else:
+        if account_used and account_used.get("cookies"):
+            cookies_to_use = account_used["cookies"]
+    if cookies_to_use is None:
         active = await get_active_account(owner_id)
         if active:
-            apply_account_cookies(active["cookies"], account_id=active["id"])
+            cookies_to_use = active["cookies"]
 
     await call.answer("⏳ Удаляю тему на форуме...")
     try:
@@ -1535,7 +1566,8 @@ async def cmpl_delete_from_forum(call: types.CallbackQuery):
         pass
 
     success, msg = await delete_thread(comp["forum_thread_url"],
-                                         reason="Удалено автором через бота")
+                                         reason="Удалено автором через бота",
+                                         cookies=cookies_to_use)
 
     if success:
         # Тоже удаляем из локальной истории
@@ -1982,19 +2014,21 @@ async def _apply_edit(message: types.Message, state: FSMContext,
         )
         return
 
-    # Применяем куки именно того аккаунта, под которым жалоба была подана —
-    # иначе форум вернёт 403 (редактировать может только автор).
-    account_used = None
+    # Берём куки именно того аккаунта, под которым жалоба была подана, и
+    # передаём их в edit_thread_post напрямую — иначе форум вернёт 403
+    # (редактировать может только автор). Без apply_account_cookies, чтобы
+    # не было гонки на глобальном cookies.json.
+    cookies_to_use = None
     if comp.get("account_id"):
         account_used = await get_account(comp["account_id"])
-    if account_used and account_used.get("cookies"):
-        apply_account_cookies(account_used["cookies"], account_id=account_used["id"])
-    else:
+        if account_used and account_used.get("cookies"):
+            cookies_to_use = account_used["cookies"]
+    if cookies_to_use is None:
         # Фолбэк: используем активный, но скорее всего форум откажет
         owner_id = account_owner_id(message.from_user.id)
         active = await get_active_account(owner_id)
         if active:
-            apply_account_cookies(active["cookies"], account_id=active["id"])
+            cookies_to_use = active["cookies"]
 
     status_msg = await message.answer(
         "⏳ Обновляю тему на форуме...",
@@ -2032,7 +2066,7 @@ async def _apply_edit(message: types.Message, state: FSMContext,
 
     success, msg = await edit_thread_post(
         comp["forum_thread_url"], new_message=new_body,
-        new_title=new_title,
+        new_title=new_title, cookies=cookies_to_use,
     )
 
     await state.clear()
@@ -2186,3 +2220,160 @@ async def draft_del(call: types.CallbackQuery):
     except Exception:
         pass
     await call.answer("Удалено")
+
+
+# ---------------------------------------------------------------------------
+# /find — поиск жалоб по нику
+# ---------------------------------------------------------------------------
+
+_FIND_RESULTS_PER_PAGE = 5  # жалоб на одной «странице» результатов
+
+
+def _find_result_keyboard(
+    results: list[dict],
+    query: str,
+    page: int,
+    total: int,
+) -> types.InlineKeyboardMarkup:
+    """Inline-кнопки для результатов /find: кнопки «Открыть» + пагинация."""
+    rows = []
+    start = page * _FIND_RESULTS_PER_PAGE
+    page_items = results[start: start + _FIND_RESULTS_PER_PAGE]
+
+    for item in page_items:
+        url = item.get("forum_thread_url") or ""
+        if url:
+            rows.append([
+                types.InlineKeyboardButton(
+                    text=f"🔗 #{item['id']} {escape(item['nickname'][:18])}",
+                    url=url,
+                )
+            ])
+
+    # Пагинация
+    total_pages = (total + _FIND_RESULTS_PER_PAGE - 1) // _FIND_RESULTS_PER_PAGE
+    nav = []
+    if page > 0:
+        nav.append(types.InlineKeyboardButton(
+            text="◀️", callback_data=f"find_page:{query}:{page - 1}",
+        ))
+    if page < total_pages - 1:
+        nav.append(types.InlineKeyboardButton(
+            text="▶️", callback_data=f"find_page:{query}:{page + 1}",
+        ))
+    if nav:
+        rows.append(nav)
+
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_find_results(
+    results: list[dict],
+    query: str,
+    page: int,
+    admin_mode: bool,
+) -> str:
+    """Текст ответа на /find."""
+    from src.status_monitor import status_label as slabel
+    total = len(results)
+    if not total:
+        return (
+            f"🔍 По запросу <b>{escape(query)}</b> жалоб не найдено.\n\n"
+            "<i>Попробуйте изменить запрос (часть ника, без учёта регистра).</i>"
+        )
+
+    start = page * _FIND_RESULTS_PER_PAGE
+    page_items = results[start: start + _FIND_RESULTS_PER_PAGE]
+    total_pages = (total + _FIND_RESULTS_PER_PAGE - 1) // _FIND_RESULTS_PER_PAGE
+
+    header = (
+        f"🔍 Найдено <b>{total}</b> жалоб по запросу «<b>{escape(query)}</b>»"
+    )
+    if admin_mode:
+        header += " <i>(все пользователи)</i>"
+    header += f"\nСтраница {page + 1}/{total_pages}:\n"
+
+    lines = [header]
+    for item in page_items:
+        st = slabel(item["status"])
+        nick = escape(item["nickname"] or "—")
+        date = (item.get("created_at") or "")[:10]
+        summary = escape((item.get("summary") or "")[:40])
+        url = item.get("forum_thread_url") or ""
+        link = f' <a href="{escape(url)}">тема</a>' if url else ""
+        author = f" <i>(tg:{item['telegram_id']})</i>" if admin_mode else ""
+        lines.append(f"• {st} <b>{nick}</b>{link}{author}\n"
+                     f"  <i>{date}</i> — {summary}")
+
+    return "\n".join(lines)
+
+
+@router.message(Command("find"))
+@router.message(F.text.startswith("🔍 Найти жалобу"))
+async def cmd_find(message: types.Message):
+    """Поиск жалоб по нику цели.
+
+    Синтаксис: /find <ник>   (частичное совпадение, без учёта регистра)
+    Обычный пользователь видит только свои жалобы.
+    Администратор видит жалобы всех пользователей.
+    """
+    if not check_access(message.from_user.id):
+        return
+
+    # Извлекаем запрос из команды или текста кнопки
+    text = message.text or ""
+    if text.startswith("/find"):
+        query = text[len("/find"):].strip()
+    else:
+        # Кнопка «🔍 Найти жалобу» — без аргумента, просим ввести
+        query = ""
+
+    if not query:
+        await message.answer(
+            "🔍 <b>Поиск жалоб по нику</b>\n\n"
+            "Введите команду с ником цели:\n"
+            "<code>/find BlackPlayer</code>\n\n"
+            "Поиск частичный и без учёта регистра — "
+            "достаточно части ника (<code>/find Black</code>)."
+        )
+        return
+
+    if len(query) < 2:
+        await message.answer("⚠️ Запрос слишком короткий. Введите минимум 2 символа.")
+        return
+
+    uid = message.from_user.id
+    admin = is_admin(uid)
+    tid = None if admin else uid
+
+    results = await search_complaints_by_nick(query, telegram_id=tid, limit=50)
+    text_out = _format_find_results(results, query, page=0, admin_mode=admin)
+    kb = _find_result_keyboard(results, query, page=0, total=len(results)) if results else None
+
+    await message.answer(text_out, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.startswith("find_page:"))
+async def find_page(call: types.CallbackQuery):
+    """Пагинация результатов /find."""
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+
+    _, query, page_str = call.data.split(":", 2)
+    page = int(page_str)
+    uid = call.from_user.id
+    admin = is_admin(uid)
+    tid = None if admin else uid
+
+    results = await search_complaints_by_nick(query, telegram_id=tid, limit=50)
+    text_out = _format_find_results(results, query, page=page, admin_mode=admin)
+    kb = _find_result_keyboard(results, query, page=page, total=len(results))
+
+    try:
+        await call.message.edit_text(
+            text_out, reply_markup=kb, disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+    await call.answer()

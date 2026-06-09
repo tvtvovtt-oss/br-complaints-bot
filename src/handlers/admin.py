@@ -231,8 +231,8 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
         except TelegramForbiddenError:
             blocked += 1
         except TelegramRetryAfter as e:
-            # Telegram попросил подождать — ждём и повторяем
-            await asyncio.sleep(e.retry_after + 1)
+            # Telegram попросил подождать — ждём и повторяем (не более 30 сек)
+            await asyncio.sleep(min(e.retry_after, 30) + 1)
             try:
                 await bot.send_message(uid, text, disable_web_page_preview=True)
                 delivered += 1
@@ -1017,18 +1017,13 @@ async def adm_complaint_open(call: types.CallbackQuery):
     # поле, мониторинг ещё не успел заполнить).
     if thread_url and not admin_comment:
         try:
-            from src.forum.xenforo import (
-                fetch_thread_admin_comment, apply_account_cookies,
-            )
+            from src.forum.xenforo import fetch_thread_admin_comment
             from src.database import get_account, update_complaint_admin_comment
             cookies_to_use = None
             if comp.get("account_id"):
                 acc_full = await get_account(comp["account_id"])
                 if acc_full and acc_full.get("cookies"):
                     cookies_to_use = acc_full["cookies"]
-                    apply_account_cookies(
-                        cookies_to_use, account_id=acc_full["id"],
-                    )
             fetched = await fetch_thread_admin_comment(
                 thread_url, cookies=cookies_to_use,
             )
@@ -1152,18 +1147,21 @@ async def adm_complaint_delete_forum(call: types.CallbackQuery):
     except Exception:
         pass
 
-    # Куки аккаунта-автора жалобы
+    # Куки аккаунта-автора жалобы — передаём в delete_thread напрямую,
+    # без apply_account_cookies (иначе гонка на глобальном cookies.json).
     from src.database import get_account, admin_delete_complaint
-    from src.forum.xenforo import apply_account_cookies, delete_thread
+    from src.forum.xenforo import delete_thread
 
+    cookies_to_use = None
     if comp.get("account_id"):
         acc_full = await get_account(comp["account_id"])
         if acc_full and acc_full.get("cookies"):
-            apply_account_cookies(acc_full["cookies"], account_id=acc_full["id"])
+            cookies_to_use = acc_full["cookies"]
 
     success, msg = await delete_thread(
         comp["forum_thread_url"],
         reason="Удалено администратором бота",
+        cookies=cookies_to_use,
     )
 
     if success:
@@ -1246,8 +1244,11 @@ async def adm_complaint_ban_author(call: types.CallbackQuery):
         await call.answer("Жалоба не найдена.", show_alert=True)
         return
     author_id = comp["telegram_id"]
-    if is_admin(author_id):
-        await call.answer("🔒 Нельзя банить админа.", show_alert=True)
+    if is_admin(author_id):  # защита: не банить коллег-админов
+        await call.answer("🔒 Нельзя банить других админов.", show_alert=True)
+        return
+    if author_id == call.from_user.id:
+        await call.answer("🔒 Нельзя забанить самого себя.", show_alert=True)
         return
 
     await ban_user(

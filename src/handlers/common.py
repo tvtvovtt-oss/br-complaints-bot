@@ -27,6 +27,7 @@ from src.database import (
     delete_account,
     get_account,
     get_active_account,
+    get_user_complaint_stats,
 )
 from src.logger import describe_user
 from src.effects import EFFECT_CONFETTI, EFFECT_FIRE, EFFECT_LIKE
@@ -39,6 +40,10 @@ def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь админом.
     Если ADMIN_IDS пуст — все админы (для локальной отладки)."""
     if not ADMIN_IDS:
+        logger.warning(
+            "ADMIN_IDS не задан — все пользователи получают права администратора! "
+            "Установите ADMIN_IDS в .env перед запуском в продакшене."
+        )
         return True
     return user_id in ADMIN_IDS
 
@@ -1007,14 +1012,8 @@ async def global_cancel(message: types.Message, state: FSMContext):
 async def cmd_me(message: types.Message):
     """Показывает информацию о пользователе и его статистику."""
     user = message.from_user
-    from src.database import get_user_complaints
 
-    complaints = await get_user_complaints(user.id)
-    accepted = sum(1 for c in complaints if c["status"] == "accepted")
-    rejected = sum(1 for c in complaints if c["status"] == "rejected")
-    review = sum(1 for c in complaints if c["status"] == "review")
-    pending = sum(1 for c in complaints if c["status"] == "pending")
-
+    stats = await get_user_complaint_stats(user.id)
     role = "👑 Администратор" if is_admin(user.id) else "👤 Пользователь"
 
     parts = [
@@ -1026,25 +1025,39 @@ async def cmd_me(message: types.Message):
         parts.append(f"📛 @{escape(user.username)}")
     parts.append(f"🛡 Роль: {role}")
     parts.append("")
-    parts.append("<b>📊 Ваша статистика жалоб:</b>")
-    parts.append(f"   📝 Всего: <b>{len(complaints)}</b>")
-    parts.append(f"   ⏳ Ожидание: <b>{pending}</b>")
-    parts.append(f"   🔎 На рассмотрении: <b>{review}</b>")
-    parts.append(f"   ✅ Принято: <b>{accepted}</b>")
-    parts.append(f"   ❌ Отклонено: <b>{rejected}</b>")
+    parts.append("<b>📊 Статистика жалоб:</b>")
+    parts.append(f"   📝 Всего: <b>{stats['total']}</b>")
+    if stats["queue"]:
+        parts.append(f"   📦 В очереди: <b>{stats['queue']}</b>")
+    if stats["pending"]:
+        parts.append(f"   ⏳ Ожидание: <b>{stats['pending']}</b>")
+    if stats["review"]:
+        parts.append(f"   🔎 На рассмотрении: <b>{stats['review']}</b>")
+    if stats["accepted"]:
+        parts.append(f"   ✅ Принято: <b>{stats['accepted']}</b>")
+    if stats["rejected"]:
+        parts.append(f"   ❌ Отклонено: <b>{stats['rejected']}</b>")
+    if stats["closed"]:
+        parts.append(f"   🔒 Закрыто: <b>{stats['closed']}</b>")
 
-    if complaints:
-        from src.status_monitor import status_label
-        parts.append("\n<b>📜 Последние жалобы:</b>")
-        for c in complaints[:5]:
-            st = status_label(c.get("status", "pending"))
-            target = escape((c.get("nickname") or "—")[:30])
-            url = c.get("forum_thread_url") or ""
-            link = (f' <a href="{escape(url)}">тема</a>'
-                    if url else "")
-            parts.append(f"   {st} <b>{target}</b>{link}")
-        if len(complaints) > 5:
-            parts.append(f"\n<i>…ещё {len(complaints) - 5}. Все — в "
-                          "<b>📜 Мои жалобы</b>.</i>")
+    if stats["total"] > 0:
+        pct = stats["success_pct"]
+        bar_filled = round(pct / 10)
+        bar = "🟩" * bar_filled + "⬜" * (10 - bar_filled)
+        parts.append(f"\n   🎯 Успешность: {bar} <b>{pct}%</b>")
+
+    if stats["top_targets"]:
+        parts.append("\n<b>🏆 Топ целей:</b>")
+        medals = ["🥇", "🥈", "🥉"]
+        for i, t in enumerate(stats["top_targets"]):
+            medal = medals[i] if i < len(medals) else "•"
+            parts.append(
+                f"   {medal} <b>{escape(t['nickname'])}</b> — "
+                f"{t['count']} жал."
+            )
+
+    parts.append(
+        "\n<i>💡 Используйте <code>/find Ник</code> для поиска жалоб по игроку.</i>"
+    )
 
     await message.answer("\n".join(parts), disable_web_page_preview=True)

@@ -1840,14 +1840,27 @@ async def _get_first_post_id(client: httpx.AsyncClient,
 
 
 async def delete_thread(thread_url: str,
-                         reason: str = "Удалено автором") -> tuple[bool, str]:
+                         reason: str = "Удалено автором",
+                         cookies: dict | None = None) -> tuple[bool, str]:
     """Удаляет тему на форуме (мягкое удаление в XenForo).
+
+    Если `cookies` переданы — операция идёт ИМЕННО с этими куками, а
+    cookies.json не читается и не перезаписывается. Это исключает гонку на
+    глобальном cookies.json при параллельной работе нескольких сценариев
+    (другой админ/фоновый запрос мог бы переписать файл между нашими
+    запросами, и POST ушёл бы под чужим аккаунтом → 403).
+
+    Если `cookies=None` — старое поведение: куки из cookies.json.
 
     Возвращает (успех, сообщение). Удалить может только автор темы или модератор.
     """
-    cookies = load_cookies()
-    if not cookies:
-        return False, "Нет кук — невозможно удалить тему."
+    use_session = cookies is None
+    if use_session:
+        cookies = load_cookies()
+        if not cookies:
+            return False, "Нет кук — невозможно удалить тему."
+    elif not cookies:
+        return False, "Переданы пустые куки — невозможно удалить тему."
 
     thread_id = _extract_thread_id(thread_url)
     if not thread_id:
@@ -1856,7 +1869,15 @@ async def delete_thread(thread_url: str,
     delete_url = f"{FORUM_URL}/threads/{thread_id}/delete"
     logger.info("Удаляю тему #%s на форуме (%s).", thread_id, thread_url)
 
-    async with _session() as client:
+    if use_session:
+        client_ctx = _session()
+    else:
+        client_ctx = httpx.AsyncClient(
+            cookies=cookies, headers=HEADERS,
+            follow_redirects=True, timeout=20.0,
+        )
+
+    async with client_ctx as client:
         try:
             # 1. Открываем страницу подтверждения удаления — получаем CSRF
             r = await client.get(delete_url)
@@ -1910,17 +1931,26 @@ async def delete_thread(thread_url: str,
 
 
 async def edit_thread_post(thread_url: str, new_message: str,
-                             new_title: str | None = None) -> tuple[bool, str]:
+                             new_title: str | None = None,
+                             cookies: dict | None = None) -> tuple[bool, str]:
     """Редактирует первый пост темы (тело жалобы).
 
     Если new_title задан — попутно меняет заголовок темы (метод XenForo
     разный, поэтому делаем двумя запросами).
 
+    Если `cookies` переданы — операция идёт ИМЕННО с этими куками, без
+    чтения/перезаписи cookies.json (исключает гонку на глобальном файле
+    при параллельной работе). Если `cookies=None` — куки из cookies.json.
+
     Возвращает (успех, сообщение).
     """
-    cookies = load_cookies()
-    if not cookies:
-        return False, "Нет кук — невозможно отредактировать."
+    use_session = cookies is None
+    if use_session:
+        cookies = load_cookies()
+        if not cookies:
+            return False, "Нет кук — невозможно отредактировать."
+    elif not cookies:
+        return False, "Переданы пустые куки — невозможно отредактировать."
 
     thread_id = _extract_thread_id(thread_url)
     if not thread_id:
@@ -1928,7 +1958,15 @@ async def edit_thread_post(thread_url: str, new_message: str,
 
     logger.info("Редактирую тему #%s.", thread_id)
 
-    async with _session() as client:
+    if use_session:
+        client_ctx = _session()
+    else:
+        client_ctx = httpx.AsyncClient(
+            cookies=cookies, headers=HEADERS,
+            follow_redirects=True, timeout=20.0,
+        )
+
+    async with client_ctx as client:
         try:
             # 1. Получаем post_id первого поста
             post_id = await _get_first_post_id(client, thread_url)
