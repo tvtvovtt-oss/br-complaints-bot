@@ -78,6 +78,10 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
                 types.KeyboardButton(text="📦 Очередь жалоб"),
             ],
             [
+                types.KeyboardButton(text="🔍 Найти жалобу"),
+                types.KeyboardButton(text="📊 Мой профиль"),
+            ],
+            [
                 types.KeyboardButton(text="🔒 Режим обслуживания"),
                 types.KeyboardButton(text="🐞 Баг-репорты"),
             ],
@@ -102,6 +106,10 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
             ],
             [
                 types.KeyboardButton(text="📋 Мои шаблоны"),
+                types.KeyboardButton(text="📊 Мой профиль"),
+            ],
+            [
+                types.KeyboardButton(text="🔍 Найти жалобу"),
                 types.KeyboardButton(text="🐞 Сообщить о баге"),
             ],
         ]
@@ -1009,6 +1017,7 @@ async def global_cancel(message: types.Message, state: FSMContext):
 
 
 @router.message(Command("me"))
+@router.message(F.text == "📊 Мой профиль")
 async def cmd_me(message: types.Message):
     """Показывает информацию о пользователе и его статистику."""
     user = message.from_user
