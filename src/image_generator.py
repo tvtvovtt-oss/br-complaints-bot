@@ -20,10 +20,21 @@ def ensure_font():
 
 def get_font(size: int):
     ensure_font()
-    try:
-        return ImageFont.truetype(FONT_PATH, size)
-    except IOError:
-        return ImageFont.load_default()
+    if os.path.exists(FONT_PATH):
+        try:
+            return ImageFont.truetype(FONT_PATH, size)
+        except Exception:
+            pass
+            
+    # Если скачать не удалось, используем системные шрифты
+    fallback_fonts = ["arial.ttf", "segoeui.ttf", "tahoma.ttf", "DejaVuSans.ttf"]
+    for f in fallback_fonts:
+        try:
+            return ImageFont.truetype(f, size)
+        except Exception:
+            pass
+            
+    return ImageFont.load_default()
 
 def generate_profile_card(user_info: dict, stats: dict) -> bytes:
     """Генерирует карточку профиля и возвращает байты JPEG."""
