@@ -24,6 +24,37 @@ def has_uploader() -> bool:
     return bool(os.getenv("IMGBB_API_KEY"))
 
 
+async def upload_video_catbox(file_path: str, filename: str = "video.mp4") -> tuple[bool, str]:
+    """Загружает видео на Catbox.moe.
+
+    Возвращает (True, прямая_ссылка) или (False, текст_ошибки).
+    Лимит Catbox — 200 МБ. Не требует API ключей.
+    """
+    url = "https://catbox.moe/user/api.php"
+    
+    try:
+        # Используем aiohttp для FormData (httpx сложнее работает с Multipart файлами большого размера)
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, 'rb') as f:
+                data = aiohttp.FormData()
+                data.add_field('reqtype', 'fileupload')
+                data.add_field('fileToUpload', f, filename=filename)
+                
+                async with session.post(url, data=data) as response:
+                    result = await response.text()
+                    
+                    if response.status == 200 and result.startswith("https://"):
+                        logger.info("Загружено на Catbox: %s", result)
+                        return True, result
+                    else:
+                        logger.warning("Catbox отказал HTTP %s: %s", response.status, result)
+                        return False, f"Catbox отказал: {result}"
+    except Exception as e:
+        logger.exception("Catbox upload failed")
+        return False, f"ошибка: {e}"
+
+
 async def upload_image(
     image_bytes: bytes,
     filename: str = "image.jpg",

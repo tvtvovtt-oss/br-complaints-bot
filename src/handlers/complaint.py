@@ -847,12 +847,14 @@ async def process_description(message: types.Message, state: FSMContext):
             "🔗 <b>Доказательства</b>\n\n"
             "📸 <b>Можно прислать скриншот картинкой</b> — бот сам зальёт его "
             "на imgbb.com и подставит ссылку.\n\n"
+            "🎥 <b>Можно прислать видео</b> — бот сам зальёт его на Catbox (до 20 МБ).\n\n"
             "Либо вставьте ссылки на YouTube/Imgur/Yapix через пробел или запятую.\n\n"
             "<i>Загрузка в ВКонтакте/Одноклассники запрещена правилами форума.</i>"
         )
     else:
         proof_hint = (
             "🔗 <b>Доказательства</b> (ссылки на YouTube/Imgur/Yapix и т.д. через пробел или запятую):\n\n"
+            "🎥 <b>Можно прислать видео прямо в бота</b> — он зальёт его на Catbox (до 20 МБ).\n\n"
             "<i>Загрузка в ВКонтакте/Одноклассники запрещена правилами форума.</i>"
         )
     await message.answer(proof_hint, reply_markup=_cancel_kb())
@@ -957,6 +959,82 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
         f"<b>Накоплено ссылок:</b> <code>{escape(new_value)}</code>",
         reply_markup=use_kb,
     )
+
+
+@router.message(ComplaintForm.waiting_for_proof, F.video)
+async def process_proof_video(message: types.Message, state: FSMContext, bot: Bot):
+    """Принимает видео, скачивает и заливает на Catbox."""
+    if not check_access(message.from_user.id):
+        return
+
+    from src.uploader import upload_video_catbox
+    import os
+    import tempfile
+
+    status_msg = await message.answer("⏳ Загружаю видео на сервер (это может занять время)...")
+
+    largest = message.video
+    if largest.file_size and largest.file_size > 20 * 1024 * 1024:
+        # Telegram bot API limits download to 20MB normally.
+        await status_msg.edit_text("❌ Telegram разрешает ботам скачивать файлы только до 20 МБ. Пришлите ссылку текстом.")
+        return
+
+    tmp_path = None
+    try:
+        file_id = largest.file_id
+        file_info = await bot.get_file(file_id)
+        
+        # Скачиваем во временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            tmp_path = tmp.name
+            
+        await bot.download_file(file_info.file_path, destination=tmp_path)
+    except Exception as e:
+        logger.exception("Не удалось скачать видео из Telegram: %s", e)
+        await status_msg.edit_text("❌ Не удалось скачать видео из Telegram. Пришлите ссылку текстом.")
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return
+
+    await status_msg.edit_text("⏳ Видео скачано, загружаю на хостинг Catbox...")
+
+    try:
+        ok, result = await upload_video_catbox(tmp_path, filename=f"proof_{message.from_user.id}.mp4")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    if not ok:
+        await status_msg.edit_text(
+            f"❌ <b>Не удалось загрузить видео.</b>\n"
+            f"<i>{escape(str(result))}</i>\n\n"
+            "Попробуйте ещё раз или вставьте ссылку текстом."
+        )
+        return
+
+    data = await state.get_data()
+    existing = (data.get("_uploaded_links") or "").strip()
+    new_value = (existing + " " + result).strip() if existing else result
+    await state.update_data(_uploaded_links=new_value)
+
+    await status_msg.edit_text(
+        f"✅ Загружено: <a href=\"{escape(result)}\">{escape(result)}</a>\n\n"
+        "Можете прислать ещё файлы, либо нажмите кнопку «✅ Использовать загруженное».",
+        disable_web_page_preview=True,
+    )
+
+    use_kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="✅ Использовать загруженное")],
+            [types.KeyboardButton(text="❌ Отмена")],
+        ],
+        resize_keyboard=True,
+    )
+    await message.answer(
+        f"<b>Накоплено ссылок:</b> <code>{escape(new_value)}</code>",
+        reply_markup=use_kb,
+    )
+
 
 
 @router.message(ComplaintForm.waiting_for_proof)
