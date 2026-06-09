@@ -21,6 +21,9 @@ from src.database import (
     is_banned,
     list_complaints_paginated,
     get_complaint,
+    list_subscription_channels,
+    add_subscription_channel,
+    remove_subscription_channel,
 )
 from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
@@ -1260,3 +1263,189 @@ async def adm_complaint_ban_author(call: types.CallbackQuery):
     logger.info("Админ %s забанил автора жалобы #%s (user_id=%s).",
                 describe_user(call.from_user), cid, author_id)
     await call.answer(f"🚫 Забанен {author_id}", show_alert=True)
+
+
+# ---------------- Управление обязательной подпиской (/subs) ----------------
+
+class SubsForm(StatesGroup):
+    waiting_for_channel = State()
+
+
+def _build_subs_menu(channels: list[str]) -> types.InlineKeyboardMarkup:
+    """Inline-меню: список каналов с кнопкой ❌ для удаления + ➕ Добавить."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if channels:
+        for ch in channels:
+            rows.append([
+                types.InlineKeyboardButton(
+                    text=f"❌ @{ch}",
+                    callback_data=f"subs:remove:{ch}",
+                ),
+            ])
+    else:
+        # Если каналов нет — сообщим через пустую строку
+        rows.append([
+            types.InlineKeyboardButton(
+                text="(список пуст)", callback_data="subs:noop",
+            ),
+        ])
+    rows.append([
+        types.InlineKeyboardButton(
+            text="➕ Добавить канал", callback_data="subs:add",
+        ),
+    ])
+    rows.append([
+        types.InlineKeyboardButton(
+            text="🔄 Обновить", callback_data="subs:list",
+        ),
+    ])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _subs_text(channels: list[str]) -> str:
+    if not channels:
+        return (
+            "🔔 <b>Проверка подписки на каналы</b>\n\n"
+            "Сейчас список пуст — бот не требует подписки ни на какие каналы.\n"
+            "Нажмите <b>«➕ Добавить канал»</b>, чтобы добавить первый."
+        )
+    listed = "\n".join(f"  • @{ch}" for ch in channels)
+    return (
+        "🔔 <b>Проверка подписки на каналы</b>\n\n"
+        "Пользователи должны быть подписаны на все каналы ниже, "
+        "иначе бот будет показывать приглашение подписаться.\n\n"
+        f"<b>Текущий список ({len(channels)}):</b>\n{listed}\n\n"
+        "• <b>➕ Добавить канал</b> — добавить новый канал\n"
+        "• <b>❌ @канал</b> — удалить канал из списка\n"
+        "• <b>🔄 Обновить</b> — перерисовать меню"
+    )
+
+
+@router.message(Command("subs"))
+async def cmd_subs(message: types.Message):
+    """Главное меню управления обязательной подпиской (только админам)."""
+    if not is_admin(message.from_user.id):
+        return
+    channels = await list_subscription_channels()
+    await message.answer(
+        _subs_text(channels), reply_markup=_build_subs_menu(channels),
+    )
+
+
+@router.callback_query(F.data == "subs:list")
+async def cb_subs_list(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("Недоступно.", show_alert=True)
+        return
+    channels = await list_subscription_channels()
+    try:
+        await call.message.edit_text(
+            _subs_text(channels), reply_markup=_build_subs_menu(channels),
+        )
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data == "subs:noop")
+async def cb_subs_noop(call: types.CallbackQuery):
+    # Заглушка для неактивной кнопки "(список пуст)"
+    await call.answer()
+
+
+@router.callback_query(F.data == "subs:add")
+async def cb_subs_add(call: types.CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer("Недоступно.", show_alert=True)
+        return
+    await state.set_state(SubsForm.waiting_for_channel)
+    await call.message.answer(
+        "➕ <b>Добавление канала</b>\n\n"
+        "Отправьте <b>username</b> канала одним сообщением.\n"
+        "Можно с <code>@</code> или ссылкой <code>t.me/...</code>.\n\n"
+        "Примеры:\n"
+        "  <code>@borzyyyy1</code>\n"
+        "  <code>https://t.me/tgkborzov</code>\n\n"
+        "Для отмены — напишите <code>отмена</code>.",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            resize_keyboard=True,
+        ),
+    )
+    await call.answer()
+
+
+@router.message(SubsForm.waiting_for_channel)
+async def subs_got_channel(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    txt = (message.text or "").strip()
+    if txt.lower() in ("отмена", "❌ отмена", "/cancel"):
+        await state.clear()
+        await message.answer(
+            "❌ Добавление канала отменено.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+        return
+    ok, result = await add_subscription_channel(txt, added_by=message.from_user.id)
+    await state.clear()
+    if ok:
+        # Сбрасываем кеш middleware, чтобы новые каналы начали проверяться
+        # сразу же у всех пользователей.
+        try:
+            from src.subscription import _get_active_middleware
+            mw = _get_active_middleware()
+            if mw is not None:
+                mw.invalidate()
+        except Exception:
+            pass
+        await message.answer(
+            f"✅ Канал <b>@{escape(result)}</b> добавлен в список.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
+        # Перерисуем меню /subs
+        channels = await list_subscription_channels()
+        await message.answer(
+            _subs_text(channels), reply_markup=_build_subs_menu(channels),
+        )
+    else:
+        await message.answer(
+            f"{result}\n\nПопробуйте ещё раз или нажмите ❌ Отмена.",
+            reply_markup=types.ReplyKeyboardMarkup(
+                keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+                resize_keyboard=True,
+            ),
+        )
+        # Возвращаем в состояние, чтобы можно было сразу попробовать снова
+        await state.set_state(SubsForm.waiting_for_channel)
+
+
+@router.callback_query(F.data.startswith("subs:remove:"))
+async def cb_subs_remove(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("Недоступно.", show_alert=True)
+        return
+    channel = (call.data or "").split(":", 2)[-1]
+    ok, result = await remove_subscription_channel(channel)
+    if ok:
+        try:
+            from src.subscription import _get_active_middleware
+            mw = _get_active_middleware()
+            if mw is not None:
+                mw.invalidate()
+        except Exception:
+            pass
+        await call.answer(f"Удалён @{result}", show_alert=False)
+    else:
+        await call.answer(result, show_alert=True)
+        return
+    # Перерисовываем меню
+    channels = await list_subscription_channels()
+    try:
+        await call.message.edit_text(
+            _subs_text(channels), reply_markup=_build_subs_menu(channels),
+        )
+    except Exception:
+        pass
+

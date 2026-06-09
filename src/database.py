@@ -255,13 +255,19 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Каналы, на которые пользователь должен быть подписан, чтобы
+        # пользоваться ботом. Список редактируется админом через /subs.
+        # username хранится в нижнем регистре, БЕЗ ведущего '@' и t.me/.
+        await _ensure_subscriptions_table(db)
+        await _seed_default_subscription_channels(db)
         # Таблица users (нужна для list_all_users без UNION) + бэкфил из
         # старых таблиц для проектов, обновляющихся с предыдущих версий.
         await _ensure_users_table(db)
         await _backfill_users(db)
         await db.commit()
     logger.info("База данных готова. Таблицы: complaints, servers, "
-                "complaint_categories, accounts, users.")
+                "complaint_categories, accounts, users, "
+                "subscription_channels.")
 
 
 # ---------- Жалобы ----------
@@ -1708,6 +1714,136 @@ async def set_setting(key: str, value: str) -> None:
         )
         await db.commit()
     await _trigger_backup()
+
+
+# ---------- Каналы обязательной подписки ----------
+
+# Дефолтный список каналов. Сидится в БД только при первом запуске
+# (таблица пустая). Если в БД уже что-то есть — не трогаем.
+DEFAULT_SUBSCRIPTION_CHANNELS: tuple[str, ...] = ("borzyyyy1", "tgkborzov")
+
+
+def _normalize_channel_username(raw: str) -> str | None:
+    """Приводит ввод пользователя к каноническому виду username канала.
+
+    Принимает: @borzyyyy1, t.me/borzyyyy1, https://t.me/borzyyyy1, borzyyyy1.
+    Возвращает lower-case username без '@' и слешей. None если строка пустая
+    или содержит недопустимые символы.
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    # убираем префиксы и query/anchor
+    for prefix in ("https://t.me/", "http://t.me/", "t.me/", "telegram.me/",
+                   "https://telegram.me/", "http://telegram.me/"):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = s.lstrip("@").split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    s = s.strip().lower()
+    if not s:
+        return None
+    # Telegram username: 5-32 символа, [a-z0-9_]
+    import re as _re
+    if not _re.fullmatch(r"[a-z0-9_]{4,32}", s):
+        return None
+    return s
+
+
+async def _ensure_subscriptions_table(db: aiosqlite.Connection) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS subscription_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_username TEXT NOT NULL UNIQUE,
+            added_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+async def _seed_default_subscription_channels(db: aiosqlite.Connection) -> None:
+    """Одноразовый сид: добавляет DEFAULT_SUBSCRIPTION_CHANNELS, если
+    таблица пуста. Если в БД уже есть записи — ничего не делаем (админ
+    мог что-то удалить/добавить и при перезапуске мы не должны это
+    перетирать)."""
+    async with db.execute(
+        "SELECT COUNT(*) FROM subscription_channels"
+    ) as cur:
+        (count,) = await cur.fetchone()
+    if count > 0:
+        return
+    for ch in DEFAULT_SUBSCRIPTION_CHANNELS:
+        try:
+            await db.execute(
+                "INSERT INTO subscription_channels(channel_username) VALUES (?)",
+                (ch,),
+            )
+        except Exception:
+            # Если кто-то параллельно вставил — игнорируем
+            pass
+    logger.info("Заполнил subscription_channels дефолтным списком: %s",
+                DEFAULT_SUBSCRIPTION_CHANNELS)
+
+
+async def list_subscription_channels() -> list[str]:
+    """Возвращает список username каналов обязательной подписки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_subscriptions_table(db)
+        async with db.execute(
+            "SELECT channel_username FROM subscription_channels "
+            "ORDER BY id"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [r[0] for r in rows]
+
+
+async def add_subscription_channel(raw: str, added_by: int) -> tuple[bool, str]:
+    """Добавляет канал в список обязательной подписки.
+
+    Возвращает (ok, username_or_error). При ok=True — нормализованный
+    username (без @). При ok=False — сообщение об ошибке.
+    """
+    username = _normalize_channel_username(raw)
+    if not username:
+        return False, (
+            "❌ Некорректный username. Укажите как @channel "
+            "(5-32 символа, латиница/цифры/подчёркивание), например: @borzyyyy1"
+        )
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_subscriptions_table(db)
+        try:
+            await db.execute(
+                "INSERT INTO subscription_channels(channel_username, added_by) "
+                "VALUES (?, ?)",
+                (username, added_by),
+            )
+            await db.commit()
+        except Exception as e:
+            msg = str(e).lower()
+            if "unique" in msg:
+                return False, f"⚠️ Канал @{username} уже в списке."
+            logger.exception("Ошибка добавления канала подписки")
+            return False, "❌ Не удалось сохранить канал в БД."
+    await _trigger_backup()
+    return True, username
+
+
+async def remove_subscription_channel(raw: str) -> tuple[bool, str]:
+    """Удаляет канал из списка. Возвращает (ok, username_or_error)."""
+    username = _normalize_channel_username(raw)
+    if not username:
+        return False, "❌ Некорректный username."
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_subscriptions_table(db)
+        cur = await db.execute(
+            "DELETE FROM subscription_channels WHERE channel_username = ?",
+            (username,),
+        )
+        await db.commit()
+        if cur.rowcount == 0:
+            return False, f"⚠️ Канал @{username} не найден в списке."
+    await _trigger_backup()
+    return True, username
 
 
 # ---------- Бан пользователей бота ----------

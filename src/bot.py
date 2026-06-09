@@ -25,6 +25,7 @@ from src.middleware import (
     ThrottleMiddleware, CleanupMiddleware, MaintenanceMiddleware, BanMiddleware,
     UserTrackingMiddleware,
 )
+from src.subscription import SubscriptionMiddleware, set_middleware as set_sub_middleware
 from src.status_monitor import status_monitor_loop
 from src.queue_processor import queue_processor_loop
 from src.error_reporter import install as install_error_reporter
@@ -92,7 +93,16 @@ async def main():
     tracker = UserTrackingMiddleware()
     dp.message.middleware(tracker)
     dp.callback_query.middleware(tracker)
-    logger.info("Подключены middleware: Throttle, Ban, Maintenance, UserTracking.")
+    # Проверка обязательной подписки на каналы спонсоров. Стоит ПОСЛЕ
+    # throttle/ban/maintenance, чтобы спамеры и забаненные не получали
+    # приглашение подписаться, и ДО user-tracker, чтобы не-подписчики
+    # не засоряли таблицу users до фактического использования бота.
+    subscription = SubscriptionMiddleware()
+    set_sub_middleware(subscription)
+    dp.message.middleware(subscription)
+    dp.callback_query.middleware(subscription)
+    logger.info("Подключены middleware: Throttle, Ban, Maintenance, "
+                "UserTracking, Subscription.")
 
     dp.include_router(common.router)
     dp.include_router(complaint.router)
@@ -167,6 +177,7 @@ async def main():
         BotCommand(command="banlist", description="🚫 Список забаненных"),
         BotCommand(command="maintenance", description="🔒 Режим обслуживания"),
         BotCommand(command="dbinfo", description="🛠 Состояние БД"),
+        BotCommand(command="subs", description="🔔 Каналы подписки"),
     ]
     try:
         await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())

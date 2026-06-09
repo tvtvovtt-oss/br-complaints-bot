@@ -1056,3 +1056,12 @@ async def cmd_me(message: types.Message):
 
     await status_msg.delete()
     await message.answer_photo(photo, caption="\n".join(parts), parse_mode="HTML")
+
+
+# Inline-кнопка "Проверить подписку" из приглашения SubscriptionMiddleware.
+# Этот callback пропускается мимо middleware (см. _bypass_callback), но всё
+# равно обрабатывается здесь, чтобы не дублировать логику в bot.py.
+@router.callback_query(F.data == "resub:check")
+async def cb_resub_check(callback: types.CallbackQuery, bot: Bot):
+    from src.subscription import recheck_and_reply
+    await recheck_and_reply(bot, callback)
