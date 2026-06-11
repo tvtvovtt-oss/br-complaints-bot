@@ -37,14 +37,9 @@ logger = logging.getLogger(__name__)
 
 
 def is_admin(user_id: int) -> bool:
-    """Проверяет, является ли пользователь админом.
-    Если ADMIN_IDS пуст — все админы (для локальной отладки)."""
+    """Проверяет, является ли пользователь админом."""
     if not ADMIN_IDS:
-        logger.warning(
-            "ADMIN_IDS не задан — все пользователи получают права администратора! "
-            "Установите ADMIN_IDS в .env перед запуском в продакшене."
-        )
-        return True
+        return False
     return user_id in ADMIN_IDS
 
 

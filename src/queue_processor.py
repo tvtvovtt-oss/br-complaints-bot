@@ -84,6 +84,7 @@ async def _process_one(bot: Bot, item: dict) -> None:
         # Все аккаунты в кулдауне или нет аккаунтов вообще.
         # Не помечаем failed — просто пропускаем итерацию, попробуем позже.
         logger.debug("Жалоба #%s ждёт свободный аккаунт.", qid)
+        await asyncio.sleep(10)
         return
 
     logger.info("Жалоба из очереди #%s публикуется от имени «%s» (попытка %d).",

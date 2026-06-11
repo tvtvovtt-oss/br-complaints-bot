@@ -222,9 +222,6 @@ class MaintenanceMiddleware(BaseMiddleware):
         # Админ всегда проходит
         if ADMIN_IDS and user.id in ADMIN_IDS:
             return await handler(event, data)
-        # Если ADMIN_IDS пуст — все админы (для отладки), пропускаем
-        if not ADMIN_IDS:
-            return await handler(event, data)
 
         if not await is_enabled():
             return await handler(event, data)
