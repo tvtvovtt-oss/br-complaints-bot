@@ -258,6 +258,7 @@ async def init_db():
         # Каналы, на которые пользователь должен быть подписан, чтобы
         # пользоваться ботом. Список редактируется админом через /subs.
         # username хранится в нижнем регистре, БЕЗ ведущего '@' и t.me/.
+        await _ensure_settings_table(db)
         await _ensure_subscriptions_table(db)
         await _seed_default_subscription_channels(db)
         # Таблица users (нужна для list_all_users без UNION) + бэкфил из
@@ -687,6 +688,60 @@ async def list_accounts(telegram_id: int) -> list[dict]:
                 }
                 for r in rows
             ]
+
+
+async def get_account_pool_status(telegram_id: int) -> dict:
+    """Returns aggregate availability info for a user's forum account pool."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN COALESCE(needs_reauth, 0) = 1 THEN 1 ELSE 0 END)
+                    AS needs_reauth,
+                SUM(CASE WHEN COALESCE(needs_reauth, 0) = 0 THEN 1 ELSE 0 END)
+                    AS usable,
+                SUM(CASE
+                    WHEN COALESCE(needs_reauth, 0) = 0
+                     AND (cooldown_until IS NULL OR cooldown_until <= datetime('now'))
+                    THEN 1 ELSE 0 END
+                ) AS available,
+                SUM(CASE
+                    WHEN COALESCE(needs_reauth, 0) = 0
+                     AND cooldown_until > datetime('now')
+                    THEN 1 ELSE 0 END
+                ) AS cooldown,
+                MIN(CASE
+                    WHEN COALESCE(needs_reauth, 0) = 0
+                     AND cooldown_until > datetime('now')
+                    THEN CAST((julianday(cooldown_until) - julianday('now')) * 86400 AS INTEGER)
+                    ELSE NULL END
+                ) AS next_available_seconds
+            FROM accounts
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ) as cur:
+            row = await cur.fetchone()
+
+    total = int(row[0] or 0) if row else 0
+    needs_reauth = int(row[1] or 0) if row else 0
+    usable = int(row[2] or 0) if row else 0
+    available = int(row[3] or 0) if row else 0
+    cooldown = int(row[4] or 0) if row else 0
+    next_seconds = row[5] if row else None
+    if next_seconds is not None:
+        next_seconds = max(0, int(next_seconds))
+
+    return {
+        "telegram_id": telegram_id,
+        "total": total,
+        "needs_reauth": needs_reauth,
+        "usable": usable,
+        "available": available,
+        "cooldown": cooldown,
+        "next_available_seconds": next_seconds,
+    }
 
 
 async def get_active_account(telegram_id: int) -> dict | None:
@@ -1337,7 +1392,7 @@ async def list_queue_pending() -> list[dict]:
             """
             SELECT id, telegram_id, section_id, title, bb_code,
                    target_nickname, description, proof_link,
-                   attempts, created_at
+                   attempts, created_at, last_error
             FROM complaint_queue
             WHERE status = 'pending'
             ORDER BY created_at ASC
@@ -1350,7 +1405,7 @@ async def list_queue_pending() -> list[dict]:
                     "title": r[3], "bb_code": r[4],
                     "target_nickname": r[5], "description": r[6],
                     "proof_link": r[7], "attempts": r[8],
-                    "created_at": r[9],
+                    "created_at": r[9], "last_error": r[10],
                 }
                 for r in rows
             ]

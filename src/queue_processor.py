@@ -12,6 +12,7 @@ claim_available_account и публикует на форуме. После ус
 """
 import asyncio
 import logging
+import time
 from html import escape
 
 from aiogram import Bot
@@ -27,8 +28,10 @@ from src.database import (
     add_complaint,
     update_account_cookies,
     mark_account_needs_reauth,
+    get_account_pool_status,
 )
 from src.forum.xenforo import post_complaint, is_auth_error, is_noperm_error
+from src.settings import get_queue_settings, format_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,8 @@ MAX_ATTEMPTS = 3
 # друг другу. 2 — компромисс: ускорение в 2 раза, но не перегружаем форум.
 PARALLEL_WORKERS = 2
 
+_last_admin_alerts: dict[str, float] = {}
+
 
 async def _notify_user(bot: Bot, telegram_id: int, text: str,
                         disable_preview: bool = False) -> None:
@@ -60,12 +65,96 @@ async def _notify_user(bot: Bot, telegram_id: int, text: str,
         logger.exception("Неизвестная ошибка уведомления %s", telegram_id)
 
 
-async def _process_one(bot: Bot, item: dict) -> None:
+async def _notify_admins(
+    bot: Bot,
+    key: str,
+    text: str,
+    cooldown_seconds: int,
+) -> None:
+    now = time.monotonic()
+    last = _last_admin_alerts.get(key, 0.0)
+    if now - last < cooldown_seconds:
+        return
+    _last_admin_alerts[key] = now
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                text,
+                disable_web_page_preview=True,
+                disable_notification=False,
+            )
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            logger.debug("admin alert %s: %s", admin_id, e)
+        except Exception:
+            logger.exception("Не удалось отправить alert админу %s", admin_id)
+
+
+async def _alert_pool_problem(
+    bot: Bot,
+    owner_id: int,
+    pool: dict,
+    queue_id: int,
+    target: str,
+    alert_cooldown: int,
+) -> None:
+    total = int(pool.get("total", 0) or 0)
+    usable = int(pool.get("usable", 0) or 0)
+    available = int(pool.get("available", 0) or 0)
+    needs_reauth = int(pool.get("needs_reauth", 0) or 0)
+    cooldown = int(pool.get("cooldown", 0) or 0)
+    next_seconds = pool.get("next_available_seconds")
+
+    if total <= 0:
+        await _notify_admins(
+            bot,
+            f"queue_pool:{owner_id}:no_accounts",
+            "⚠️ <b>Очередь жалоб ждёт аккаунты</b>\n\n"
+            f"Жалоба <code>#{queue_id}</code> на <b>{escape(target)}</b> не может быть опубликована: "
+            "в пуле нет ни одного форумного аккаунта.\n\n"
+            "Добавьте аккаунт через <code>/login</code> или кнопку <b>🔐 Войти по паролю</b>.",
+            alert_cooldown,
+        )
+        return
+
+    if usable <= 0 and needs_reauth > 0:
+        await _notify_admins(
+            bot,
+            f"queue_pool:{owner_id}:all_reauth",
+            "⚠️ <b>Очередь жалоб остановилась</b>\n\n"
+            f"Все форумные аккаунты требуют повторный вход: <b>{needs_reauth}/{total}</b>.\n"
+            f"Жалоба <code>#{queue_id}</code> на <b>{escape(target)}</b> ждёт рабочий аккаунт.\n\n"
+            "Откройте <code>/accounts</code> и перелогиньте аккаунты через <code>/login</code>.",
+            alert_cooldown,
+        )
+        return
+
+    if available <= 0 and cooldown > 0:
+        wait_text = (
+            format_seconds(int(next_seconds))
+            if next_seconds is not None else "неизвестно"
+        )
+        await _notify_admins(
+            bot,
+            f"queue_pool:{owner_id}:all_cooldown",
+            "⏳ <b>Очередь жалоб ждёт кулдаун</b>\n\n"
+            f"Все доступные аккаунты сейчас в кулдауне: <b>{cooldown}</b>.\n"
+            f"Ближайший освободится через <b>{wait_text}</b>.\n"
+            f"Жалоба <code>#{queue_id}</code> на <b>{escape(target)}</b> останется в pending.",
+            alert_cooldown,
+        )
+
+
+async def _process_one(bot: Bot, item: dict, cfg: dict[str, int]) -> None:
     """Публикует одну жалобу из очереди."""
     qid = item["id"]
     target = item["target_nickname"]
     section_id = item["section_id"]
     telegram_id = item["telegram_id"]
+    max_attempts = cfg["max_attempts"]
+    account_cooldown = cfg["account_cooldown_seconds"]
+    alert_cooldown = cfg["admin_alert_cooldown_seconds"]
 
     if item["attempts"] >= MAX_ATTEMPTS:
         logger.warning("Жалоба #%s превысила лимит попыток (%d) — failed.",
