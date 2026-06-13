@@ -35,6 +35,7 @@ from src.logger import describe_user
 from src.effects import EFFECT_CONFETTI, EFFECT_FIRE, EFFECT_LIKE, EFFECT_HEART
 from src.premium_emoji import (
     te,
+    BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
     PE_SETTINGS, PE_PROFILE, PE_PEOPLE, PE_FILE, PE_LOCK_CLOSED, PE_LOCK_OPEN,
     PE_MEGAPHONE, PE_CHECK, PE_CROSS, PE_PENCIL, PE_TRASH, PE_PAPERCLIP,
     PE_LINK, PE_INFO, PE_BOT, PE_EYE, PE_SEND_UP, PE_BELL, PE_CLOCK, PE_PARTY,
@@ -76,12 +77,14 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
 
     Текстовые ярлыки оставлены как есть (с обычными эмодзи) — на них
     завязаны ``F.text``-фильтры. Премиум-юзерам Telegram дополнительно
-    отрисует анимированную иконку слева (``icon_custom_emoji_id``)."""
+    отрисует анимированную иконку слева (``icon_custom_emoji_id``)
+    и подкрасит кнопку (``style``)."""
     if is_admin_user:
         kb = [
             [
                 types.KeyboardButton(text="📝 Подать жалобу",
-                                     icon_custom_emoji_id=PE_PENCIL),
+                                     icon_custom_emoji_id=PE_PENCIL,
+                                     style=BTN_PRIMARY),
                 types.KeyboardButton(text="📜 Мои жалобы",
                                      icon_custom_emoji_id=PE_ARROW_DOWN_LIST),
             ],
@@ -99,7 +102,8 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
             ],
             [
                 types.KeyboardButton(text="🔒 Режим обслуживания",
-                                     icon_custom_emoji_id=PE_LOCK_CLOSED),
+                                     icon_custom_emoji_id=PE_LOCK_CLOSED,
+                                     style=BTN_DANGER),
                 types.KeyboardButton(text="🐞 Баг-репорты",
                                      icon_custom_emoji_id=PE_BOT),
             ],
@@ -107,26 +111,30 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
                 types.KeyboardButton(text="🔍 Проверить статус форума",
                                      icon_custom_emoji_id=PE_INFO),
                 types.KeyboardButton(text="🔄 Синхронизировать форум",
-                                     icon_custom_emoji_id=PE_LOADING),
+                                     icon_custom_emoji_id=PE_LOADING,
+                                     style=BTN_PRIMARY),
             ],
             [
                 types.KeyboardButton(text="👥 Аккаунты",
                                      icon_custom_emoji_id=PE_PEOPLE),
                 types.KeyboardButton(text="🔐 Войти по паролю",
-                                     icon_custom_emoji_id=PE_LOCK_CLOSED),
+                                     icon_custom_emoji_id=PE_LOCK_CLOSED,
+                                     style=BTN_PRIMARY),
             ],
             [
                 types.KeyboardButton(text="📊 Статистика",
                                      icon_custom_emoji_id=PE_CHART_STATS),
                 types.KeyboardButton(text="📢 Рассылка",
-                                     icon_custom_emoji_id=PE_MEGAPHONE),
+                                     icon_custom_emoji_id=PE_MEGAPHONE,
+                                     style=BTN_PRIMARY),
             ],
         ]
     else:
         kb = [
             [
                 types.KeyboardButton(text="📝 Подать жалобу",
-                                     icon_custom_emoji_id=PE_PENCIL),
+                                     icon_custom_emoji_id=PE_PENCIL,
+                                     style=BTN_PRIMARY),
                 types.KeyboardButton(text="📜 Мои жалобы",
                                      icon_custom_emoji_id=PE_ARROW_DOWN_LIST),
             ],
@@ -166,7 +174,8 @@ class LoginForm(StatesGroup):
 def _login_cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(
-            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)]],
+            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+            style=BTN_DANGER)]],
         resize_keyboard=True,
     )
 
@@ -212,7 +221,10 @@ async def _login_cancel(message: types.Message, state: FSMContext) -> bool:
             login=None,
         )
         await state.clear()
-        await message.answer("❌ Вход отменён.", reply_markup=_menu_for(message.from_user.id))
+        await message.answer(
+            f"{te(PE_CROSS, '❌')} Вход отменён.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
         return True
     return False
 
@@ -262,7 +274,8 @@ async def login_step_password(message: types.Message, state: FSMContext, bot: Bo
                          "удалить его вручную.", second_err)
             try:
                 await message.answer(
-                    "⚠️ <b>Не смог автоматически удалить ваш пароль из чата.</b>\n"
+                    f"{te(PE_INFO, '⚠️')} <b>Не смог автоматически удалить "
+                    "ваш пароль из чата.</b>\n"
                     "Удалите его вручную как можно скорее (тапните по сообщению "
                     "и выберите «Удалить»)."
                 )
@@ -271,7 +284,9 @@ async def login_step_password(message: types.Message, state: FSMContext, bot: Bo
 
     data = await state.get_data()
     login_value = data.get("login", "")
-    status_msg = await message.answer("⏳ Пытаюсь войти на форум...")
+    status_msg = await message.answer(
+        f"{te(PE_LOADING, '⏳')} Пытаюсь войти на форум..."
+    )
 
     result = await forum_login(login_value, password)
 
@@ -282,9 +297,13 @@ async def login_step_password(message: types.Message, state: FSMContext, bot: Bo
         logger.warning("Вход для %s не удался: %s",
                        describe_user(message.from_user), result["message"])
         await status_msg.edit_text(
-            f"❌ <b>Не удалось войти.</b>\n\n{escape(result['message'])}"
+            f"{te(PE_CROSS, '❌')} <b>Не удалось войти.</b>\n\n"
+            f"{escape(result['message'])}"
         )
-        await message.answer("Главное меню:", reply_markup=_menu_for(message.from_user.id))
+        await message.answer(
+            "Главное меню:",
+            reply_markup=_menu_for(message.from_user.id),
+        )
         return
 
     if result["status"] == "ok":
@@ -312,18 +331,19 @@ async def login_step_password(message: types.Message, state: FSMContext, bot: Bo
 
     if provider == "email":
         prompt = (
-            "✉️ <b>Двухфакторная авторизация</b>\n\n"
+            f"{te(PE_INFO, '✉️')} <b>Двухфакторная авторизация</b>\n\n"
             "Форум отправил <b>код подтверждения на вашу email-почту</b>.\n"
             "Откройте письмо и введите код сюда (обычно 6 цифр)."
         )
     elif provider == "totp":
         prompt = (
-            "🔢 <b>Двухфакторная авторизация (TOTP)</b>\n\n"
+            f"{te(PE_LOCK_CLOSED, '🔢')} <b>Двухфакторная авторизация (TOTP)</b>\n\n"
             "Откройте Google Authenticator / Authy и введите 6-значный код."
         )
     else:
         prompt = (
-            f"🔐 <b>Двухфакторная авторизация (провайдер: {escape(provider)})</b>\n\n"
+            f"{te(PE_LOCK_CLOSED, '🔐')} <b>Двухфакторная авторизация "
+            f"(провайдер: {escape(provider)})</b>\n\n"
             "Введите код подтверждения."
         )
 
@@ -352,19 +372,26 @@ async def login_step_2fa(message: types.Message, state: FSMContext):
     twofa_state = data.get("twofa")
     if not twofa_state:
         await state.clear()
-        await message.answer("⚠️ Сессия 2FA утеряна. Начните заново через /login.",
-                             reply_markup=_menu_for(message.from_user.id))
+        await message.answer(
+            f"{te(PE_INFO, '⚠️')} Сессия 2FA утеряна. Начните заново "
+            "через /login.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
         return
 
-    status_msg = await message.answer("⏳ Проверяю код...")
+    status_msg = await message.answer(
+        f"{te(PE_LOADING, '⏳')} Проверяю код..."
+    )
     result = await forum_submit_2fa(twofa_state, code)
 
     if result["status"] == "error":
         logger.warning("2FA-код от %s неверен: %s",
                        describe_user(message.from_user), result["message"])
         await status_msg.edit_text(
-            f"❌ <b>Код не принят.</b>\n\n{escape(result['message'])}\n\n"
-            "Попробуйте ввести код ещё раз или нажмите ❌ Отмена."
+            f"{te(PE_CROSS, '❌')} <b>Код не принят.</b>\n\n"
+            f"{escape(result['message'])}\n\n"
+            f"Попробуйте ввести код ещё раз или нажмите "
+            f"{te(PE_CROSS, '❌')} Отмена."
         )
         return
 
@@ -503,7 +530,8 @@ async def _deny_non_admin(message: types.Message) -> bool:
     logger.info("Не-админ %s попытался вызвать админскую команду.",
                 describe_user(message.from_user))
     await message.answer(
-        "🔒 Эта функция доступна только администраторам бота.",
+        f"{te(PE_LOCK_CLOSED, '🔒')} Эта функция доступна только "
+        "администраторам бота.",
         reply_markup=_menu_for(message.from_user.id),
     )
     return True
@@ -520,19 +548,23 @@ async def check_forum_status(message: types.Message):
     accounts = await list_accounts(message.from_user.id)
     # Если в БД пусто — пробуем то что в cookies.json
     if not accounts:
-        checking_msg = await message.answer("⏳ Проверяю авторизацию на форуме...")
+        checking_msg = await message.answer(
+            f"{te(PE_LOADING, '⏳')} Проверяю авторизацию на форуме..."
+        )
         success, result = await check_auth()
         if success:
             await checking_msg.delete()
             await message.answer(
-                f"✅ Успешно авторизован на форуме!\n👤 Аккаунт: <b>{escape(result)}</b>\n\n"
+                f"{te(PE_CHECK, '✅')} Успешно авторизован на форуме!\n"
+                f"{te(PE_PROFILE, '👤')} Аккаунт: <b>{escape(result)}</b>\n\n"
                 "<i>В БД пока нет аккаунтов — добавьте через "
                 "🔐 Войти по паролю или 👥 Аккаунты.</i>",
                 message_effect_id=EFFECT_FIRE,
             )
         else:
             await checking_msg.edit_text(
-                f"❌ <b>Ошибка авторизации.</b>\n\n{result}\n\n"
+                f"{te(PE_CROSS, '❌')} <b>Ошибка авторизации.</b>\n\n"
+                f"{result}\n\n"
                 "Пришлите свежий <code>cookies.json</code> или войдите через "
                 "<b>🔐 Войти по паролю</b>."
             )
@@ -540,7 +572,8 @@ async def check_forum_status(message: types.Message):
 
     # Параллельно проверяем все аккаунты
     checking_msg = await message.answer(
-        f"⏳ Проверяю {len(accounts)} аккаунт(ов) на форуме..."
+        f"{te(PE_LOADING, '⏳')} Проверяю {len(accounts)} аккаунт(ов) "
+        "на форуме..."
     )
 
     import asyncio
@@ -565,12 +598,17 @@ async def check_forum_status(message: types.Message):
     ok_count = sum(1 for _, ok, _ in results if ok)
     fail_count = len(results) - ok_count
 
-    lines = [f"<b>Проверка статуса аккаунтов:</b> ✅ {ok_count} • ❌ {fail_count}\n"]
+    lines = [
+        f"<b>Проверка статуса аккаунтов:</b> "
+        f"{te(PE_CHECK, '✅')} {ok_count} • "
+        f"{te(PE_CROSS, '❌')} {fail_count}\n"
+    ]
     for acc, ok, info in results:
         marker_active = " ⭐" if acc["is_active"] else ""
         if ok:
             lines.append(
-                f"✅ <b>{escape(acc['username'])}</b>{marker_active} — "
+                f"{te(PE_CHECK, '✅')} <b>{escape(acc['username'])}</b>"
+                f"{marker_active} — "
                 f"<i>сессия активна</i> (на форуме: <b>{escape(info)}</b>)"
             )
         else:
@@ -578,13 +616,14 @@ async def check_forum_status(message: types.Message):
             # покажем только первые 120 символов чтобы не раздувать сообщение
             short = info if len(info) < 200 else info[:200].replace("\n", " ") + "…"
             lines.append(
-                f"❌ <b>{escape(acc['username'])}</b>{marker_active} — {short}"
+                f"{te(PE_CROSS, '❌')} <b>{escape(acc['username'])}</b>"
+                f"{marker_active} — {short}"
             )
 
     if fail_count:
         lines.append(
-            "\n<i>⚠️ Для просроченных аккаунтов обновите куки через "
-            "<b>🔐 Войти по паролю</b>.</i>"
+            f"\n<i>{te(PE_INFO, '⚠️')} Для просроченных аккаунтов обновите "
+            "куки через <b>🔐 Войти по паролю</b>.</i>"
         )
 
     logger.info("Проверка статуса для %s: %d успешно, %d с ошибкой.",
@@ -608,12 +647,17 @@ async def sync_forum_structure(message: types.Message):
     started = time.monotonic()
     logger.info("Пользователь %s запустил синхронизацию форума.",
                 describe_user(message.from_user))
-    status = await message.answer("⏳ Сканирую главную страницу форума...")
+    status = await message.answer(
+        f"{te(PE_LOADING, '⏳')} Сканирую главную страницу форума..."
+    )
 
     ok, servers = await discover_servers()
     if not ok:
         logger.error("Синхронизация прервана на этапе серверов: %s", servers)
-        await status.edit_text(f"❌ Не удалось получить серверы: {escape(str(servers))}")
+        await status.edit_text(
+            f"{te(PE_CROSS, '❌')} Не удалось получить серверы: "
+            f"{escape(str(servers))}"
+        )
         return
 
     await save_servers(servers)
@@ -621,8 +665,8 @@ async def sync_forum_structure(message: types.Message):
     logger.info("Шаг 1/2: получено %d серверов. Запускаю параллельный обход категорий.", total)
 
     await status.edit_text(
-        f"✅ Найдено серверов: {total}\n"
-        "⏳ Сканирую подразделы жалоб (параллельно)..."
+        f"{te(PE_CHECK, '✅')} Найдено серверов: {total}\n"
+        f"{te(PE_LOADING, '⏳')} Сканирую подразделы жалоб (параллельно)..."
     )
 
     failed_servers: list[str] = []
@@ -640,8 +684,10 @@ async def sync_forum_structure(message: types.Message):
         last_edit = now
         try:
             await status.edit_text(
-                f"⏳ Синхронизация: {done}/{_total}\n"
-                f"✅ Успешно: {done - len(failed_servers)}, ❌ С ошибкой: {len(failed_servers)}"
+                f"{te(PE_LOADING, '⏳')} Синхронизация: {done}/{_total}\n"
+                f"{te(PE_CHECK, '✅')} Успешно: "
+                f"{done - len(failed_servers)}, "
+                f"{te(PE_CROSS, '❌')} С ошибкой: {len(failed_servers)}"
             )
         except Exception:
             pass
@@ -669,20 +715,26 @@ async def sync_forum_structure(message: types.Message):
     tech_line = ""
     try:
         await status.edit_text(
-            f"⏳ Синхронизация завершена по серверам.\n"
+            f"{te(PE_LOADING, '⏳')} Синхронизация завершена по серверам.\n"
             "Сканирую подразделы технического раздела..."
         )
         ok_tech, subs = await discover_technical_subsections()
         if ok_tech and isinstance(subs, list):
             await save_technical_subsections(subs)
-            tech_line = f"\n🛠 Подразделов техраздела: {len(subs)}"
+            tech_line = (
+                f"\n{te(PE_BOT, '🛠')} Подразделов техраздела: {len(subs)}"
+            )
             logger.info("Технический раздел: сохранено подразделов %d.", len(subs))
         else:
-            tech_line = f"\n⚠️ Техраздел: {escape(str(subs))}"
+            tech_line = (
+                f"\n{te(PE_INFO, '⚠️')} Техраздел: {escape(str(subs))}"
+            )
             logger.warning("Не удалось получить подразделы техраздела: %s", subs)
     except Exception:
         logger.exception("Ошибка синхронизации технического раздела")
-        tech_line = "\n⚠️ Техраздел: ошибка сканирования"
+        tech_line = (
+            f"\n{te(PE_INFO, '⚠️')} Техраздел: ошибка сканирования"
+        )
 
     summary = (
         f"{te(PE_PARTY, '🎉')} <b>Синхронизация завершена!</b>\n\n"
@@ -696,7 +748,10 @@ async def sync_forum_structure(message: types.Message):
         preview = ", ".join(failed_servers[:10])
         if len(failed_servers) > 10:
             preview += f" и ещё {len(failed_servers) - 10}"
-        summary += f"\n\n⚠️ Не удалось получить категории для: {escape(preview)}"
+        summary += (
+            f"\n\n{te(PE_INFO, '⚠️')} Не удалось получить категории "
+            f"для: {escape(preview)}"
+        )
 
     # Эффект "конфетти" — новое сообщение, т.к. edit_text эффекты не поддерживает
     await status.delete()
@@ -714,11 +769,14 @@ async def handle_cookies_upload(message: types.Message, bot: Bot):
     if not doc.file_name.endswith(".json"):
         logger.warning("Загруженный файл не .json: «%s» — отказ.", doc.file_name)
         await message.answer(
-            "❌ Пожалуйста, отправьте файл в формате JSON (например, <code>cookies.json</code>)."
+            f"{te(PE_CROSS, '❌')} Пожалуйста, отправьте файл в формате JSON "
+            "(например, <code>cookies.json</code>)."
         )
         return
 
-    status_msg = await message.answer("⏳ Скачиваю и проверяю файл кук...")
+    status_msg = await message.answer(
+        f"{te(PE_LOADING, '⏳')} Скачиваю и проверяю файл кук..."
+    )
 
     try:
         # Скачиваем файл в память
@@ -743,8 +801,8 @@ async def handle_cookies_upload(message: types.Message, bot: Bot):
 
         if not normalized:
             await status_msg.edit_text(
-                "❌ Файл не содержит распознаваемых кук. Ожидается dict "
-                "<code>{\"name\": \"value\"}</code> или список "
+                f"{te(PE_CROSS, '❌')} Файл не содержит распознаваемых кук. "
+                "Ожидается dict <code>{\"name\": \"value\"}</code> или список "
                 "<code>[{\"name\": ..., \"value\": ...}]</code>."
             )
             return
@@ -756,7 +814,9 @@ async def handle_cookies_upload(message: types.Message, bot: Bot):
         logger.info("Куки сохранены в %s (%d записей).",
                     COOKIES_PATH, len(normalized))
 
-        await status_msg.edit_text("💾 Файл сохранён! Проверяю подключение к форуму...")
+        await status_msg.edit_text(
+            f"{te(PE_BOX, '💾')} Файл сохранён! Проверяю подключение к форуму..."
+        )
 
         # Проверяем авторизацию с новыми куками
         success, result = await check_auth()
@@ -784,15 +844,21 @@ async def handle_cookies_upload(message: types.Message, bot: Bot):
             logger.warning("Куки сохранены, но форум не принимает сессию: %s", result)
             # result уже содержит HTML-разметку с подробностями
             await status_msg.edit_text(
-                "⚠️ Файл сохранён, но форум выдал ошибку:\n\n" + result
+                f"{te(PE_INFO, '⚠️')} Файл сохранён, но форум выдал ошибку:\n\n"
+                + result
             )
 
     except json.JSONDecodeError as e:
         logger.error("Ошибка разбора JSON в загруженном файле: %s", e)
-        await status_msg.edit_text("❌ Ошибка: файл содержит некорректный JSON.")
+        await status_msg.edit_text(
+            f"{te(PE_CROSS, '❌')} Ошибка: файл содержит некорректный JSON."
+        )
     except Exception as e:
         logger.exception("Ошибка при сохранении кук")
-        await status_msg.edit_text(f"❌ Произошла ошибка при обработке файла: {escape(str(e))}")
+        await status_msg.edit_text(
+            f"{te(PE_CROSS, '❌')} Произошла ошибка при обработке файла: "
+            f"{escape(str(e))}"
+        )
 
 
 # ---------------- Управление форумными аккаунтами ----------------
@@ -818,11 +884,13 @@ def _accounts_keyboard(accounts: list[dict]) -> types.InlineKeyboardMarkup:
                 text="↪️ Сделать активным",
                 callback_data=f"acc_use:{acc['id']}",
                 icon_custom_emoji_id=PE_PERSON_CHECK,
+                style=BTN_SUCCESS,
             ))
         actions.append(types.InlineKeyboardButton(
             text="🗑 Удалить",
             callback_data=f"acc_del:{acc['id']}",
             icon_custom_emoji_id=PE_TRASH,
+            style=BTN_DANGER,
         ))
         rows.append(actions)
 
@@ -830,6 +898,7 @@ def _accounts_keyboard(accounts: list[dict]) -> types.InlineKeyboardMarkup:
         text="➕ Добавить аккаунт (вход)",
         callback_data="acc_add",
         icon_custom_emoji_id=PE_LOCK_CLOSED,
+        style=BTN_PRIMARY,
     )])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -854,7 +923,8 @@ def _format_accounts_list(accounts: list[dict]) -> str:
 
     lines = [f"{te(PE_PEOPLE, '👥')} <b>Аккаунты форума</b>\n"]
     for acc in accounts:
-        marker = "✅ " if acc["is_active"] else "▫️ "
+        marker = (f"{te(PE_CHECK, '✅')} " if acc["is_active"]
+                  else f"{te(PE_INFO, '▫️')} ")
         login = f" <code>({escape(acc['login'])})</code>" if acc.get("login") else ""
 
         # Считаем кулдаун
@@ -867,7 +937,10 @@ def _format_accounts_list(accounts: list[dict]) -> str:
                 ).replace(tzinfo=timezone.utc)
                 remaining = (cd_dt - now).total_seconds()
                 if remaining > 0:
-                    cd_str = f"   ⏳ <b>кулдаун:</b> {_format_cooldown_secs(remaining)}"
+                    cd_str = (
+                        f"   {te(PE_CLOCK, '⏳')} <b>кулдаун:</b> "
+                        f"{_format_cooldown_secs(remaining)}"
+                    )
             except Exception:
                 pass
 
@@ -875,14 +948,16 @@ def _format_accounts_list(accounts: list[dict]) -> str:
                      f"<code>id={acc['id']}</code>{login}")
         if acc.get("needs_reauth"):
             lines.append(
-                "   ⚠️ <b>Куки протухли — нужен повторный /login.</b>\n"
+                f"   {te(PE_INFO, '⚠️')} <b>Куки протухли — нужен повторный "
+                "/login.</b>\n"
                 "   <i>Аккаунт временно исключён из пула публикации.</i>"
             )
         if cd_str:
             lines.append(cd_str)
         lines.append(f"   <i>обновлён: {escape(str(acc['updated_at']))}</i>")
     lines.append(
-        "\n✅ — активный. ⏳ — кулдаун после публикации жалобы (180с).\n"
+        f"\n{te(PE_CHECK, '✅')} — активный. "
+        f"{te(PE_CLOCK, '⏳')} — кулдаун после публикации жалобы (180с).\n"
         "При подаче жалобы бот сам выберет первый свободный аккаунт.\n"
         "<i>Чтобы проверить статус темы под конкретным аккаунтом:</i>\n"
         "<code>/checkurl https://forum... ID</code>"
@@ -989,7 +1064,8 @@ async def acc_use(call: types.CallbackQuery):
     except Exception:
         # Сообщение могло не измениться (если активен уже был) — не страшно
         pass
-    await call.answer(f"✅ Активный аккаунт: {account['username']}", show_alert=False)
+    await call.answer(f"✅ Активный аккаунт: {account['username']}",
+                      show_alert=False)
 
 
 @router.callback_query(F.data.startswith("acc_del:"))

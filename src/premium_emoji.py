@@ -73,3 +73,14 @@ def te(emoji_id: str, fallback: str) -> str:
     Не-премиум пользователи увидят просто ``⚙``, премиум — анимированную
     иконку из стикерпака Telegram."""
     return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+
+# ---- Цветные кнопки -------------------------------------------------------
+# Telegram Bot API позволяет задать `style` у KeyboardButton/InlineKeyboardButton:
+#   "danger"  — красная (❌ Отмена, 🗑 Удалить, 🚫 Бан)
+#   "success" — зелёная (✅ Отправить, ✅ Подтвердить, ✅ Использовать)
+#   "primary" — синяя  (📝 Подать жалобу, 🔐 Войти, 🔄 Синхронизировать)
+# Если стиль не задан — используется дефолтный стиль приложения.
+BTN_DANGER  = "danger"
+BTN_SUCCESS = "success"
+BTN_PRIMARY = "primary"

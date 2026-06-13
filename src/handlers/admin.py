@@ -29,11 +29,12 @@ from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
 from src.premium_emoji import (
     te,
+    BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
     PE_CHART_STATS, PE_CHART_GROW, PE_PEOPLE, PE_PERSON_CHECK,
     PE_PERSON_CROSS, PE_MEGAPHONE, PE_BOX, PE_LOCK_CLOSED, PE_LOCK_OPEN,
     PE_CHECK, PE_CROSS, PE_TRASH, PE_LINK, PE_LOADING, PE_BELL,
     PE_INFO, PE_EYE, PE_PENCIL, PE_TIME_PASSED, PE_SEND_UP, PE_BOT,
-    PE_ARROW_DOWN_LIST, PE_PROFILE,
+    PE_ARROW_DOWN_LIST, PE_PROFILE, PE_FILE, PE_TAG, PE_CLOCK, PE_CALENDAR,
 )
 from src.effects import EFFECT_LIKE, EFFECT_FIRE
 
@@ -120,7 +121,7 @@ async def cmd_stats(message: types.Message):
             png = await render_complaints_by_day(s["by_day"])
             await message.answer_photo(
                 BufferedInputFile(png, filename="by_day.png"),
-                caption="📅 Жалобы по дням",
+                caption=f"{te(PE_CALENDAR, '📅')} Жалобы по дням",
             )
 
         if s["total"]:
@@ -129,14 +130,14 @@ async def cmd_stats(message: types.Message):
             )
             await message.answer_photo(
                 BufferedInputFile(png, filename="status_pie.png"),
-                caption="📊 Распределение по статусам",
+                caption=f"{te(PE_CHART_STATS, '📊')} Распределение по статусам",
             )
 
         if s.get("top_servers"):
             png = await render_top_servers(s["top_servers"])
             await message.answer_photo(
                 BufferedInputFile(png, filename="top_servers.png"),
-                caption="🌐 Топ серверов",
+                caption=f"{te(PE_CHART_GROW, '🌐')} Топ серверов",
             )
     except Exception:
         logger.exception("Не удалось сгенерировать графики статистики")
@@ -162,7 +163,8 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
         f"Для отмены — нажмите {te(PE_CROSS, '❌')} Отмена.",
         reply_markup=types.ReplyKeyboardMarkup(
             keyboard=[[types.KeyboardButton(
-                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)]],
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                style=BTN_DANGER)]],
             resize_keyboard=True,
         ),
     )
@@ -187,7 +189,9 @@ async def broadcast_got_text(message: types.Message, state: FSMContext):
 
     text = message.html_text or message.text or ""
     if len(text.strip()) < 1:
-        await message.answer("Сообщение не может быть пустым.")
+        await message.answer(
+            f"{te(PE_INFO, 'ℹ️')} Сообщение не может быть пустым."
+        )
         return
 
     await state.update_data(broadcast_text=text)
@@ -210,9 +214,11 @@ async def broadcast_got_text(message: types.Message, state: FSMContext):
             keyboard=[
                 [types.KeyboardButton(
                     text="✅ Отправить всем",
-                    icon_custom_emoji_id=PE_SEND_UP)],
+                    icon_custom_emoji_id=PE_SEND_UP,
+                    style=BTN_SUCCESS)],
                 [types.KeyboardButton(
-                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
+                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                    style=BTN_DANGER)],
             ],
             resize_keyboard=True,
         ),
@@ -233,12 +239,14 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
     users: list[int] = await list_all_users()
 
     if not text or not users:
-        await message.answer("Сообщение или список получателей пусты.",
-                              reply_markup=_menu_for(message.from_user.id))
+        await message.answer(
+            f"{te(PE_INFO, 'ℹ️')} Сообщение или список получателей пусты.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
         return
 
     status = await message.answer(
-        f"⏳ Рассылаю {len(users)} получателям...",
+        f"{te(PE_LOADING, '⏳')} Рассылаю {len(users)} получателям...",
         reply_markup=_menu_for(message.from_user.id),
     )
 
@@ -289,8 +297,9 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
         if now - last_edit > 2 or i == len(users):
             try:
                 await status.edit_text(
-                    f"⏳ Рассылка: {i}/{len(users)}\n"
-                    f"✅ {delivered} • ❌ {blocked + failed}"
+                    f"{te(PE_LOADING, '⏳')} Рассылка: {i}/{len(users)}\n"
+                    f"{te(PE_CHECK, '✅')} {delivered} • "
+                    f"{te(PE_CROSS, '❌')} {blocked + failed}"
                 )
             except Exception:
                 pass
@@ -334,9 +343,13 @@ async def cmd_queue(message: types.Message):
         return
     pending = await list_queue_pending()
     if not pending:
-        await message.answer("📭 Очередь пуста — все жалобы опубликованы.")
+        await message.answer(
+            f"{te(PE_INFO, '📭')} Очередь пуста — все жалобы опубликованы."
+        )
         return
-    lines = [f"📦 <b>В очереди публикации:</b> {len(pending)}\n"]
+    lines = [
+        f"{te(PE_BOX, '📦')} <b>В очереди публикации:</b> {len(pending)}\n"
+    ]
     for q in pending[:20]:
         lines.append(
             f"<b>#{q['id']}</b> от <code>{q['telegram_id']}</code> → "
@@ -363,7 +376,7 @@ async def cmd_force_check(message: types.Message):
     )
 
     status_msg = await message.answer(
-        "⏳ Запускаю проверку статусов жалоб...\n"
+        f"{te(PE_LOADING, '⏳')} Запускаю проверку статусов жалоб...\n"
         "<i>Это может занять до минуты — бот идёт на форум по каждой "
         "жалобе.</i>"
     )
@@ -378,13 +391,15 @@ async def cmd_force_check(message: types.Message):
         logger.warning("Ручной /check от %s превысил 2 мин.",
                        describe_user(message.from_user))
         await status_msg.edit_text(
-            "⏱ Проверка прервана по таймауту (2 мин). Покажу что успело "
-            "проверить — посмотрите ниже."
+            f"{te(PE_CLOCK, '⏱')} Проверка прервана по таймауту (2 мин). "
+            "Покажу что успело проверить — посмотрите ниже."
         )
     except Exception as e:
         logger.exception("Ошибка ручной проверки статусов")
         try:
-            await status_msg.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>")
+            await status_msg.edit_text(
+                f"{te(PE_CROSS, '❌')} Ошибка: <code>{escape(str(e))}</code>"
+            )
         except Exception:
             pass
         return
@@ -406,13 +421,13 @@ async def cmd_force_check(message: types.Message):
     total_n = sum(by_status.values())
 
     lines = [
-        "✅ <b>Проверка статусов завершена</b>\n",
-        f"📦 Всего жалоб в БД: <b>{total_n}</b>",
-        f"⏳ Ожидание: <b>{pending_n}</b>",
-        f"🔎 На рассмотрении: <b>{review_n}</b>",
-        f"✅ Принято: <b>{accepted_n}</b>",
-        f"❌ Отклонено: <b>{rejected_n}</b>",
-        f"🔒 Закрыто: <b>{closed_n}</b>",
+        f"{te(PE_CHECK, '✅')} <b>Проверка статусов завершена</b>\n",
+        f"{te(PE_BOX, '📦')} Всего жалоб в БД: <b>{total_n}</b>",
+        f"{te(PE_TIME_PASSED, '⏳')} Ожидание: <b>{pending_n}</b>",
+        f"{te(PE_EYE, '🔎')} На рассмотрении: <b>{review_n}</b>",
+        f"{te(PE_CHECK, '✅')} Принято: <b>{accepted_n}</b>",
+        f"{te(PE_CROSS, '❌')} Отклонено: <b>{rejected_n}</b>",
+        f"{te(PE_LOCK_CLOSED, '🔒')} Закрыто: <b>{closed_n}</b>",
     ]
 
     if all_complaints:
@@ -472,7 +487,9 @@ async def cmd_check_url(message: types.Message):
         from src.database import get_account
         acc = await get_account(account_id)
         if not acc:
-            await message.answer(f"❌ Аккаунт id={account_id} не найден.")
+            await message.answer(
+                f"{te(PE_CROSS, '❌')} Аккаунт id={account_id} не найден."
+            )
             return
         cookies = acc["cookies"]
         used_acc_name = acc["username"]
@@ -486,7 +503,8 @@ async def cmd_check_url(message: types.Message):
     import re as _re
 
     status_msg = await message.answer(
-        f"⏳ Проверяю {escape(url)} от имени <b>{escape(used_acc_name)}</b>..."
+        f"{te(PE_LOADING, '⏳')} Проверяю {escape(url)} от имени "
+        f"<b>{escape(used_acc_name)}</b>..."
     )
 
     # Сначала «как обычно» — через нашу функцию
@@ -494,7 +512,9 @@ async def cmd_check_url(message: types.Message):
         status, prefix, comment = await fetch_complaint_status(url, cookies=cookies)
     except Exception as e:
         logger.exception("checkurl failed")
-        await status_msg.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>")
+        await status_msg.edit_text(
+            f"{te(PE_CROSS, '❌')} Ошибка: <code>{escape(str(e))}</code>"
+        )
         return
 
     # Дополнительно — RAW-диагностика: что реально на странице
@@ -553,12 +573,12 @@ async def cmd_check_url(message: types.Message):
         # Обрезаем чтобы влезло в Telegram
         preview = comment if len(comment) <= 500 else comment[:500] + "..."
         comment_block = (
-            f"\n\n💬 <b>Комментарий админа:</b>\n"
+            f"\n\n{te(PE_WRITE, '💬')} <b>Комментарий админа:</b>\n"
             f"<blockquote>{escape(preview)}</blockquote>"
         )
 
     await status_msg.edit_text(
-        f"🔍 <b>Результат:</b>\n\n"
+        f"{te(PE_EYE, '🔍')} <b>Результат:</b>\n\n"
         f"URL: <code>{escape(url)}</code>\n"
         f"От имени: <b>{escape(used_acc_name)}</b>\n"
         f"Префикс на форуме: <code>{escape(str(prefix or '—'))}</code>\n"
@@ -580,7 +600,10 @@ async def cmd_db_info(message: types.Message):
         "complaints", "accounts", "servers", "complaint_categories",
         "user_templates", "bug_reports", "complaint_queue",
     ]
-    lines = [f"📊 <b>Состояние БД</b>\n<code>{escape(str(DB_PATH))}</code>\n"]
+    lines = [
+        f"{te(PE_CHART_STATS, '📊')} <b>Состояние БД</b>\n"
+        f"<code>{escape(str(DB_PATH))}</code>\n"
+    ]
     async with aiosqlite.connect(DB_PATH) as db:
         for t in tables:
             try:
@@ -589,7 +612,9 @@ async def cmd_db_info(message: types.Message):
                     n = row[0] if row else 0
                 lines.append(f"<code>{t}</code>: <b>{n}</b>")
             except Exception as e:
-                lines.append(f"<code>{t}</code>: ❌ {escape(str(e))}")
+                lines.append(
+                    f"<code>{t}</code>: {te(PE_CROSS, '❌')} {escape(str(e))}"
+                )
 
         # Топ-5 жалоб
         try:
@@ -601,7 +626,7 @@ async def cmd_db_info(message: types.Message):
             if rows:
                 lines.append("\n<b>Последние жалобы:</b>")
                 for r in rows:
-                    has_url = "🔗" if r[4] else "—"
+                    has_url = te(PE_LINK, "🔗") if r[4] else "—"
                     lines.append(
                         f"   #{r[0]} • от {r[1]} • <b>{escape(r[2])}</b> "
                         f"• <code>{r[3]}</code> {has_url}"
@@ -635,7 +660,7 @@ async def cmd_maintenance(message: types.Message):
     if arg == "on":
         await enable()
         await message.answer(
-            "🔒 <b>Режим обслуживания включён.</b>\n\n"
+            f"{te(PE_LOCK_CLOSED, '🔒')} <b>Режим обслуживания включён.</b>\n\n"
             "Все обычные пользователи получат сообщение «бот на техработах». "
             "Админы продолжают работать как обычно.\n\n"
             "Выключить: <code>/maintenance off</code>"
@@ -644,14 +669,14 @@ async def cmd_maintenance(message: types.Message):
     if arg == "off":
         await disable()
         await message.answer(
-            "🔓 <b>Режим обслуживания выключен.</b>\n\n"
+            f"{te(PE_LOCK_OPEN, '🔓')} <b>Режим обслуживания выключен.</b>\n\n"
             "Бот снова доступен всем пользователям."
         )
         return
 
     # Без аргумента — показываем статус и кнопки
     enabled = await is_enabled()
-    status_emoji = "🔒" if enabled else "🔓"
+    status_pe = (PE_LOCK_CLOSED, "🔒") if enabled else (PE_LOCK_OPEN, "🔓")
     status_text = "ВКЛЮЧЕНО" if enabled else "выключено"
 
     rows: list[list[types.InlineKeyboardButton]] = []
@@ -660,17 +685,20 @@ async def cmd_maintenance(message: types.Message):
             text="🔓 Выключить (открыть бот для всех)",
             callback_data="maint_off",
             icon_custom_emoji_id=PE_LOCK_OPEN,
+            style=BTN_SUCCESS,
         )])
     else:
         rows.append([types.InlineKeyboardButton(
             text="🔒 Включить (закрыть для не-админов)",
             callback_data="maint_on",
             icon_custom_emoji_id=PE_LOCK_CLOSED,
+            style=BTN_DANGER,
         )])
     kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
 
     await message.answer(
-        f"{status_emoji} <b>Режим обслуживания:</b> {status_text}\n\n"
+        f"{te(status_pe[0], status_pe[1])} <b>Режим обслуживания:</b> "
+        f"{status_text}\n\n"
         "Когда включён, бот для обычных пользователей блокируется и шлёт "
         "пояснение. Админы продолжают работать без ограничений.",
         reply_markup=kb,
@@ -686,13 +714,14 @@ async def maint_on(call: types.CallbackQuery):
     await enable()
     try:
         await call.message.edit_text(
-            "🔒 <b>Режим обслуживания включён.</b>\n\n"
+            f"{te(PE_LOCK_CLOSED, '🔒')} <b>Режим обслуживания включён.</b>\n\n"
             "Все обычные пользователи теперь получат «бот на техработах».\n\n"
             "Выключить: <code>/maintenance off</code> или кнопкой ниже.",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(
                     text="🔓 Выключить", callback_data="maint_off",
-                    icon_custom_emoji_id=PE_LOCK_OPEN)],
+                    icon_custom_emoji_id=PE_LOCK_OPEN,
+                    style=BTN_SUCCESS)],
             ]),
         )
     except Exception:
@@ -709,12 +738,13 @@ async def maint_off(call: types.CallbackQuery):
     await disable()
     try:
         await call.message.edit_text(
-            "🔓 <b>Режим обслуживания выключен.</b>\n\n"
+            f"{te(PE_LOCK_OPEN, '🔓')} <b>Режим обслуживания выключен.</b>\n\n"
             "Бот снова доступен всем пользователям.",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(
                     text="🔒 Включить", callback_data="maint_on",
-                    icon_custom_emoji_id=PE_LOCK_CLOSED)],
+                    icon_custom_emoji_id=PE_LOCK_CLOSED,
+                    style=BTN_DANGER)],
             ]),
         )
     except Exception:
@@ -754,7 +784,9 @@ async def cmd_ban(message: types.Message, command: Command):
         return
 
     if is_admin(user_id):
-        await message.answer("🔒 Нельзя забанить админа.")
+        await message.answer(
+            f"{te(PE_LOCK_CLOSED, '🔒')} Нельзя забанить админа."
+        )
         return
 
     new_ban = await ban_user(
@@ -764,10 +796,14 @@ async def cmd_ban(message: types.Message, command: Command):
     logger.info("Админ %s забанил user_id=%s. Причина: %s.",
                 describe_user(message.from_user), user_id, reason or "—")
 
-    suffix = "🆕" if new_ban else "🔁 (обновлён)"
+    suffix = (
+        te(PE_BELL, "🆕") if new_ban
+        else f"{te(PE_LOADING, '🔁')} (обновлён)"
+    )
     reason_part = f"\nПричина: <i>{escape(reason)}</i>" if reason else ""
     await message.answer(
-        f"🚫 <b>Пользователь {user_id} забанен</b> {suffix}.{reason_part}"
+        f"{te(PE_PERSON_CROSS, '🚫')} <b>Пользователь {user_id} забанен</b> "
+        f"{suffix}.{reason_part}"
     )
 
 
@@ -788,9 +824,13 @@ async def cmd_unban(message: types.Message, command: Command):
     if ok:
         logger.info("Админ %s разбанил user_id=%s.",
                     describe_user(message.from_user), user_id)
-        await message.answer(f"✅ Пользователь {user_id} разбанен.")
+        await message.answer(
+            f"{te(PE_CHECK, '✅')} Пользователь {user_id} разбанен."
+        )
     else:
-        await message.answer(f"ℹ️ Пользователь {user_id} не был забанен.")
+        await message.answer(
+            f"{te(PE_INFO, 'ℹ️')} Пользователь {user_id} не был забанен."
+        )
 
 
 @router.message(Command("baninfo"))
@@ -807,13 +847,15 @@ async def cmd_baninfo(message: types.Message, command: Command):
         return
     rec = await is_banned(int(raw))
     if not rec:
-        await message.answer(f"✅ Пользователь {raw} не забанен.")
+        await message.answer(
+            f"{te(PE_CHECK, '✅')} Пользователь {raw} не забанен."
+        )
         return
     reason = escape(rec.get("reason") or "—")
     by = rec.get("banned_by") or "—"
     when = escape(str(rec.get("banned_at") or "—"))
     await message.answer(
-        f"🚫 <b>Пользователь {raw} забанен</b>\n"
+        f"{te(PE_PERSON_CROSS, '🚫')} <b>Пользователь {raw} забанен</b>\n"
         f"Причина: <i>{reason}</i>\n"
         f"Кто: <code>{by}</code>\n"
         f"Когда: <code>{when}</code>"
@@ -827,10 +869,10 @@ async def cmd_banlist(message: types.Message):
         return
     bans = await list_banned()
     if not bans:
-        await message.answer("📭 Список банов пуст.")
+        await message.answer(f"{te(PE_INFO, '📭')} Список банов пуст.")
         return
 
-    lines = [f"🚫 <b>Забанено: {len(bans)}</b>\n"]
+    lines = [f"{te(PE_PERSON_CROSS, '🚫')} <b>Забанено: {len(bans)}</b>\n"]
     for b in bans[:50]:
         reason = escape(b["reason"]) if b["reason"] else "<i>без причины</i>"
         lines.append(
@@ -877,11 +919,13 @@ def _complaints_list_kb(page: int, total_pages: int,
             text="🔄 Все" + (" ✓" if not status_filter else ""),
             callback_data="adm_cs:1:all",
             icon_custom_emoji_id=PE_LOADING,
+            style=BTN_PRIMARY if not status_filter else None,
         ),
         types.InlineKeyboardButton(
             text="⏳ В ожидании" + (" ✓" if status_filter == "pending" else ""),
             callback_data="adm_cs:1:pending",
             icon_custom_emoji_id=PE_TIME_PASSED,
+            style=BTN_PRIMARY if status_filter == "pending" else None,
         ),
     ])
     rows.append([
@@ -889,11 +933,13 @@ def _complaints_list_kb(page: int, total_pages: int,
             text="🔎 Рассмотр." + (" ✓" if status_filter == "review" else ""),
             callback_data="adm_cs:1:review",
             icon_custom_emoji_id=PE_EYE,
+            style=BTN_PRIMARY if status_filter == "review" else None,
         ),
         types.InlineKeyboardButton(
             text="🔒 Закрыто" + (" ✓" if status_filter == "closed" else ""),
             callback_data="adm_cs:1:closed",
             icon_custom_emoji_id=PE_LOCK_CLOSED,
+            style=BTN_PRIMARY if status_filter == "closed" else None,
         ),
     ])
     rows.append([
@@ -901,11 +947,13 @@ def _complaints_list_kb(page: int, total_pages: int,
             text="✅ Принято" + (" ✓" if status_filter == "accepted" else ""),
             callback_data="adm_cs:1:accepted",
             icon_custom_emoji_id=PE_CHECK,
+            style=BTN_SUCCESS if status_filter == "accepted" else None,
         ),
         types.InlineKeyboardButton(
             text="❌ Отказано" + (" ✓" if status_filter == "rejected" else ""),
             callback_data="adm_cs:1:rejected",
             icon_custom_emoji_id=PE_CROSS,
+            style=BTN_DANGER if status_filter == "rejected" else None,
         ),
     ])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -919,22 +967,26 @@ def _complaint_actions_kb(complaint_id: int,
             text="🔗 Открыть на форуме",
             callback_data=f"adm_c_open_url:{complaint_id}",
             icon_custom_emoji_id=PE_LINK,
+            style=BTN_PRIMARY,
         )])
         rows.append([types.InlineKeyboardButton(
             text="🗑 Удалить с форума и из БД",
             callback_data=f"adm_c_delf:{complaint_id}",
             icon_custom_emoji_id=PE_TRASH,
+            style=BTN_DANGER,
         )])
     rows.append([
         types.InlineKeyboardButton(
             text="🗂 Удалить из БД",
             callback_data=f"adm_c_del:{complaint_id}",
             icon_custom_emoji_id=PE_TRASH,
+            style=BTN_DANGER,
         ),
         types.InlineKeyboardButton(
             text="🚫 Забанить автора",
             callback_data=f"adm_c_banauth:{complaint_id}",
             icon_custom_emoji_id=PE_PERSON_CROSS,
+            style=BTN_DANGER,
         ),
     ])
     rows.append([types.InlineKeyboardButton(
@@ -945,13 +997,21 @@ def _complaint_actions_kb(complaint_id: int,
 
 def _format_complaint_short(c: dict) -> str:
     """Строка для списка."""
-    status_emoji = {
-        "pending": "⏳", "review": "🔎",
-        "accepted": "✅", "rejected": "❌", "closed": "🔒",
-    }.get(c["status"], "❔")
+    status_pe_map = {
+        "pending":  (PE_TIME_PASSED, "⏳"),
+        "review":   (PE_EYE, "🔎"),
+        "accepted": (PE_CHECK, "✅"),
+        "rejected": (PE_CROSS, "❌"),
+        "closed":   (PE_LOCK_CLOSED, "🔒"),
+    }
+    pe_id, fb = status_pe_map.get(c["status"], (PE_INFO, "❔"))
+    status_emoji = te(pe_id, fb)
     summary = c.get("summary") or ""
     target = escape(c["nickname"])
-    info = f"{status_emoji} <b>#{c['id']}</b> • <code>{c['telegram_id']}</code> → <b>{target}</b>"
+    info = (
+        f"{status_emoji} <b>#{c['id']}</b> • "
+        f"<code>{c['telegram_id']}</code> → <b>{target}</b>"
+    )
     if summary:
         info += f" • <i>{escape(summary)}</i>"
     return info
@@ -968,17 +1028,23 @@ async def _render_complaints_page(page: int,
 
     if total == 0:
         text = (
-            "📭 <b>Нет жалоб</b>"
+            f"{te(PE_INFO, '📭')} <b>Нет жалоб</b>"
             + (f" в статусе «{status_filter}»" if status_filter else "")
             + "."
         )
     else:
-        header = f"📋 <b>Жалобы — стр. {page}/{total_pages}</b>"
+        header = (
+            f"{te(PE_ARROW_DOWN_LIST, '📋')} "
+            f"<b>Жалобы — стр. {page}/{total_pages}</b>"
+        )
         if status_filter:
             header += f"  •  фильтр: <code>{status_filter}</code>"
         header += f"\n<i>Всего: {total}</i>\n"
         body = "\n\n".join(_format_complaint_short(c) for c in items)
-        body += "\n\n<i>Нажмите кнопку ниже чтобы открыть подробности конкретной жалобы.</i>"
+        body += (
+            "\n\n<i>Нажмите кнопку ниже чтобы открыть подробности конкретной "
+            "жалобы.</i>"
+        )
         text = f"{header}\n{body}"
 
     rows: list[list[types.InlineKeyboardButton]] = []
@@ -987,6 +1053,7 @@ async def _render_complaints_page(page: int,
         rows.append([types.InlineKeyboardButton(
             text=f"📄 #{c['id']} {c['nickname']}",
             callback_data=f"adm_c_open:{c['id']}",
+            icon_custom_emoji_id=PE_FILE,
         )])
     # Навигация
     nav_kb = _complaints_list_kb(page, total_pages, status_filter)
@@ -1041,11 +1108,11 @@ async def adm_complaint_open(call: types.CallbackQuery):
         return
 
     status_label_map = {
-        "pending":  "⏳ В ожидании",
-        "review":   "🔎 На рассмотрении",
-        "accepted": "✅ Принята",
-        "rejected": "❌ Отклонена",
-        "closed":   "🔒 Закрыта",
+        "pending":  f"{te(PE_TIME_PASSED, '⏳')} В ожидании",
+        "review":   f"{te(PE_EYE, '🔎')} На рассмотрении",
+        "accepted": f"{te(PE_CHECK, '✅')} Принята",
+        "rejected": f"{te(PE_CROSS, '❌')} Отклонена",
+        "closed":   f"{te(PE_LOCK_CLOSED, '🔒')} Закрыта",
     }
     status = comp.get("status") or "pending"
     label = status_label_map.get(status, status)
@@ -1086,32 +1153,38 @@ async def adm_complaint_open(call: types.CallbackQuery):
                          exc_info=True)
 
     parts = [
-        f"📄 <b>Жалоба #{comp['id']}</b> — {label}",
+        f"{te(PE_FILE, '📄')} <b>Жалоба #{comp['id']}</b> — {label}",
         f"<i>Создана: {created}</i>",
         "",
-        f"👤 Автор: <code>{comp['telegram_id']}</code>",
-        f"🎮 Сервер: {server}",
-        f"📁 Категория: <code>{category}</code>",
-        f"🔫 Цель: <b>{target}</b>",
-        f"📝 Ваш ник в жалобе: <b>{your_nick}</b>",
-        f"📌 Суть: {summary}",
+        f"{te(PE_PROFILE, '👤')} Автор: <code>{comp['telegram_id']}</code>",
+        f"{te(PE_GEOTAG, '🎮')} Сервер: {server}",
+        f"{te(PE_TAG, '📁')} Категория: <code>{category}</code>",
+        f"{te(PE_PERSON_CROSS, '🔫')} Цель: <b>{target}</b>",
+        f"{te(PE_PENCIL, '📝')} Ваш ник в жалобе: <b>{your_nick}</b>",
+        f"{te(PE_PENCIL, '📌')} Суть: {summary}",
     ]
     if pdate and pdate != "—":
-        parts.append(f"📅 Дата наказания: {pdate}")
+        parts.append(f"{te(PE_CALENDAR, '📅')} Дата наказания: {pdate}")
     parts.append("")
-    parts.append(f"📖 <b>Описание:</b>\n<blockquote>{description}</blockquote>")
-    parts.append(f"🔗 <b>Доказательства:</b>\n<code>{proof}</code>")
+    parts.append(
+        f"{te(PE_FILE, '📖')} <b>Описание:</b>\n"
+        f"<blockquote>{description}</blockquote>"
+    )
+    parts.append(
+        f"{te(PE_LINK, '🔗')} <b>Доказательства:</b>\n<code>{proof}</code>"
+    )
     if admin_comment:
         # Обрезаем очень длинные комментарии чтобы не упереться в лимит Telegram
         snippet = admin_comment if len(admin_comment) <= 1500 \
             else admin_comment[:1500] + "..."
         parts.append(
-            f"\n💬 <b>Комментарий админа форума:</b>\n"
+            f"\n{te(PE_WRITE, '💬')} <b>Комментарий админа форума:</b>\n"
             f"<blockquote>{escape(snippet)}</blockquote>"
         )
     if thread_url:
         parts.append(
-            f"\n🌐 <a href=\"{escape(thread_url)}\">Тема на форуме</a>"
+            f"\n{te(PE_LINK, '🌐')} "
+            f"<a href=\"{escape(thread_url)}\">Тема на форуме</a>"
         )
 
     text = "\n".join(parts)
@@ -1140,7 +1213,7 @@ async def adm_complaint_open_url(call: types.CallbackQuery):
         return
     await call.answer()
     await call.message.answer(
-        f"🔗 {escape(comp['forum_thread_url'])}",
+        f"{te(PE_LINK, '🔗')} {escape(comp['forum_thread_url'])}",
         disable_web_page_preview=False,
     )
 
@@ -1192,7 +1265,7 @@ async def adm_complaint_delete_forum(call: types.CallbackQuery):
     await call.answer("⏳ Удаляю тему на форуме...")
     try:
         await call.message.edit_text(
-            "⏳ <b>Удаляю тему на форуме и из БД...</b>"
+            f"{te(PE_LOADING, '⏳')} <b>Удаляю тему на форуме и из БД...</b>"
         )
     except Exception:
         pass
@@ -1220,7 +1293,8 @@ async def adm_complaint_delete_forum(call: types.CallbackQuery):
                     describe_user(call.from_user), cid, msg)
         try:
             await call.message.edit_text(
-                f"🗑 <b>Жалоба #{cid} удалена</b> с форума и из БД.\n\n"
+                f"{te(PE_TRASH, '🗑')} <b>Жалоба #{cid} удалена</b> "
+                f"с форума и из БД.\n\n"
                 f"<i>{escape(str(msg))}</i>"
             )
         except Exception:
@@ -1233,6 +1307,8 @@ async def adm_complaint_delete_forum(call: types.CallbackQuery):
                 [types.InlineKeyboardButton(
                     text="🗂 Удалить только из БД",
                     callback_data=f"adm_c_del:{cid}",
+                    icon_custom_emoji_id=PE_TRASH,
+                    style=BTN_DANGER,
                 )],
                 [types.InlineKeyboardButton(
                     text="◀️ Назад к карточке",
@@ -1240,7 +1316,8 @@ async def adm_complaint_delete_forum(call: types.CallbackQuery):
                 )],
             ])
             await call.message.edit_text(
-                f"❌ <b>Не удалось удалить тему на форуме.</b>\n\n"
+                f"{te(PE_CROSS, '❌')} <b>Не удалось удалить тему "
+                f"на форуме.</b>\n\n"
                 f"<i>{escape(str(msg))}</i>\n\n"
                 f"Возможно, истёк срок удаления или у аккаунта нет прав.\n"
                 f"Можно удалить только из БД (тема на форуме останется):",
@@ -1276,7 +1353,7 @@ async def cmd_delcomplaint(message: types.Message, command: Command):
         logger.info("Админ %s удалил жалобу #%s через /delcomplaint.",
                     describe_user(message.from_user), cid)
         await message.answer(
-            f"🗂 Жалоба #{cid} удалена из БД.\n"
+            f"{te(PE_TRASH, '🗂')} Жалоба #{cid} удалена из БД.\n"
             f"Тема на форуме (если была) <b>сохранена</b>."
         )
     else:
@@ -1328,6 +1405,7 @@ def _build_subs_menu(channels: list[str]) -> types.InlineKeyboardMarkup:
                     text=f"❌ @{ch}",
                     callback_data=f"subs:remove:{ch}",
                     icon_custom_emoji_id=PE_TRASH,
+                    style=BTN_DANGER,
                 ),
             ])
     else:
@@ -1341,12 +1419,14 @@ def _build_subs_menu(channels: list[str]) -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton(
             text="➕ Добавить канал", callback_data="subs:add",
             icon_custom_emoji_id=PE_MEGAPHONE,
+            style=BTN_SUCCESS,
         ),
     ])
     rows.append([
         types.InlineKeyboardButton(
             text="🔄 Обновить", callback_data="subs:list",
             icon_custom_emoji_id=PE_LOADING,
+            style=BTN_PRIMARY,
         ),
     ])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1410,7 +1490,7 @@ async def cb_subs_add(call: types.CallbackQuery, state: FSMContext):
         return
     await state.set_state(SubsForm.waiting_for_channel)
     await call.message.answer(
-        "➕ <b>Добавление канала</b>\n\n"
+        f"{te(PE_MEGAPHONE, '➕')} <b>Добавление канала</b>\n\n"
         "Отправьте <b>username</b> канала одним сообщением.\n"
         "Можно с <code>@</code> или ссылкой <code>t.me/...</code>.\n\n"
         "Примеры:\n"
@@ -1418,7 +1498,9 @@ async def cb_subs_add(call: types.CallbackQuery, state: FSMContext):
         "  <code>https://t.me/tgkborzov</code>\n\n"
         "Для отмены — напишите <code>отмена</code>.",
         reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            keyboard=[[types.KeyboardButton(
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                style=BTN_DANGER)]],
             resize_keyboard=True,
         ),
     )
@@ -1434,7 +1516,7 @@ async def subs_got_channel(message: types.Message, state: FSMContext):
     if txt.lower() in ("отмена", "❌ отмена", "/cancel"):
         await state.clear()
         await message.answer(
-            "❌ Добавление канала отменено.",
+            f"{te(PE_CROSS, '❌')} Добавление канала отменено.",
             reply_markup=_menu_for(message.from_user.id),
         )
         return
@@ -1451,7 +1533,7 @@ async def subs_got_channel(message: types.Message, state: FSMContext):
         except Exception:
             pass
         await message.answer(
-            f"✅ Канал <b>@{escape(result)}</b> добавлен в список.",
+            f"{te(PE_CHECK, '✅')} Канал <b>@{escape(result)}</b> добавлен в список.",
             reply_markup=_menu_for(message.from_user.id),
         )
         # Перерисуем меню /subs
@@ -1461,9 +1543,12 @@ async def subs_got_channel(message: types.Message, state: FSMContext):
         )
     else:
         await message.answer(
-            f"{result}\n\nПопробуйте ещё раз или нажмите ❌ Отмена.",
+            f"{result}\n\nПопробуйте ещё раз или нажмите "
+            f"{te(PE_CROSS, '❌')} Отмена.",
             reply_markup=types.ReplyKeyboardMarkup(
-                keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+                keyboard=[[types.KeyboardButton(
+                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                    style=BTN_DANGER)]],
                 resize_keyboard=True,
             ),
         )

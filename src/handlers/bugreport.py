@@ -30,6 +30,7 @@ from src.handlers.common import (
 from src.logger import describe_user
 from src.premium_emoji import (
     te,
+    BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
     PE_BOT, PE_CROSS, PE_CHECK, PE_PENCIL, PE_PARTY, PE_EYE, PE_WRITE,
     PE_ARROW_DOWN_LIST, PE_INFO, PE_BELL, PE_PROFILE,
 )
@@ -63,7 +64,8 @@ class AdminReplyForm(StatesGroup):
 def _bug_cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(
-            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)]],
+            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+            style=BTN_DANGER)]],
         resize_keyboard=True,
     )
 
@@ -72,9 +74,11 @@ def _photo_step_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(
-                text="⏭ Пропустить", icon_custom_emoji_id=PE_CHECK)],
+                text="⏭ Пропустить", icon_custom_emoji_id=PE_CHECK,
+                style=BTN_SUCCESS)],
             [types.KeyboardButton(
-                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                style=BTN_DANGER)],
         ],
         resize_keyboard=True,
     )
@@ -85,15 +89,18 @@ def _admin_actions_kb(report_id: int) -> types.InlineKeyboardMarkup:
         [
             types.InlineKeyboardButton(
                 text="👁 В работе", callback_data=f"bug_progress:{report_id}",
-                icon_custom_emoji_id=PE_EYE),
+                icon_custom_emoji_id=PE_EYE,
+                style=BTN_PRIMARY),
             types.InlineKeyboardButton(
                 text="✅ Закрыть", callback_data=f"bug_close:{report_id}",
-                icon_custom_emoji_id=PE_CHECK),
+                icon_custom_emoji_id=PE_CHECK,
+                style=BTN_SUCCESS),
         ],
         [types.InlineKeyboardButton(
             text="✍️ Ответить пользователю",
             callback_data=f"bug_reply:{report_id}",
-            icon_custom_emoji_id=PE_WRITE)],
+            icon_custom_emoji_id=PE_WRITE,
+            style=BTN_PRIMARY)],
     ])
 
 
@@ -111,8 +118,8 @@ async def bug_start(message: types.Message, state: FSMContext):
         logger.info("Лимит баг-репортов (час) для %s превышен.",
                     describe_user(message.from_user))
         await message.answer(
-            f"⚠️ Вы уже отправили {hour_count} баг-репорта за последний час. "
-            f"Лимит — {HOURLY_LIMIT}/час. Попробуйте позже.",
+            f"{te(PE_INFO, '⚠️')} Вы уже отправили {hour_count} баг-репорта "
+            f"за последний час. Лимит — {HOURLY_LIMIT}/час. Попробуйте позже.",
             reply_markup=_menu_for(message.from_user.id),
         )
         return
@@ -121,7 +128,7 @@ async def bug_start(message: types.Message, state: FSMContext):
         logger.info("Лимит баг-репортов (сутки) для %s превышен.",
                     describe_user(message.from_user))
         await message.answer(
-            f"⚠️ Дневной лимит баг-репортов исчерпан "
+            f"{te(PE_INFO, '⚠️')} Дневной лимит баг-репортов исчерпан "
             f"({day_count}/{DAILY_LIMIT}). Попробуйте завтра.",
             reply_markup=_menu_for(message.from_user.id),
         )
@@ -173,7 +180,7 @@ async def bug_text(message: types.Message, state: FSMContext):
     await state.update_data(bug_text=text)
     await state.set_state(BugForm.waiting_for_photo)
     await message.answer(
-        "📸 Если есть <b>скриншот</b> — пришлите его сейчас. "
+        f"{te(PE_PENCIL, '📸')} Если есть <b>скриншот</b> — пришлите его сейчас. "
         "Если нет — нажмите «⏭ Пропустить».",
         reply_markup=_photo_step_kb(),
     )
@@ -225,7 +232,8 @@ async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
                 logger.warning("Фото к баг-репорту от %s отклонено: %s",
                                describe_user(message.from_user), reason)
                 await message.answer(
-                    f"🚫 <b>Скриншот не принят:</b> {escape(reason)}.\n\n"
+                    f"{te(PE_CROSS, '🚫')} <b>Скриншот не принят:</b> "
+                    f"{escape(reason)}.\n\n"
                     "Пришлите другой скриншот или нажмите «⏭ Пропустить».",
                     reply_markup=_photo_step_kb(),
                 )
@@ -327,13 +335,24 @@ async def cmd_bugs(message: types.Message):
         return
     reports = await list_bug_reports(only_open=False, limit=15)
     if not reports:
-        await message.answer("📭 Баг-репортов пока нет.")
+        await message.answer(
+            f"{te(PE_INFO, '📭')} Баг-репортов пока нет."
+        )
         return
 
-    lines = ["🐞 <b>Последние баг-репорты:</b>\n"]
+    lines = [f"{te(PE_BOT, '🐞')} <b>Последние баг-репорты:</b>\n"]
     for r in reports:
-        emoji = {"new": "🆕", "in_progress": "👁", "closed": "✅"}.get(r["status"], "❔")
-        author = f"@{escape(r['username'])}" if r["username"] else f"id={r['telegram_id']}"
+        emoji_map = {
+            "new": (PE_BELL, "🆕"),
+            "in_progress": (PE_EYE, "👁"),
+            "closed": (PE_CHECK, "✅"),
+        }
+        pe_id, fb = emoji_map.get(r["status"], (PE_INFO, "❔"))
+        emoji = te(pe_id, fb)
+        author = (
+            f"@{escape(r['username'])}" if r["username"]
+            else f"id={r['telegram_id']}"
+        )
         lines.append(
             f"{emoji} <b>#{r['id']}</b> от {author}\n"
             f"   {escape(r['text'][:100])}{'…' if len(r['text']) > 100 else ''}\n"
@@ -373,7 +392,8 @@ async def bug_close(call: types.CallbackQuery, bot: Bot):
     try:
         await bot.send_message(
             rep["telegram_id"],
-            f"✅ <b>Баг-репорт #{rid} закрыт.</b>\nСпасибо за помощь!",
+            f"{te(PE_CHECK, '✅')} <b>Баг-репорт #{rid} закрыт.</b>\n"
+            "Спасибо за помощь!",
         )
     except (TelegramForbiddenError, TelegramBadRequest):
         pass
@@ -393,9 +413,12 @@ async def bug_reply_start(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminReplyForm.waiting_for_reply)
     await state.update_data(_reply_bug_id=rid)
     await call.message.answer(
-        f"✍️ Введите ответ для пользователя по баг-репорту <b>#{rid}</b>:",
+        f"{te(PE_WRITE, '✍️')} Введите ответ для пользователя по "
+        f"баг-репорту <b>#{rid}</b>:",
         reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            keyboard=[[types.KeyboardButton(
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                style=BTN_DANGER)]],
             resize_keyboard=True,
         ),
     )
@@ -409,8 +432,10 @@ async def bug_reply_send(message: types.Message, state: FSMContext, bot: Bot):
         return
     if message.text and message.text.strip() == "❌ Отмена":
         await state.clear()
-        await message.answer("Отменено.",
-                              reply_markup=_menu_for(message.from_user.id))
+        await message.answer(
+            f"{te(PE_CROSS, '❌')} Отменено.",
+            reply_markup=_menu_for(message.from_user.id),
+        )
         return
 
     text = (message.text or "").strip()
@@ -432,9 +457,9 @@ async def bug_reply_send(message: types.Message, state: FSMContext, bot: Bot):
     await set_bug_report_status(rid, "closed", admin_reply=text)
 
     notify = (
-        f"💬 <b>Ответ по баг-репорту #{rid}:</b>\n\n"
+        f"{te(PE_WRITE, '💬')} <b>Ответ по баг-репорту #{rid}:</b>\n\n"
         f"{escape(text)}\n\n"
-        f"<i>(статус: ✅ закрыт)</i>"
+        f"<i>(статус: {te(PE_CHECK, '✅')} закрыт)</i>"
     )
     try:
         await bot.send_message(rep["telegram_id"], notify)
@@ -446,12 +471,13 @@ async def bug_reply_send(message: types.Message, state: FSMContext, bot: Bot):
     await state.clear()
     if delivered:
         await message.answer(
-            f"✅ Ответ отправлен пользователю по баг-репорту #{rid}.",
+            f"{te(PE_CHECK, '✅')} Ответ отправлен пользователю по "
+            f"баг-репорту #{rid}.",
             reply_markup=_menu_for(message.from_user.id),
         )
     else:
         await message.answer(
-            "⚠️ Ответ сохранён в БД, но Telegram не доставил его пользователю "
-            "(возможно, заблокировал бота).",
+            f"{te(PE_INFO, '⚠️')} Ответ сохранён в БД, но Telegram не "
+            "доставил его пользователю (возможно, заблокировал бота).",
             reply_markup=_menu_for(message.from_user.id),
         )

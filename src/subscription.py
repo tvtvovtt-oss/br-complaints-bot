@@ -25,7 +25,10 @@ from aiogram.types import (
 
 from src.config import ADMIN_IDS
 from src.database import list_subscription_channels
-from src.premium_emoji import te, PE_BELL, PE_CHECK, PE_MEGAPHONE
+from src.premium_emoji import (
+    te, BTN_SUCCESS, BTN_PRIMARY,
+    PE_BELL, PE_CHECK, PE_MEGAPHONE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,7 @@ def build_subscribe_keyboard(channels: list[str]) -> InlineKeyboardMarkup:
                 text=f"📢 Подписаться на @{ch}",
                 url=url,
                 icon_custom_emoji_id=PE_MEGAPHONE,
+                style=BTN_PRIMARY,
             ),
         ])
     rows.append([
@@ -96,6 +100,7 @@ def build_subscribe_keyboard(channels: list[str]) -> InlineKeyboardMarkup:
             text="✅ Проверить подписку",
             callback_data=RESUB_CHECK_CB,
             icon_custom_emoji_id=PE_CHECK,
+            style=BTN_SUCCESS,
         ),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -265,11 +270,13 @@ async def recheck_and_reply(bot, callback: CallbackQuery) -> bool:
     if not missing:
         try:
             await callback.message.edit_text(
-                "✅ Спасибо! Подписка подтверждена. Добро пожаловать!",
+                f"{te(PE_CHECK, '✅')} Спасибо! Подписка подтверждена. "
+                "Добро пожаловать!",
             )
         except Exception:
             await callback.message.answer(
-                "✅ Спасибо! Подписка подтверждена. Добро пожаловать!",
+                f"{te(PE_CHECK, '✅')} Спасибо! Подписка подтверждена. "
+                "Добро пожаловать!",
             )
         try:
             await callback.answer()
