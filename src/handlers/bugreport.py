@@ -28,6 +28,12 @@ from src.handlers.common import (
     check_access, _menu_for, is_admin,
 )
 from src.logger import describe_user
+from src.premium_emoji import (
+    te,
+    PE_BOT, PE_CROSS, PE_CHECK, PE_PENCIL, PE_PARTY, PE_EYE, PE_WRITE,
+    PE_ARROW_DOWN_LIST, PE_INFO, PE_BELL, PE_PROFILE,
+)
+from src.effects import EFFECT_LIKE
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -56,7 +62,8 @@ class AdminReplyForm(StatesGroup):
 
 def _bug_cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+        keyboard=[[types.KeyboardButton(
+            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)]],
         resize_keyboard=True,
     )
 
@@ -64,8 +71,10 @@ def _bug_cancel_kb() -> types.ReplyKeyboardMarkup:
 def _photo_step_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="⏭ Пропустить")],
-            [types.KeyboardButton(text="❌ Отмена")],
+            [types.KeyboardButton(
+                text="⏭ Пропустить", icon_custom_emoji_id=PE_CHECK)],
+            [types.KeyboardButton(
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
         ],
         resize_keyboard=True,
     )
@@ -75,12 +84,16 @@ def _admin_actions_kb(report_id: int) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [
             types.InlineKeyboardButton(
-                text="👁 В работе", callback_data=f"bug_progress:{report_id}"),
+                text="👁 В работе", callback_data=f"bug_progress:{report_id}",
+                icon_custom_emoji_id=PE_EYE),
             types.InlineKeyboardButton(
-                text="✅ Закрыть", callback_data=f"bug_close:{report_id}"),
+                text="✅ Закрыть", callback_data=f"bug_close:{report_id}",
+                icon_custom_emoji_id=PE_CHECK),
         ],
         [types.InlineKeyboardButton(
-            text="✍️ Ответить пользователю", callback_data=f"bug_reply:{report_id}")],
+            text="✍️ Ответить пользователю",
+            callback_data=f"bug_reply:{report_id}",
+            icon_custom_emoji_id=PE_WRITE)],
     ])
 
 
@@ -118,9 +131,10 @@ async def bug_start(message: types.Message, state: FSMContext):
                 describe_user(message.from_user))
     await state.set_state(BugForm.waiting_for_text)
     await message.answer(
-        "🐞 <b>Сообщить о баге</b>\n\n"
-        "Опишите проблему как можно подробнее: что вы делали, что случилось, "
-        "что ожидали увидеть. Чем подробнее — тем быстрее починим.",
+        f"{te(PE_BOT, '🐞')} <b>Сообщить о баге</b>\n\n"
+        f"{te(PE_PENCIL, '📝')} Опишите проблему как можно подробнее: что вы "
+        "делали, что случилось, что ожидали увидеть. Чем подробнее — тем "
+        "быстрее починим.",
         reply_markup=_bug_cancel_kb(),
     )
 
@@ -128,8 +142,9 @@ async def bug_start(message: types.Message, state: FSMContext):
 async def _bug_cancel(message: types.Message, state: FSMContext) -> bool:
     if message.text and message.text.strip() == "❌ Отмена":
         await state.clear()
-        await message.answer("❌ Отмена. Баг-репорт не отправлен.",
-                              reply_markup=_menu_for(message.from_user.id))
+        await message.answer(
+            f"{te(PE_CROSS, '❌')} Отмена. Баг-репорт не отправлен.",
+            reply_markup=_menu_for(message.from_user.id))
         return True
     return False
 
@@ -247,10 +262,11 @@ async def _finalize_report(message: types.Message, state: FSMContext,
     await state.clear()
 
     await message.answer(
-        f"✅ <b>Баг-репорт #{report_id} принят!</b>\n\n"
-        "Спасибо за помощь. Мы рассмотрим сообщение и при необходимости "
-        "ответим вам в этот же чат.",
+        f"{te(PE_CHECK, '✅')} <b>Баг-репорт #{report_id} принят!</b>\n\n"
+        f"{te(PE_PARTY, '🙏')} Спасибо за помощь. Мы рассмотрим сообщение "
+        "и при необходимости ответим вам в этот же чат.",
         reply_markup=_menu_for(user.id),
+        message_effect_id=EFFECT_LIKE,
     )
 
     # Шлём админам
@@ -278,8 +294,8 @@ async def _notify_admins(bot: Bot, report_id: int) -> None:
     user_str = ", ".join(user_str_parts)
 
     header = (
-        f"🐞 <b>Новый баг-репорт #{rep['id']}</b>\n"
-        f"От: {user_str}\n"
+        f"{te(PE_BOT, '🐞')} <b>Новый баг-репорт #{rep['id']}</b>\n"
+        f"{te(PE_PROFILE, '👤')} От: {user_str}\n"
         f"<i>{escape(str(rep['created_at']))}</i>\n\n"
         f"<blockquote>{escape(rep['text'])}</blockquote>"
     )

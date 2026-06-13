@@ -55,7 +55,16 @@ from src.handlers.common import (
     check_access, _menu_for, is_admin, account_owner_id,
 )
 from src.logger import describe_user
-from src.effects import EFFECT_CONFETTI
+from src.effects import EFFECT_CONFETTI, EFFECT_LIKE, EFFECT_HEART
+from src.premium_emoji import (
+    te,
+    PE_PENCIL, PE_TRASH, PE_CROSS, PE_CHECK, PE_BOX, PE_CALENDAR, PE_TAG,
+    PE_PARTY, PE_LINK, PE_CHART_STATS, PE_CHART_GROW, PE_HOUSE, PE_PROFILE,
+    PE_PEOPLE, PE_INFO, PE_LOCK_CLOSED, PE_LOADING, PE_PAPERCLIP,
+    PE_MEDIA_PHOTO, PE_FILE, PE_BELL, PE_GIFT, PE_CLOCK, PE_WRITE, PE_BOT,
+    PE_SEND_UP, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_EYE, PE_GEOTAG,
+    PE_MEGAPHONE, PE_ARROW_DOWN_LIST, PE_TIME_PASSED, PE_ADD_TEXT,
+)
 from src.status_monitor import status_label
 from src.validation import (
     validate_nickname,
@@ -183,6 +192,7 @@ def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
             row.append(types.InlineKeyboardButton(
                 text=name,
                 callback_data=f"srv_pick:{node_id}",
+                icon_custom_emoji_id=PE_HOUSE,
             ))
         rows.append(row)
 
@@ -196,8 +206,11 @@ def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
     rows.append(nav)
     # Технический раздел — отдельный глобальный раздел (не игровой сервер)
     rows.append([types.InlineKeyboardButton(
-        text="🛠 Технический раздел", callback_data="tech_open")])
-    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
+        text="🛠 Технический раздел", callback_data="tech_open",
+        icon_custom_emoji_id=PE_BOT)])
+    rows.append([types.InlineKeyboardButton(
+        text="❌ Отмена", callback_data="cmpl_cancel",
+        icon_custom_emoji_id=PE_CROSS)])
 
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -212,7 +225,9 @@ def _tech_servers_keyboard(servers: list[str], page: int) -> types.InlineKeyboar
     rows: list[list[types.InlineKeyboardButton]] = []
     for i in range(0, len(chunk), 2):
         row = [
-            types.InlineKeyboardButton(text=key, callback_data=f"tech_srv:{key}")
+            types.InlineKeyboardButton(
+                text=key, callback_data=f"tech_srv:{key}",
+                icon_custom_emoji_id=PE_HOUSE)
             for key in chunk[i:i + 2]
         ]
         rows.append(row)
@@ -229,7 +244,9 @@ def _tech_servers_keyboard(servers: list[str], page: int) -> types.InlineKeyboar
     rows.append(nav)
     rows.append([types.InlineKeyboardButton(
         text="◀️ К серверам", callback_data="srv_back")])
-    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
+    rows.append([types.InlineKeyboardButton(
+        text="❌ Отмена", callback_data="cmpl_cancel",
+        icon_custom_emoji_id=PE_CROSS)])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -240,14 +257,18 @@ def _tech_kind_keyboard(server_key: str, has_tech: bool,
     if has_tech:
         rows.append([types.InlineKeyboardButton(
             text="🛠 Технический вопрос",
-            callback_data=f"tech_kind:tech:{server_key}")])
+            callback_data=f"tech_kind:tech:{server_key}",
+            icon_custom_emoji_id=PE_BOT)])
     if has_staff:
         rows.append([types.InlineKeyboardButton(
             text="👨‍🔧 Жалоба на тех. специалиста",
-            callback_data=f"tech_kind:staff:{server_key}")])
+            callback_data=f"tech_kind:staff:{server_key}",
+            icon_custom_emoji_id=PE_PERSON_CROSS)])
     rows.append([types.InlineKeyboardButton(
         text="◀️ К выбору сервера", callback_data="tech_open")])
-    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
+    rows.append([types.InlineKeyboardButton(
+        text="❌ Отмена", callback_data="cmpl_cancel",
+        icon_custom_emoji_id=PE_CROSS)])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -259,15 +280,20 @@ def _categories_keyboard(categories: dict[str, tuple[str, int]]) -> types.Inline
         rows.append([types.InlineKeyboardButton(
             text=label,
             callback_data=f"cat_pick:{node_id}:{key}",
+            icon_custom_emoji_id=PE_TAG,
         )])
-    rows.append([types.InlineKeyboardButton(text="◀️ К серверам", callback_data="srv_back")])
-    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
+    rows.append([types.InlineKeyboardButton(
+        text="◀️ К серверам", callback_data="srv_back")])
+    rows.append([types.InlineKeyboardButton(
+        text="❌ Отмена", callback_data="cmpl_cancel",
+        icon_custom_emoji_id=PE_CROSS)])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+        keyboard=[[types.KeyboardButton(
+            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)]],
         resize_keyboard=True,
     )
 
@@ -275,8 +301,10 @@ def _cancel_kb() -> types.ReplyKeyboardMarkup:
 def _date_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="➖ Без даты")],
-            [types.KeyboardButton(text="❌ Отмена")],
+            [types.KeyboardButton(
+                text="➖ Без даты", icon_custom_emoji_id=PE_TIME_PASSED)],
+            [types.KeyboardButton(
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
         ],
         resize_keyboard=True,
     )
@@ -287,15 +315,16 @@ async def _ask_date(message: types.Message, key: str) -> None:
     для админ/обжалований — «дата выдачи наказания»."""
     if key in ("technical", "tech_staff"):
         prompt = (
-            "📅 <b>Дата и время произошедшей технической проблемы</b> "
+            f"{te(PE_CALENDAR, '📅')} <b>Дата и время произошедшей "
+            "технической проблемы</b> "
             "(например: <code>15.05.2026 19:30</code>).\n\n"
-            "Если не помните точно — нажмите <b>«➖ Без даты»</b>."
+            f"Если не помните точно — нажмите <b>«➖ Без даты»</b>."
         )
     else:
         prompt = (
-            "📅 <b>Дата выдачи/получения наказания</b> "
+            f"{te(PE_CALENDAR, '📅')} <b>Дата выдачи/получения наказания</b> "
             "(например: <code>15.05.2026 19:30</code>).\n\n"
-            "Если дата неизвестна — нажмите <b>«➖ Без даты»</b>: "
+            f"Если дата неизвестна — нажмите <b>«➖ Без даты»</b>: "
             "в жалобе будет прочерк."
         )
     await message.answer(prompt, reply_markup=_date_kb())
@@ -325,8 +354,9 @@ async def start_complaint_flow(message: types.Message, state: FSMContext):
     if not servers:
         logger.warning("Сценарий жалобы прерван: список серверов пуст. Нужна синхронизация.")
         await message.answer(
-            "⚠️ Список серверов пуст. Сначала выполните <b>🔄 Синхронизировать форум</b> "
-            "или отправьте команду <code>/sync</code>."
+            f"{te(PE_INFO, '⚠️')} Список серверов пуст. Сначала выполните "
+            "<b>«Синхронизировать форум»</b> или отправьте команду "
+            "<code>/sync</code>."
         )
         return
 
@@ -336,7 +366,7 @@ async def start_complaint_flow(message: types.Message, state: FSMContext):
     logger.debug("FSM -> choosing_server (доступно %d серверов).", len(servers))
 
     await message.answer(
-        "📥 <b>Шаг 1: Выберите сервер</b>",
+        f"{te(PE_HOUSE, '📥')} <b>Шаг 1: Выберите сервер</b>",
         reply_markup=_servers_keyboard(servers, page=0),
     )
 
@@ -566,6 +596,7 @@ def _templates_keyboard(builtin: dict[str, dict[str, str]],
             row.append(types.InlineKeyboardButton(
                 text=info["name"],
                 callback_data=f"tpl_use:b:{key}",
+                icon_custom_emoji_id=PE_FILE,
             ))
         rows.append(row)
     # Пользовательские шаблоны — по одному в ряд (могут быть длинные имена)
@@ -573,16 +604,22 @@ def _templates_keyboard(builtin: dict[str, dict[str, str]],
         rows.append([types.InlineKeyboardButton(
             text=f"⭐ {ut['name']}",
             callback_data=f"tpl_use:u:{ut['id']}",
+            icon_custom_emoji_id=PE_GIFT,
         )])
     rows.append([
         types.InlineKeyboardButton(
-            text="✍️ Своё описание", callback_data="tpl_skip"),
+            text="✍️ Своё описание", callback_data="tpl_skip",
+            icon_custom_emoji_id=PE_WRITE),
         types.InlineKeyboardButton(
-            text="➕ Создать шаблон", callback_data="tpl_new"),
+            text="➕ Создать шаблон", callback_data="tpl_new",
+            icon_custom_emoji_id=PE_PENCIL),
     ])
     rows.append([
-        types.InlineKeyboardButton(text="◀️ К серверам", callback_data="srv_back"),
-        types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel"),
+        types.InlineKeyboardButton(
+            text="◀️ К серверам", callback_data="srv_back"),
+        types.InlineKeyboardButton(
+            text="❌ Отмена", callback_data="cmpl_cancel",
+            icon_custom_emoji_id=PE_CROSS),
     ])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -930,8 +967,10 @@ async def _ask_summary(message: types.Message, key: str, state: FSMContext):
         )
         kb = types.ReplyKeyboardMarkup(
             keyboard=[
-                [types.KeyboardButton(text="✅ Из шаблона")],
-                [types.KeyboardButton(text="❌ Отмена")],
+                [types.KeyboardButton(
+                    text="✅ Из шаблона", icon_custom_emoji_id=PE_FILE)],
+                [types.KeyboardButton(
+                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
             ],
             resize_keyboard=True,
         )
@@ -958,12 +997,16 @@ async def process_punishment_date(message: types.Message, state: FSMContext):
             logger.info("Валидация даты от %s не прошла: %s",
                         describe_user(message.from_user), value)
             await message.answer(
-                f"❌ {escape(value)}\n\nПопробуйте ещё раз "
+                f"{te(PE_CROSS, '❌')} {escape(value)}\n\nПопробуйте ещё раз "
                 "или нажмите «➖ Без даты»:",
                 reply_markup=types.ReplyKeyboardMarkup(
                     keyboard=[
-                        [types.KeyboardButton(text="➖ Без даты")],
-                        [types.KeyboardButton(text="❌ Отмена")],
+                        [types.KeyboardButton(
+                            text="➖ Без даты",
+                            icon_custom_emoji_id=PE_TIME_PASSED)],
+                        [types.KeyboardButton(
+                            text="❌ Отмена",
+                            icon_custom_emoji_id=PE_CROSS)],
                     ],
                     resize_keyboard=True,
                 ),
@@ -1031,8 +1074,11 @@ async def process_summary(message: types.Message, state: FSMContext):
         )
         kb = types.ReplyKeyboardMarkup(
             keyboard=[
-                [types.KeyboardButton(text="✅ Использовать шаблон")],
-                [types.KeyboardButton(text="❌ Отмена")],
+                [types.KeyboardButton(
+                    text="✅ Использовать шаблон",
+                    icon_custom_emoji_id=PE_FILE)],
+                [types.KeyboardButton(
+                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
             ],
             resize_keyboard=True,
         )
@@ -1178,8 +1224,11 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
 
     use_kb = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="✅ Использовать загруженное")],
-            [types.KeyboardButton(text="❌ Отмена")],
+            [types.KeyboardButton(
+                text="✅ Использовать загруженное",
+                icon_custom_emoji_id=PE_PAPERCLIP)],
+            [types.KeyboardButton(
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
         ],
         resize_keyboard=True,
     )
@@ -1253,8 +1302,11 @@ async def process_proof_video(message: types.Message, state: FSMContext, bot: Bo
 
     use_kb = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="✅ Использовать загруженное")],
-            [types.KeyboardButton(text="❌ Отмена")],
+            [types.KeyboardButton(
+                text="✅ Использовать загруженное",
+                icon_custom_emoji_id=PE_PAPERCLIP)],
+            [types.KeyboardButton(
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
         ],
         resize_keyboard=True,
     )
@@ -1292,10 +1344,14 @@ async def _finalize_preview(message: types.Message, state: FSMContext) -> None:
 
     confirm_kb = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="✅ Отправить на форум")],
+            [types.KeyboardButton(
+                text="✅ Отправить на форум",
+                icon_custom_emoji_id=PE_SEND_UP)],
             [
-                types.KeyboardButton(text="📦 В очередь"),
-                types.KeyboardButton(text="❌ Отмена"),
+                types.KeyboardButton(
+                    text="📦 В очередь", icon_custom_emoji_id=PE_BOX),
+                types.KeyboardButton(
+                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS),
             ],
         ],
         resize_keyboard=True,
@@ -1303,17 +1359,20 @@ async def _finalize_preview(message: types.Message, state: FSMContext) -> None:
 
     poster = data.get("complaint_account_name") or "по текущим cookies.json"
     poster_line_admin = (
-        f"👤 <b>От имени:</b> {escape(str(poster))}\n"
+        f"{te(PE_PROFILE, '👤')} <b>От имени:</b> {escape(str(poster))}\n"
         if is_admin(message.from_user.id) else ""
     )
 
     preview_text = (
-        "🧐 <b>Проверьте корректность перед отправкой:</b>\n\n"
+        f"{te(PE_EYE, '🧐')} <b>Проверьте корректность перед отправкой:</b>\n\n"
         f"{poster_line_admin}"
-        f"📍 <b>Сервер:</b> {escape(str(data.get('server_name', '?')))}\n"
-        f"📂 <b>Категория:</b> {escape(str(data.get('category_label', '?')))}\n"
-        f"📌 <b>Заголовок темы:</b> {escape(thread_title)}\n\n"
-        f"📄 <b>Текст сообщения:</b>\n"
+        f"{te(PE_GEOTAG, '📍')} <b>Сервер:</b> "
+        f"{escape(str(data.get('server_name', '?')))}\n"
+        f"{te(PE_TAG, '📂')} <b>Категория:</b> "
+        f"{escape(str(data.get('category_label', '?')))}\n"
+        f"{te(PE_PENCIL, '📌')} <b>Заголовок темы:</b> "
+        f"{escape(thread_title)}\n\n"
+        f"{te(PE_FILE, '📄')} <b>Текст сообщения:</b>\n"
         f"<pre>{escape(bb_code)}</pre>\n"
         "Нажмите <b>✅ Отправить на форум</b> для немедленной публикации "
         "или <b>📦 В очередь</b> чтобы поставить в очередь "
@@ -1440,12 +1499,15 @@ async def process_enqueue(message: types.Message, state: FSMContext):
     )
     await state.clear()
     await message.answer(
-        f"📦 <b>Жалоба #{qid} поставлена в очередь.</b>\n\n"
-        "Бот опубликует её, когда освободится свободный форумный аккаунт.\n"
-        "Вы получите ссылку в личку, как только тема будет опубликована.\n\n"
-        "Посмотреть статус: команда <code>/queue</code> (для админа) или "
-        "<code>📦 Очередь жалоб</code>.",
+        f"{te(PE_BOX, '📦')} <b>Жалоба #{qid} поставлена в очередь.</b>\n\n"
+        f"{te(PE_LOADING, '🔄')} Бот опубликует её, когда освободится "
+        "свободный форумный аккаунт.\n"
+        f"{te(PE_BELL, '🔔')} Вы получите ссылку в личку, как только тема "
+        "будет опубликована.\n\n"
+        f"{te(PE_INFO, 'ℹ️')} Посмотреть статус: команда <code>/queue</code> "
+        "(для админа) или <code>📦 Очередь жалоб</code>.",
         reply_markup=_menu_for(message.from_user.id),
+        message_effect_id=EFFECT_LIKE,
     )
 
 
@@ -1653,18 +1715,21 @@ async def process_confirm(message: types.Message, state: FSMContext):
         await status_msg.delete()
         if is_admin(message.from_user.id):
             final_text = (
-                f"🎉 <b>Жалоба успешно опубликована!</b>\n\n"
-                f"👤 От имени: <b>{escape(account_name)}</b>\n"
-                f"🔗 <a href=\"{escape(result)}\">Открыть тему на форуме</a>\n"
-                f"⏱ Аккаунт ушёл в кулдаун на "
+                f"{te(PE_PARTY, '🎉')} <b>Жалоба успешно опубликована!</b>\n\n"
+                f"{te(PE_PROFILE, '👤')} От имени: "
+                f"<b>{escape(account_name)}</b>\n"
+                f"{te(PE_LINK, '🔗')} <a href=\"{escape(result)}\">"
+                f"Открыть тему на форуме</a>\n"
+                f"{te(PE_CLOCK, '⏱')} Аккаунт ушёл в кулдаун на "
                 f"<b>{_format_cooldown(COMPLAINT_COOLDOWN_SECONDS)}</b>."
                 f"{next_info}"
             )
         else:
             # Обычным пользователям не светим имя аккаунта-публикатора
             final_text = (
-                f"🎉 <b>Жалоба успешно опубликована!</b>\n\n"
-                f"🔗 <a href=\"{escape(result)}\">Открыть тему на форуме</a>"
+                f"{te(PE_PARTY, '🎉')} <b>Жалоба успешно опубликована!</b>\n\n"
+                f"{te(PE_LINK, '🔗')} <a href=\"{escape(result)}\">"
+                f"Открыть тему на форуме</a>"
                 f"{next_info}"
             )
         await message.answer(
@@ -1707,9 +1772,11 @@ def _complaints_list_keyboard(complaints: list[dict]) -> types.InlineKeyboardMar
         rows.append([types.InlineKeyboardButton(
             text=f"#{c['id']} — {c['nickname'][:30]}",
             callback_data=f"cmpl_open:{c['id']}",
+            icon_custom_emoji_id=PE_ARROW_DOWN_LIST,
         )])
     rows.append([types.InlineKeyboardButton(
         text="🔄 Обновить", callback_data="cmpl_refresh",
+        icon_custom_emoji_id=PE_LOADING,
     )])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1722,15 +1789,18 @@ def _complaint_detail_keyboard(complaint_id: int,
         rows.append([types.InlineKeyboardButton(
             text="✏️ Редактировать на форуме",
             callback_data=f"cmpl_edit:{complaint_id}",
+            icon_custom_emoji_id=PE_PENCIL,
         )])
         rows.append([
             types.InlineKeyboardButton(
                 text="🗑 Удалить с форума",
-                callback_data=f"cmpl_delf:{complaint_id}"),
+                callback_data=f"cmpl_delf:{complaint_id}",
+                icon_custom_emoji_id=PE_TRASH),
         ])
     rows.append([types.InlineKeyboardButton(
         text="🗂 Удалить из истории",
         callback_data=f"cmpl_del:{complaint_id}",
+        icon_custom_emoji_id=PE_TRASH,
     )])
     rows.append([types.InlineKeyboardButton(
         text="◀️ К списку",
@@ -1741,8 +1811,9 @@ def _complaint_detail_keyboard(complaint_id: int,
 
 def _format_complaints_list(complaints: list[dict]) -> str:
     if not complaints:
-        return "📭 Вы ещё не отправляли жалоб через этого бота."
-    lines = ["📜 <b>История ваших жалоб (последние 10):</b>\n"]
+        return f"{te(PE_BOX, '📭')} Вы ещё не отправляли жалоб через этого бота."
+    lines = [f"{te(PE_ARROW_DOWN_LIST, '📜')} <b>История ваших жалоб "
+             "(последние 10):</b>\n"]
     for i, comp in enumerate(complaints[:10], 1):
         if comp["forum_thread_url"]:
             link = (
@@ -2008,10 +2079,12 @@ async def cmd_templates(message: types.Message):
             types.InlineKeyboardButton(
                 text=f"✏️ {ut['name']}",
                 callback_data=f"utpl_edit:{ut['id']}",
+                icon_custom_emoji_id=PE_PENCIL,
             ),
             types.InlineKeyboardButton(
                 text="🗑",
                 callback_data=f"utpl_del:{ut['id']}",
+                icon_custom_emoji_id=PE_TRASH,
             ),
         ])
     kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -2020,7 +2093,7 @@ async def cmd_templates(message: types.Message):
         "players": "🎮 игроки", "admins": "🛡 админы",
         "leaders": "👑 лидеры", "appeals": "⚖️ обжалования",
     }
-    lines = ["⭐ <b>Ваши шаблоны жалоб:</b>\n"]
+    lines = [f"{te(PE_GIFT, '⭐')} <b>Ваши шаблоны жалоб:</b>\n"]
     for ut in user_tpls:
         lines.append(
             f"<b>{escape(ut['name'])}</b> "
@@ -2112,11 +2185,14 @@ async def utpl_edit_start(call: types.CallbackQuery, state: FSMContext):
     )
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="✏️ Имя",
-            callback_data=f"utpl_efield:name:{tid}")],
+            callback_data=f"utpl_efield:name:{tid}",
+            icon_custom_emoji_id=PE_ADD_TEXT)],
         [types.InlineKeyboardButton(text="✏️ Суть",
-            callback_data=f"utpl_efield:summary:{tid}")],
+            callback_data=f"utpl_efield:summary:{tid}",
+            icon_custom_emoji_id=PE_PENCIL)],
         [types.InlineKeyboardButton(text="✏️ Описание",
-            callback_data=f"utpl_efield:description:{tid}")],
+            callback_data=f"utpl_efield:description:{tid}",
+            icon_custom_emoji_id=PE_FILE)],
         [types.InlineKeyboardButton(text="◀️ Отмена",
             callback_data="utpl_back")],
     ])
@@ -2243,14 +2319,16 @@ async def cmpl_edit_start(call: types.CallbackQuery, state: FSMContext):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(
-            text="📝 Описание", callback_data=f"cmpl_efield:desc:{cid}")],
+            text="📝 Описание", callback_data=f"cmpl_efield:desc:{cid}",
+            icon_custom_emoji_id=PE_FILE)],
         [types.InlineKeyboardButton(
-            text="🔗 Доказательства", callback_data=f"cmpl_efield:proof:{cid}")],
+            text="🔗 Доказательства", callback_data=f"cmpl_efield:proof:{cid}",
+            icon_custom_emoji_id=PE_LINK)],
         [types.InlineKeyboardButton(
             text="◀️ Отмена", callback_data=f"cmpl_open:{cid}")],
     ])
     await call.message.edit_text(
-        f"✏️ <b>Редактирование жалобы #{cid}</b>\n\n"
+        f"{te(PE_PENCIL, '✏️')} <b>Редактирование жалобы #{cid}</b>\n\n"
         "Что хотите изменить?\n\n"
         "<i>Изменение применится и в локальной истории, "
         "и в теме на форуме (если форум разрешает редактирование автору).</i>",
@@ -2501,23 +2579,27 @@ async def cmd_draft(message: types.Message, state: FSMContext):
         step_label = "выбор сервера"
 
     text = (
-        f"📝 <b>Сохранён черновик жалобы</b>\n\n"
-        f"🕐 Обновлён: <code>{escape(str(draft.get('updated_at', '')))}</code>\n"
-        f"📍 Шаг: <i>{escape(step_label)}</i>\n\n"
+        f"{te(PE_PENCIL, '📝')} <b>Сохранён черновик жалобы</b>\n\n"
+        f"{te(PE_CLOCK, '🕐')} Обновлён: "
+        f"<code>{escape(str(draft.get('updated_at', '')))}</code>\n"
+        f"{te(PE_GEOTAG, '📍')} Шаг: <i>{escape(step_label)}</i>\n\n"
         f"<b>Сервер:</b> {escape(server)}\n"
         f"<b>Ваш ник:</b> {escape(str(your_nick))}\n"
         f"<b>Цель:</b> {escape(str(target))}\n"
         f"<b>Суть:</b> {escape(str(summary))}\n"
-        f"<b>Описание:</b> {escape(description)}{'…' if len(data.get('description', '') or '') > 120 else ''}"
+        f"<b>Описание:</b> {escape(description)}"
+        f"{'…' if len(data.get('description', '') or '') > 120 else ''}"
     )
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(
             text="📝 Продолжить с этого шага",
             callback_data="draft_resume",
+            icon_custom_emoji_id=PE_PENCIL,
         )],
         [types.InlineKeyboardButton(
             text="🗑 Удалить черновик",
             callback_data="draft_delete",
+            icon_custom_emoji_id=PE_TRASH,
         )],
     ])
     await message.answer(text, reply_markup=kb)
@@ -2601,6 +2683,7 @@ def _find_result_keyboard(
                 types.InlineKeyboardButton(
                     text=f"🔗 #{item['id']} {escape(item['nickname'][:18])}",
                     url=url,
+                    icon_custom_emoji_id=PE_LINK,
                 )
             ])
 
@@ -2684,7 +2767,7 @@ async def cmd_find(message: types.Message):
 
     if not query:
         await message.answer(
-            "🔍 <b>Поиск жалоб по нику</b>\n\n"
+            f"{te(PE_EYE, '🔍')} <b>Поиск жалоб по нику</b>\n\n"
             "Введите команду с ником цели:\n"
             "<code>/find BlackPlayer</code>\n\n"
             "Поиск частичный и без учёта регистра — "
@@ -2693,7 +2776,9 @@ async def cmd_find(message: types.Message):
         return
 
     if len(query) < 2:
-        await message.answer("⚠️ Запрос слишком короткий. Введите минимум 2 символа.")
+        await message.answer(
+            f"{te(PE_INFO, '⚠️')} Запрос слишком короткий. Введите минимум "
+            "2 символа.")
         return
 
     uid = message.from_user.id

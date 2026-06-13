@@ -25,6 +25,7 @@ from aiogram.types import (
 
 from src.config import ADMIN_IDS
 from src.database import list_subscription_channels
+from src.premium_emoji import te, PE_BELL, PE_CHECK, PE_MEGAPHONE
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +85,17 @@ def build_subscribe_keyboard(channels: list[str]) -> InlineKeyboardMarkup:
         # автоматически открывает их в приложении Telegram.
         url = f"https://t.me/{ch}"
         rows.append([
-            InlineKeyboardButton(text=f"📢 Подписаться на @{ch}", url=url),
+            InlineKeyboardButton(
+                text=f"📢 Подписаться на @{ch}",
+                url=url,
+                icon_custom_emoji_id=PE_MEGAPHONE,
+            ),
         ])
     rows.append([
         InlineKeyboardButton(
-            text="✅ Проверить подписку", callback_data=RESUB_CHECK_CB,
+            text="✅ Проверить подписку",
+            callback_data=RESUB_CHECK_CB,
+            icon_custom_emoji_id=PE_CHECK,
         ),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -98,10 +105,11 @@ def build_subscribe_text(channels: list[str]) -> str:
     """Текст приглашения подписаться."""
     listed = "\n".join(f"  • @{ch}" for ch in channels)
     return (
-        "🔔 <b>Чтобы пользоваться ботом, подпишитесь на каналы "
-        "наших спонсоров:</b>\n\n"
+        f"{te(PE_BELL, '🔔')} <b>Чтобы пользоваться ботом, подпишитесь "
+        "на каналы наших спонсоров:</b>\n\n"
         f"{listed}\n\n"
-        "После подписки нажмите <b>«Проверить подписку»</b>."
+        f"{te(PE_CHECK, '✅')} После подписки нажмите "
+        "<b>«Проверить подписку»</b>."
     )
 
 

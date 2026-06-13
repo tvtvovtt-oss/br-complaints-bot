@@ -27,6 +27,15 @@ from src.database import (
 )
 from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
+from src.premium_emoji import (
+    te,
+    PE_CHART_STATS, PE_CHART_GROW, PE_PEOPLE, PE_PERSON_CHECK,
+    PE_PERSON_CROSS, PE_MEGAPHONE, PE_BOX, PE_LOCK_CLOSED, PE_LOCK_OPEN,
+    PE_CHECK, PE_CROSS, PE_TRASH, PE_LINK, PE_LOADING, PE_BELL,
+    PE_INFO, PE_EYE, PE_PENCIL, PE_TIME_PASSED, PE_SEND_UP, PE_BOT,
+    PE_ARROW_DOWN_LIST, PE_PROFILE,
+)
+from src.effects import EFFECT_LIKE, EFFECT_FIRE
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -61,34 +70,38 @@ async def cmd_stats(message: types.Message):
     s = await get_stats(within_days=7)
     rate = (s["accepted"] / s["total"] * 100) if s["total"] else 0
     lines = [
-        "📊 <b>Статистика за 7 дней</b>\n",
-        f"👥 Всего пользователей: <b>{s['total_users']}</b>",
-        f"   🆕 Новых за 7 дн: <b>{s.get('new_users', 0)}</b>",
-        f"   🔥 Активных за 7 дн: <b>{s.get('active_users', 0)}</b>",
-        f"📝 Жалоб подано: <b>{s['total']}</b>",
-        f"   ✅ Принято: <b>{s['accepted']}</b> ({rate:.0f}%)",
-        f"   ❌ Отклонено: <b>{s['rejected']}</b>",
-        f"   ⏳ Ожидание: <b>{s['pending']}</b>",
-        f"📦 В очереди публикации: <b>{s['queue_pending']}</b>",
+        f"{te(PE_CHART_STATS, '📊')} <b>Статистика за 7 дней</b>\n",
+        f"{te(PE_PEOPLE, '👥')} Всего пользователей: <b>{s['total_users']}</b>",
+        f"   {te(PE_PERSON_CHECK, '🆕')} Новых за 7 дн: "
+        f"<b>{s.get('new_users', 0)}</b>",
+        f"   {te(PE_CHART_GROW, '🔥')} Активных за 7 дн: "
+        f"<b>{s.get('active_users', 0)}</b>",
+        f"{te(PE_PENCIL, '📝')} Жалоб подано: <b>{s['total']}</b>",
+        f"   {te(PE_CHECK, '✅')} Принято: <b>{s['accepted']}</b> "
+        f"({rate:.0f}%)",
+        f"   {te(PE_CROSS, '❌')} Отклонено: <b>{s['rejected']}</b>",
+        f"   {te(PE_TIME_PASSED, '⏳')} Ожидание: <b>{s['pending']}</b>",
+        f"{te(PE_BOX, '📦')} В очереди публикации: "
+        f"<b>{s['queue_pending']}</b>",
     ]
 
     if s["top_users"]:
-        lines.append("\n👤 <b>Топ авторов жалоб:</b>")
+        lines.append(f"\n{te(PE_PROFILE, '👤')} <b>Топ авторов жалоб:</b>")
         for tg_id, count in s["top_users"]:
             lines.append(f"   • <code>{tg_id}</code> — {count}")
 
     if s["top_targets"]:
-        lines.append("\n🎯 <b>Топ нарушителей:</b>")
+        lines.append(f"\n{te(PE_PERSON_CROSS, '🎯')} <b>Топ нарушителей:</b>")
         for nick, count in s["top_targets"]:
             lines.append(f"   • <b>{escape(nick)}</b> — {count}")
 
     if s.get("top_servers"):
-        lines.append("\n🌐 <b>Топ серверов:</b>")
+        lines.append(f"\n{te(PE_CHART_GROW, '🌐')} <b>Топ серверов:</b>")
         for name, count in s["top_servers"]:
             lines.append(f"   • <b>{escape(name)}</b> — {count}")
 
     if s["by_day"]:
-        lines.append("\n📅 <b>По дням:</b>")
+        lines.append(f"\n{te(PE_CHART_STATS, '📅')} <b>По дням:</b>")
         for d, count in s["by_day"]:
             lines.append(f"   {escape(str(d))}: {count}")
 
@@ -143,12 +156,13 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
         return
     await state.set_state(BroadcastForm.waiting_for_text)
     await message.answer(
-        "📢 <b>Рассылка по всем пользователям бота</b>\n\n"
+        f"{te(PE_MEGAPHONE, '📢')} <b>Рассылка по всем пользователям бота</b>\n\n"
         "Отправьте текст сообщения. Поддерживается HTML (<code>&lt;b&gt;</code>, "
         "<code>&lt;i&gt;</code>, <code>&lt;a href=...&gt;</code>).\n\n"
-        "Для отмены — нажмите ❌ Отмена.",
+        f"Для отмены — нажмите {te(PE_CROSS, '❌')} Отмена.",
         reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+            keyboard=[[types.KeyboardButton(
+                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)]],
             resize_keyboard=True,
         ),
     )
@@ -157,7 +171,7 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
 async def _broadcast_cancel(message: types.Message, state: FSMContext) -> bool:
     if message.text and message.text.strip() == "❌ Отмена":
         await state.clear()
-        await message.answer("❌ Рассылка отменена.",
+        await message.answer(f"{te(PE_CROSS, '❌')} Рассылка отменена.",
                               reply_markup=_menu_for(message.from_user.id))
         return True
     return False
@@ -184,8 +198,8 @@ async def broadcast_got_text(message: types.Message, state: FSMContext):
     await state.set_state(BroadcastForm.waiting_for_confirm)
 
     preview = (
-        f"📢 <b>Рассылка готова</b>\n\n"
-        f"<b>Получателей (примерно):</b> {len(users)}\n\n"
+        f"{te(PE_MEGAPHONE, '📢')} <b>Рассылка готова</b>\n\n"
+        f"{te(PE_PEOPLE, '👥')} <b>Получателей (примерно):</b> {len(users)}\n\n"
         f"<b>Превью сообщения:</b>\n"
         f"━━━━━━━━━━━━━━\n{text}\n━━━━━━━━━━━━━━\n\n"
         f"Подтверждаете? (это нельзя отменить после старта)"
@@ -194,8 +208,11 @@ async def broadcast_got_text(message: types.Message, state: FSMContext):
         preview,
         reply_markup=types.ReplyKeyboardMarkup(
             keyboard=[
-                [types.KeyboardButton(text="✅ Отправить всем")],
-                [types.KeyboardButton(text="❌ Отмена")],
+                [types.KeyboardButton(
+                    text="✅ Отправить всем",
+                    icon_custom_emoji_id=PE_SEND_UP)],
+                [types.KeyboardButton(
+                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)],
             ],
             resize_keyboard=True,
         ),
@@ -283,16 +300,27 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
                 describe_user(message.from_user), len(users),
                 delivered, blocked, failed)
 
+    summary = (
+        f"{te(PE_MEGAPHONE, '📢')} <b>Рассылка завершена</b>\n\n"
+        f"{te(PE_SEND_UP, '📤')} Отправлено: <b>{delivered}</b>\n"
+        f"{te(PE_PERSON_CROSS, '🚫')} Заблокировали бота: <b>{blocked}</b>\n"
+        f"{te(PE_CROSS, '❌')} Других ошибок: <b>{failed}</b>"
+    )
     try:
-        await status.edit_text(
-            f"📢 <b>Рассылка завершена</b>\n\n"
-            f"📤 Отправлено: <b>{delivered}</b>\n"
-            f"🚫 Заблокировали бота: <b>{blocked}</b>\n"
-            f"❌ Других ошибок: <b>{failed}</b>"
+        # status.edit_text не поддерживает message_effect_id; шлём
+        # отдельное сообщение со взлетающим эффектом и убираем статусное.
+        await status.delete()
+    except Exception:
+        pass
+    try:
+        await message.answer(
+            summary,
+            reply_markup=_menu_for(message.from_user.id),
+            message_effect_id=EFFECT_LIKE,
         )
     except Exception:
         await message.answer(
-            f"📢 Готово: {delivered}/{len(users)}",
+            f"{te(PE_MEGAPHONE, '📢')} Готово: {delivered}/{len(users)}",
             reply_markup=_menu_for(message.from_user.id),
         )
 
@@ -631,11 +659,13 @@ async def cmd_maintenance(message: types.Message):
         rows.append([types.InlineKeyboardButton(
             text="🔓 Выключить (открыть бот для всех)",
             callback_data="maint_off",
+            icon_custom_emoji_id=PE_LOCK_OPEN,
         )])
     else:
         rows.append([types.InlineKeyboardButton(
             text="🔒 Включить (закрыть для не-админов)",
             callback_data="maint_on",
+            icon_custom_emoji_id=PE_LOCK_CLOSED,
         )])
     kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -661,7 +691,8 @@ async def maint_on(call: types.CallbackQuery):
             "Выключить: <code>/maintenance off</code> или кнопкой ниже.",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(
-                    text="🔓 Выключить", callback_data="maint_off")],
+                    text="🔓 Выключить", callback_data="maint_off",
+                    icon_custom_emoji_id=PE_LOCK_OPEN)],
             ]),
         )
     except Exception:
@@ -682,7 +713,8 @@ async def maint_off(call: types.CallbackQuery):
             "Бот снова доступен всем пользователям.",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(
-                    text="🔒 Включить", callback_data="maint_on")],
+                    text="🔒 Включить", callback_data="maint_on",
+                    icon_custom_emoji_id=PE_LOCK_CLOSED)],
             ]),
         )
     except Exception:
@@ -829,6 +861,7 @@ def _complaints_list_kb(page: int, total_pages: int,
     nav.append(types.InlineKeyboardButton(
         text=f"📄 {page}/{total_pages or 1}",
         callback_data="adm_cs_noop",
+        icon_custom_emoji_id=PE_ARROW_DOWN_LIST,
     ))
     if page < total_pages:
         nav.append(types.InlineKeyboardButton(
@@ -843,30 +876,36 @@ def _complaints_list_kb(page: int, total_pages: int,
         types.InlineKeyboardButton(
             text="🔄 Все" + (" ✓" if not status_filter else ""),
             callback_data="adm_cs:1:all",
+            icon_custom_emoji_id=PE_LOADING,
         ),
         types.InlineKeyboardButton(
             text="⏳ В ожидании" + (" ✓" if status_filter == "pending" else ""),
             callback_data="adm_cs:1:pending",
+            icon_custom_emoji_id=PE_TIME_PASSED,
         ),
     ])
     rows.append([
         types.InlineKeyboardButton(
             text="🔎 Рассмотр." + (" ✓" if status_filter == "review" else ""),
             callback_data="adm_cs:1:review",
+            icon_custom_emoji_id=PE_EYE,
         ),
         types.InlineKeyboardButton(
             text="🔒 Закрыто" + (" ✓" if status_filter == "closed" else ""),
             callback_data="adm_cs:1:closed",
+            icon_custom_emoji_id=PE_LOCK_CLOSED,
         ),
     ])
     rows.append([
         types.InlineKeyboardButton(
             text="✅ Принято" + (" ✓" if status_filter == "accepted" else ""),
             callback_data="adm_cs:1:accepted",
+            icon_custom_emoji_id=PE_CHECK,
         ),
         types.InlineKeyboardButton(
             text="❌ Отказано" + (" ✓" if status_filter == "rejected" else ""),
             callback_data="adm_cs:1:rejected",
+            icon_custom_emoji_id=PE_CROSS,
         ),
     ])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -879,19 +918,23 @@ def _complaint_actions_kb(complaint_id: int,
         rows.append([types.InlineKeyboardButton(
             text="🔗 Открыть на форуме",
             callback_data=f"adm_c_open_url:{complaint_id}",
+            icon_custom_emoji_id=PE_LINK,
         )])
         rows.append([types.InlineKeyboardButton(
             text="🗑 Удалить с форума и из БД",
             callback_data=f"adm_c_delf:{complaint_id}",
+            icon_custom_emoji_id=PE_TRASH,
         )])
     rows.append([
         types.InlineKeyboardButton(
             text="🗂 Удалить из БД",
             callback_data=f"adm_c_del:{complaint_id}",
+            icon_custom_emoji_id=PE_TRASH,
         ),
         types.InlineKeyboardButton(
             text="🚫 Забанить автора",
             callback_data=f"adm_c_banauth:{complaint_id}",
+            icon_custom_emoji_id=PE_PERSON_CROSS,
         ),
     ])
     rows.append([types.InlineKeyboardButton(
@@ -1284,6 +1327,7 @@ def _build_subs_menu(channels: list[str]) -> types.InlineKeyboardMarkup:
                 types.InlineKeyboardButton(
                     text=f"❌ @{ch}",
                     callback_data=f"subs:remove:{ch}",
+                    icon_custom_emoji_id=PE_TRASH,
                 ),
             ])
     else:
@@ -1296,11 +1340,13 @@ def _build_subs_menu(channels: list[str]) -> types.InlineKeyboardMarkup:
     rows.append([
         types.InlineKeyboardButton(
             text="➕ Добавить канал", callback_data="subs:add",
+            icon_custom_emoji_id=PE_MEGAPHONE,
         ),
     ])
     rows.append([
         types.InlineKeyboardButton(
             text="🔄 Обновить", callback_data="subs:list",
+            icon_custom_emoji_id=PE_LOADING,
         ),
     ])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1309,13 +1355,13 @@ def _build_subs_menu(channels: list[str]) -> types.InlineKeyboardMarkup:
 def _subs_text(channels: list[str]) -> str:
     if not channels:
         return (
-            "🔔 <b>Проверка подписки на каналы</b>\n\n"
+            f"{te(PE_BELL, '🔔')} <b>Проверка подписки на каналы</b>\n\n"
             "Сейчас список пуст — бот не требует подписки ни на какие каналы.\n"
             "Нажмите <b>«➕ Добавить канал»</b>, чтобы добавить первый."
         )
     listed = "\n".join(f"  • @{ch}" for ch in channels)
     return (
-        "🔔 <b>Проверка подписки на каналы</b>\n\n"
+        f"{te(PE_BELL, '🔔')} <b>Проверка подписки на каналы</b>\n\n"
         "Пользователи должны быть подписаны на все каналы ниже, "
         "иначе бот будет показывать приглашение подписаться.\n\n"
         f"<b>Текущий список ({len(channels)}):</b>\n{listed}\n\n"

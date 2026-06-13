@@ -32,7 +32,16 @@ from src.database import (
     get_user_complaint_stats,
 )
 from src.logger import describe_user
-from src.effects import EFFECT_CONFETTI, EFFECT_FIRE, EFFECT_LIKE
+from src.effects import EFFECT_CONFETTI, EFFECT_FIRE, EFFECT_LIKE, EFFECT_HEART
+from src.premium_emoji import (
+    te,
+    PE_SETTINGS, PE_PROFILE, PE_PEOPLE, PE_FILE, PE_LOCK_CLOSED, PE_LOCK_OPEN,
+    PE_MEGAPHONE, PE_CHECK, PE_CROSS, PE_PENCIL, PE_TRASH, PE_PAPERCLIP,
+    PE_LINK, PE_INFO, PE_BOT, PE_EYE, PE_SEND_UP, PE_BELL, PE_CLOCK, PE_PARTY,
+    PE_WRITE, PE_GEOTAG, PE_BOX, PE_CALENDAR, PE_TAG, PE_LOADING, PE_CHART_STATS,
+    PE_CHART_GROW, PE_HOUSE, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_GIFT,
+    PE_ARROW_DOWN_LIST,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -63,51 +72,75 @@ def account_owner_id(user_id: int) -> int:
 
 
 def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup:
-    """Главная клавиатура бота. Админу показываем расширенный набор кнопок."""
+    """Главная клавиатура бота. Админу показываем расширенный набор кнопок.
+
+    Текстовые ярлыки оставлены как есть (с обычными эмодзи) — на них
+    завязаны ``F.text``-фильтры. Премиум-юзерам Telegram дополнительно
+    отрисует анимированную иконку слева (``icon_custom_emoji_id``)."""
     if is_admin_user:
         kb = [
             [
-                types.KeyboardButton(text="📝 Подать жалобу"),
-                types.KeyboardButton(text="📜 Мои жалобы"),
+                types.KeyboardButton(text="📝 Подать жалобу",
+                                     icon_custom_emoji_id=PE_PENCIL),
+                types.KeyboardButton(text="📜 Мои жалобы",
+                                     icon_custom_emoji_id=PE_ARROW_DOWN_LIST),
             ],
             [
-                types.KeyboardButton(text="📋 Мои шаблоны"),
-                types.KeyboardButton(text="📦 Очередь жалоб"),
+                types.KeyboardButton(text="📋 Мои шаблоны",
+                                     icon_custom_emoji_id=PE_FILE),
+                types.KeyboardButton(text="📦 Очередь жалоб",
+                                     icon_custom_emoji_id=PE_BOX),
             ],
             [
-                types.KeyboardButton(text="🔍 Найти жалобу"),
-                types.KeyboardButton(text="📊 Мой профиль"),
+                types.KeyboardButton(text="🔍 Найти жалобу",
+                                     icon_custom_emoji_id=PE_EYE),
+                types.KeyboardButton(text="📊 Мой профиль",
+                                     icon_custom_emoji_id=PE_PROFILE),
             ],
             [
-                types.KeyboardButton(text="🔒 Режим обслуживания"),
-                types.KeyboardButton(text="🐞 Баг-репорты"),
+                types.KeyboardButton(text="🔒 Режим обслуживания",
+                                     icon_custom_emoji_id=PE_LOCK_CLOSED),
+                types.KeyboardButton(text="🐞 Баг-репорты",
+                                     icon_custom_emoji_id=PE_BOT),
             ],
             [
-                types.KeyboardButton(text="🔍 Проверить статус форума"),
-                types.KeyboardButton(text="🔄 Синхронизировать форум"),
+                types.KeyboardButton(text="🔍 Проверить статус форума",
+                                     icon_custom_emoji_id=PE_INFO),
+                types.KeyboardButton(text="🔄 Синхронизировать форум",
+                                     icon_custom_emoji_id=PE_LOADING),
             ],
             [
-                types.KeyboardButton(text="👥 Аккаунты"),
-                types.KeyboardButton(text="🔐 Войти по паролю"),
+                types.KeyboardButton(text="👥 Аккаунты",
+                                     icon_custom_emoji_id=PE_PEOPLE),
+                types.KeyboardButton(text="🔐 Войти по паролю",
+                                     icon_custom_emoji_id=PE_LOCK_CLOSED),
             ],
             [
-                types.KeyboardButton(text="📊 Статистика"),
-                types.KeyboardButton(text="📢 Рассылка"),
+                types.KeyboardButton(text="📊 Статистика",
+                                     icon_custom_emoji_id=PE_CHART_STATS),
+                types.KeyboardButton(text="📢 Рассылка",
+                                     icon_custom_emoji_id=PE_MEGAPHONE),
             ],
         ]
     else:
         kb = [
             [
-                types.KeyboardButton(text="📝 Подать жалобу"),
-                types.KeyboardButton(text="📜 Мои жалобы"),
+                types.KeyboardButton(text="📝 Подать жалобу",
+                                     icon_custom_emoji_id=PE_PENCIL),
+                types.KeyboardButton(text="📜 Мои жалобы",
+                                     icon_custom_emoji_id=PE_ARROW_DOWN_LIST),
             ],
             [
-                types.KeyboardButton(text="📋 Мои шаблоны"),
-                types.KeyboardButton(text="📊 Мой профиль"),
+                types.KeyboardButton(text="📋 Мои шаблоны",
+                                     icon_custom_emoji_id=PE_FILE),
+                types.KeyboardButton(text="📊 Мой профиль",
+                                     icon_custom_emoji_id=PE_PROFILE),
             ],
             [
-                types.KeyboardButton(text="🔍 Найти жалобу"),
-                types.KeyboardButton(text="🐞 Сообщить о баге"),
+                types.KeyboardButton(text="🔍 Найти жалобу",
+                                     icon_custom_emoji_id=PE_EYE),
+                types.KeyboardButton(text="🐞 Сообщить о баге",
+                                     icon_custom_emoji_id=PE_BOT),
             ],
         ]
     return types.ReplyKeyboardMarkup(
@@ -132,7 +165,8 @@ class LoginForm(StatesGroup):
 
 def _login_cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+        keyboard=[[types.KeyboardButton(
+            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS)]],
         resize_keyboard=True,
     )
 
@@ -152,9 +186,11 @@ async def _begin_login(message: types.Message, state: FSMContext,
     logger.info("Пользователь %s запустил вход по паролю.", describe_user(actor))
     await state.set_state(LoginForm.waiting_for_login)
     await message.answer(
-        "🔐 <b>Вход на форум по паролю</b>\n\n"
-        "Введите ваш логин или email от форума Black Russia.\n"
-        "Пароль и логин не сохраняются — используются только для получения куков.",
+        f"{te(PE_LOCK_CLOSED, '🔐')} <b>Вход на форум по паролю</b>\n\n"
+        f"{te(PE_WRITE, '✍️')} Введите ваш логин или email от форума "
+        "Black Russia.\n"
+        f"{te(PE_INFO, 'ℹ️')} Пароль и логин не сохраняются — используются "
+        "только для получения куков.",
         reply_markup=_login_cancel_kb(),
     )
 
@@ -192,8 +228,9 @@ async def login_step_login(message: types.Message, state: FSMContext):
     await state.update_data(login=(message.text or "").strip())
     await state.set_state(LoginForm.waiting_for_password)
     await message.answer(
-        "🔑 Теперь введите <b>пароль</b>.\n"
-        "<i>После ввода пароль будет удалён из чата для безопасности.</i>",
+        f"{te(PE_LOCK_CLOSED, '🔑')} Теперь введите <b>пароль</b>.\n"
+        f"{te(PE_EYE, '👁')} <i>После ввода пароль будет удалён из чата для "
+        "безопасности.</i>",
         reply_markup=_login_cancel_kb(),
     )
 
@@ -372,19 +409,25 @@ async def cmd_start(message: types.Message):
                          active["username"])
 
         welcome_text = (
-            "👋 Привет! Я бот для автоматической подачи жалоб на форум Black Russia.\n\n"
-            "🔐 <b>Самый простой способ начать</b> — нажмите <b>«Войти по паролю»</b> "
-            "или отправьте <code>/login</code>. Я залогинюсь, при необходимости "
-            "приму код 2FA с почты и сохраню сессию.\n\n"
-            "Альтернатива — пришлите готовый файл <code>cookies.json</code>.\n\n"
-            "После входа выполните <b>🔄 Синхронизировать форум</b>."
+            f"{te(PE_BOT, '👋')} <b>Привет!</b> Я бот для автоматической подачи "
+            "жалоб на форум Black Russia.\n\n"
+            f"{te(PE_LOCK_CLOSED, '🔐')} <b>Самый простой способ начать</b> — "
+            f"нажмите <b>«Войти по паролю»</b> или отправьте <code>/login</code>. "
+            "Я залогинюсь, при необходимости приму код 2FA с почты и сохраню "
+            "сессию.\n\n"
+            f"{te(PE_FILE, '📁')} Альтернатива — пришлите готовый файл "
+            "<code>cookies.json</code>.\n\n"
+            f"{te(PE_LOADING, '🔄')} После входа выполните "
+            "<b>🔄 Синхронизировать форум</b>."
         )
     else:
         welcome_text = (
-            "👋 Привет! Я бот для автоматической подачи жалоб на форум Black Russia.\n\n"
-            "Просто нажмите <b>📝 Подать жалобу</b> и заполните форму — "
-            "бот сам опубликует тему на форуме от имени общего аккаунта.\n\n"
-            "В <b>📜 Мои жалобы</b> можно посмотреть свою историю."
+            f"{te(PE_BOT, '👋')} <b>Привет!</b> Я бот для автоматической подачи "
+            "жалоб на форум Black Russia.\n\n"
+            f"{te(PE_PENCIL, '📝')} Нажмите <b>«Подать жалобу»</b> и заполните "
+            "форму — бот сам опубликует тему на форуме от имени общего аккаунта.\n\n"
+            f"{te(PE_ARROW_DOWN_LIST, '📜')} В <b>«Мои жалобы»</b> можно "
+            "посмотреть свою историю."
         )
     # Если есть незаконченный черновик — упомянем
     try:
@@ -392,13 +435,17 @@ async def cmd_start(message: types.Message):
         draft = await _get_draft(user_id)
         if draft:
             welcome_text += (
-                "\n\n📝 <i>У вас есть незаконченный черновик жалобы. "
-                "Откройте его командой /draft.</i>"
+                f"\n\n{te(PE_PENCIL, '📝')} <i>У вас есть незаконченный "
+                "черновик жалобы. Откройте его командой /draft.</i>"
             )
     except Exception:
         pass
 
-    sent = await message.answer(welcome_text, reply_markup=main_menu_keyboard(admin))
+    sent = await message.answer(
+        welcome_text,
+        reply_markup=main_menu_keyboard(admin),
+        message_effect_id=EFFECT_HEART,
+    )
     # Закрепляем главное меню чтобы юзер всегда видел его сверху чата
     try:
         await message.bot.pin_chat_message(
@@ -415,27 +462,36 @@ async def cmd_help(message: types.Message):
     admin = is_admin(message.from_user.id)
     if admin:
         help_text = (
-            "📖 <b>Справка по боту (админ):</b>\n\n"
-            "1. <b>🔐 Войти по паролю</b> или <code>/login</code> — бот сам залогинится "
-            "на форум (включая 2FA-код с почты) и сохранит свежие куки.\n"
-            "2. <b>👥 Аккаунты</b> или <code>/accounts</code> — список форумных аккаунтов, "
-            "переключение между ними, удаление.\n"
-            "3. Либо отправьте файл <code>cookies.json</code> в чат — обновит сессию вручную.\n"
-            "4. <b>🔄 Синхронизировать форум</b> или <code>/sync</code> — бот находит все "
-            "сервера и подразделы жалоб.\n"
-            "5. <b>📝 Подать жалобу</b> или <code>/new_complaint</code> — пошаговый сценарий публикации.\n"
-            "6. <b>🔍 Проверить статус форума</b> — проверка всех аккаунтов админа.\n"
-            "7. <b>📜 Мои жалобы</b> — история отправленных жалоб.\n"
-            "8. <b>🐞 Баг-репорты</b> или <code>/bugs</code> — поступившие сообщения от пользователей."
+            f"{te(PE_INFO, '📖')} <b>Справка по боту (админ):</b>\n\n"
+            f"{te(PE_LOCK_CLOSED, '🔐')} <b>Войти по паролю</b> или "
+            "<code>/login</code> — бот сам залогинится на форум "
+            "(включая 2FA-код с почты) и сохранит свежие куки.\n\n"
+            f"{te(PE_PEOPLE, '👥')} <b>Аккаунты</b> или <code>/accounts</code> "
+            "— список форумных аккаунтов, переключение между ними, удаление.\n\n"
+            f"{te(PE_FILE, '📁')} Либо отправьте файл <code>cookies.json</code> "
+            "в чат — обновит сессию вручную.\n\n"
+            f"{te(PE_LOADING, '🔄')} <b>Синхронизировать форум</b> или "
+            "<code>/sync</code> — бот находит все сервера и подразделы жалоб.\n\n"
+            f"{te(PE_PENCIL, '📝')} <b>Подать жалобу</b> или "
+            "<code>/new_complaint</code> — пошаговый сценарий публикации.\n\n"
+            f"{te(PE_EYE, '🔍')} <b>Проверить статус форума</b> — проверка всех "
+            "аккаунтов админа.\n\n"
+            f"{te(PE_ARROW_DOWN_LIST, '📜')} <b>Мои жалобы</b> — история "
+            "отправленных жалоб.\n\n"
+            f"{te(PE_BOT, '🐞')} <b>Баг-репорты</b> или <code>/bugs</code> — "
+            "поступившие сообщения от пользователей."
         )
     else:
         help_text = (
-            "📖 <b>Справка:</b>\n\n"
-            "• <b>📝 Подать жалобу</b> — пошагово заполните форму, бот опубликует тему "
-            "на форуме от имени общего аккаунта.\n"
-            "• <b>📜 Мои жалобы</b> — ваши прошлые жалобы со ссылками на темы.\n"
-            "• <b>📋 Мои шаблоны</b> — личные шаблоны для быстрой подачи.\n"
-            "• <b>🐞 Сообщить о баге</b> — если что-то не работает, напишите нам."
+            f"{te(PE_INFO, '📖')} <b>Справка:</b>\n\n"
+            f"{te(PE_PENCIL, '📝')} <b>Подать жалобу</b> — пошагово заполните "
+            "форму, бот опубликует тему на форуме от имени общего аккаунта.\n\n"
+            f"{te(PE_ARROW_DOWN_LIST, '📜')} <b>Мои жалобы</b> — ваши прошлые "
+            "жалобы со ссылками на темы.\n\n"
+            f"{te(PE_FILE, '📋')} <b>Мои шаблоны</b> — личные шаблоны для "
+            "быстрой подачи.\n\n"
+            f"{te(PE_BOT, '🐞')} <b>Сообщить о баге</b> — если что-то не "
+            "работает, напишите нам."
         )
     await message.answer(help_text)
 
@@ -629,12 +685,12 @@ async def sync_forum_structure(message: types.Message):
         tech_line = "\n⚠️ Техраздел: ошибка сканирования"
 
     summary = (
-        "🎉 <b>Синхронизация завершена!</b>\n\n"
-        f"📊 Всего серверов: {total}\n"
-        f"✅ Категории получены: {success_count}\n"
-        f"❌ Без категорий: {fail_count}\n"
+        f"{te(PE_PARTY, '🎉')} <b>Синхронизация завершена!</b>\n\n"
+        f"{te(PE_CHART_STATS, '📊')} Всего серверов: <b>{total}</b>\n"
+        f"{te(PE_CHECK, '✅')} Категории получены: <b>{success_count}</b>\n"
+        f"{te(PE_CROSS, '❌')} Без категорий: <b>{fail_count}</b>\n"
         f"{tech_line}\n"
-        f"⏱ Заняло: {elapsed:.1f} с"
+        f"{te(PE_CLOCK, '⏱')} Заняло: <b>{elapsed:.1f} с</b>"
     )
     if failed_servers:
         preview = ", ".join(failed_servers[:10])
@@ -716,10 +772,12 @@ async def handle_cookies_upload(message: types.Message, bot: Bot):
             )
             await status_msg.delete()
             await message.answer(
-                f"✅ Новые куки успешно установлены!\n"
-                f"👤 Авторизован как: <b>{escape(result)}</b>\n\n"
-                "Аккаунт сохранён в БД и помечен активным.\n"
-                "Теперь рекомендую запустить <b>🔄 Синхронизировать форум</b>.",
+                f"{te(PE_CHECK, '✅')} <b>Новые куки успешно установлены!</b>\n"
+                f"{te(PE_PROFILE, '👤')} Авторизован как: "
+                f"<b>{escape(result)}</b>\n\n"
+                f"{te(PE_BOX, '💾')} Аккаунт сохранён в БД и помечен активным.\n"
+                f"{te(PE_LOADING, '🔄')} Теперь рекомендую запустить "
+                "<b>«Синхронизировать форум»</b>.",
                 message_effect_id=EFFECT_LIKE,
             )
         else:
@@ -750,6 +808,7 @@ def _accounts_keyboard(accounts: list[dict]) -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(
                 text=f"{marker}{acc['username']}",
                 callback_data=f"acc_noop:{acc['id']}",
+                icon_custom_emoji_id=PE_PROFILE,
             )
         ])
         # Вторая строка: действия
@@ -758,16 +817,19 @@ def _accounts_keyboard(accounts: list[dict]) -> types.InlineKeyboardMarkup:
             actions.append(types.InlineKeyboardButton(
                 text="↪️ Сделать активным",
                 callback_data=f"acc_use:{acc['id']}",
+                icon_custom_emoji_id=PE_PERSON_CHECK,
             ))
         actions.append(types.InlineKeyboardButton(
             text="🗑 Удалить",
             callback_data=f"acc_del:{acc['id']}",
+            icon_custom_emoji_id=PE_TRASH,
         ))
         rows.append(actions)
 
     rows.append([types.InlineKeyboardButton(
         text="➕ Добавить аккаунт (вход)",
         callback_data="acc_add",
+        icon_custom_emoji_id=PE_LOCK_CLOSED,
     )])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -782,14 +844,15 @@ def _format_cooldown_secs(seconds: int) -> str:
 def _format_accounts_list(accounts: list[dict]) -> str:
     if not accounts:
         return (
-            "👥 <b>Аккаунты форума</b>\n\n"
+            f"{te(PE_PEOPLE, '👥')} <b>Аккаунты форума</b>\n\n"
             "У вас пока нет сохранённых аккаунтов.\n"
-            "Нажмите кнопку ниже или <b>🔐 Войти по паролю</b>, чтобы добавить."
+            f"Нажмите кнопку ниже или {te(PE_LOCK_CLOSED, '🔐')} <b>«Войти "
+            "по паролю»</b>, чтобы добавить."
         )
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
 
-    lines = ["👥 <b>Аккаунты форума</b>\n"]
+    lines = [f"{te(PE_PEOPLE, '👥')} <b>Аккаунты форума</b>\n"]
     for acc in accounts:
         marker = "✅ " if acc["is_active"] else "▫️ "
         login = f" <code>({escape(acc['login'])})</code>" if acc.get("login") else ""
@@ -988,10 +1051,11 @@ async def _offer_save_password(message: types.Message, state: FSMContext,
     await state.update_data(_save_password=None, _password_temp=None)
     await state.clear()
     await message.answer(
-        f"✅ <b>Вход выполнен!</b>\n"
-        f"👤 Аккаунт: <b>{escape(username)}</b>\n\n"
-        "Аккаунт сохранён и помечен активным.\n\n"
-        "Теперь рекомендую <b>🔄 Синхронизировать форум</b>.",
+        f"{te(PE_CHECK, '✅')} <b>Вход выполнен!</b>\n"
+        f"{te(PE_PROFILE, '👤')} Аккаунт: <b>{escape(username)}</b>\n\n"
+        f"{te(PE_BOX, '💾')} Аккаунт сохранён и помечен активным.\n\n"
+        f"{te(PE_LOADING, '🔄')} Теперь рекомендую <b>«Синхронизировать "
+        "форум»</b>.",
         reply_markup=_menu_for(message.from_user.id),
         message_effect_id=EFFECT_LIKE,
     )
@@ -1025,12 +1089,13 @@ async def global_cancel(message: types.Message, state: FSMContext):
         )
         await state.clear()
         await message.answer(
-            "❌ Действие отменено. Возвращаюсь в главное меню.",
+            f"{te(PE_CROSS, '❌')} Действие отменено. Возвращаюсь в главное "
+            "меню.",
             reply_markup=_menu_for(message.from_user.id),
         )
     else:
         await message.answer(
-            "Вы и так не находитесь ни в каком сценарии 🙂",
+            f"{te(PE_INFO, 'ℹ️')} Вы и так не находитесь ни в каком сценарии.",
             reply_markup=_menu_for(message.from_user.id),
         )
 
@@ -1042,25 +1107,27 @@ async def cmd_me(message: types.Message):
     user = message.from_user
 
     stats = await get_user_complaint_stats(user.id)
-    
+
     import asyncio
     from src.image_generator import generate_profile_card
     from aiogram.types import BufferedInputFile
-    
+
     user_info = {
         "name": user.full_name or "Без имени",
         "id": user.id,
         "role": "Администратор" if is_admin(user.id) else "Пользователь"
     }
-    
-    status_msg = await message.answer("⏳ Рисую карточку профиля...")
-    
+
+    status_msg = await message.answer(
+        f"{te(PE_LOADING, '⏳')} Рисую карточку профиля..."
+    )
+
     image_bytes = await asyncio.to_thread(generate_profile_card, user_info, stats)
     photo = BufferedInputFile(image_bytes, filename="profile.jpg")
 
     parts = []
     if stats["top_targets"]:
-        parts.append("<b>🏆 Ваш Топ нарушителей:</b>")
+        parts.append(f"<b>{te(PE_PARTY, '🏆')} Ваш Топ нарушителей:</b>")
         medals = ["🥇", "🥈", "🥉"]
         for i, t in enumerate(stats["top_targets"]):
             medal = medals[i] if i < len(medals) else "•"
@@ -1070,11 +1137,17 @@ async def cmd_me(message: types.Message):
             )
 
     parts.append(
-        "\n<i>💡 Используйте <code>/find Ник</code> для поиска жалоб по игроку.</i>"
+        f"\n<i>{te(PE_INFO, '💡')} Используйте <code>/find Ник</code> для "
+        "поиска жалоб по игроку.</i>"
     )
 
     await status_msg.delete()
-    await message.answer_photo(photo, caption="\n".join(parts), parse_mode="HTML")
+    await message.answer_photo(
+        photo,
+        caption="\n".join(parts),
+        parse_mode="HTML",
+        message_effect_id=EFFECT_HEART,
+    )
 
 
 # Inline-кнопка "Проверить подписку" из приглашения SubscriptionMiddleware.
