@@ -1502,12 +1502,31 @@ def _parse_subforums_from_html(html: str) -> list[tuple[str, int]]:
     return subs
 
 
-async def discover_technical_subsections() -> tuple[bool, list[tuple[str, int]] | str]:
-    """Сканирует страницу «Технического раздела» (node 22) и собирает список
-    его дочерних под-форумов (подразделов).
+# Подразделы техраздела, которые НЕ годятся для создания обращений
+# (справка/архив). Сравнение по подстроке в нижнем регистре.
+_TECH_EXCLUDE_KEYWORDS = (
+    "информация для игроков",
+    "окончательным ответом",
+    "заявки с окончательным",
+)
 
-    Возвращает (успех, [(имя, node_id), ...] в порядке с форума | текст_ошибки).
-    Каждый подраздел — отдельный форумный node, в котором создаётся тема.
+
+def _is_excluded_tech(name: str) -> bool:
+    low = (name or "").lower()
+    return any(kw in low for kw in _TECH_EXCLUDE_KEYWORDS)
+
+
+async def discover_technical_subsections() -> tuple[bool, list[tuple] | str]:
+    """Сканирует «Технический раздел» (node 22) и собирает конечные форумы,
+    в которых создаются темы, классифицируя их по типу и серверу.
+
+    Возвращает (успех, [(name, node_id, kind, server_key), ...] | текст_ошибки):
+    - kind='tech'  — «Технический раздел | <COLOR>» (обращение без цели);
+    - kind='staff' — дочерние форумы контейнера «Жалобы на технических
+      специалистов» вида «Сервер №N | <COLOR>» (жалоба, цель — ник спеца).
+
+    Исключаются справочные/архивные разделы (см. _TECH_EXCLUDE_KEYWORDS),
+    например «Информация для игроков» и «Заявки с окончательным ответом».
     """
     if not load_cookies():
         logger.warning("Дискавери техраздела прерван: куки не загружены.")
@@ -1524,13 +1543,53 @@ async def discover_technical_subsections() -> tuple[bool, list[tuple[str, int]] 
                 logger.error("HTTP %s при загрузке техраздела.", response.status_code)
                 return False, f"HTTP {response.status_code} при загрузке техраздела."
 
-            subs = _parse_subforums_from_html(response.text)
-            if not subs:
+            top = _parse_subforums_from_html(response.text)
+            if not top:
                 logger.warning("В техническом разделе не найдено подразделов.")
                 return False, "Подразделы технического раздела не найдены."
 
-            logger.info("Технический раздел: найдено подразделов %d.", len(subs))
-            return True, subs
+            result: list[tuple] = []
+            seen: set[int] = set()
+            for name, node_id in top:
+                low = name.lower()
+                if _is_excluded_tech(name):
+                    logger.info("Техраздел: пропускаю «%s».", name)
+                    continue
+
+                # Контейнер «Жалобы на технических специалистов» — спускаемся
+                # внутрь, его дети «Сервер №N | COLOR» = жалобы (kind=staff).
+                if "жалоб" in low and "специалист" in low:
+                    child_url = f"{FORUM_URL}/forums/{node_id}/"
+                    try:
+                        r = await client.get(child_url)
+                        r = await _ensure_no_ddos(client, r, child_url)
+                        children = (_parse_subforums_from_html(r.text)
+                                    if r.status_code == 200 else [])
+                    except httpx.RequestError as e:
+                        logger.warning("Техраздел: не открыл %s: %s", child_url, e)
+                        children = []
+                    for cname, cnid in children:
+                        if _is_excluded_tech(cname) or cnid in seen:
+                            continue
+                        seen.add(cnid)
+                        skey = cname.split("|")[-1].strip() if "|" in cname else None
+                        result.append((cname, cnid, "staff", skey))
+                    continue
+
+                # «Технический раздел | COLOR» — пер-серверный форум обращений.
+                if "|" in name and node_id not in seen:
+                    seen.add(node_id)
+                    skey = name.split("|")[-1].strip()
+                    result.append((name, node_id, "tech", skey))
+
+            if not result:
+                logger.warning("Техраздел: после фильтрации не осталось подразделов.")
+                return False, "Подходящих подразделов не найдено."
+
+            tech_n = sum(1 for r in result if r[2] == "tech")
+            staff_n = sum(1 for r in result if r[2] == "staff")
+            logger.info("Технический раздел: tech=%d, staff=%d.", tech_n, staff_n)
+            return True, result
         except httpx.RequestError as e:
             logger.error("Сетевая ошибка при сканировании техраздела: %s", e)
             return False, f"Ошибка сети: {e}"

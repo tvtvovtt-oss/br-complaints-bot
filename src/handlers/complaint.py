@@ -30,7 +30,8 @@ from src.database import (
     delete_complaint,
     get_servers,
     get_complaint_categories,
-    get_technical_subsections,
+    get_technical_servers,
+    get_technical_node,
     get_active_account,
     get_account,
     update_account_cookies,
@@ -126,7 +127,8 @@ async def _pick_account_for_complaint(telegram_id: int) -> tuple[dict | None, st
 class ComplaintForm(StatesGroup):
     choosing_server = State()
     choosing_category = State()
-    choosing_tech_subsection = State()
+    choosing_tech_server = State()
+    choosing_tech_kind = State()
     choosing_template = State()
     waiting_for_your_nickname = State()
     waiting_for_target_nickname = State()
@@ -199,15 +201,51 @@ def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _tech_subsections_keyboard(subs: list[tuple[str, int]]) -> types.InlineKeyboardMarkup:
-    """Inline-клавиатура с подразделами технического раздела (по одному в ряд —
-    названия могут быть длинными)."""
+def _tech_servers_keyboard(servers: list[str], page: int) -> types.InlineKeyboardMarkup:
+    """Пагинированная клавиатура серверов технического раздела."""
+    total_pages = max(1, ceil(len(servers) / SERVERS_PER_PAGE))
+    page = max(0, min(page, total_pages - 1))
+    start = page * SERVERS_PER_PAGE
+    chunk = servers[start:start + SERVERS_PER_PAGE]
+
     rows: list[list[types.InlineKeyboardButton]] = []
-    for name, node_id in subs:
-        rows.append([types.InlineKeyboardButton(
-            text=name, callback_data=f"tech_pick:{node_id}")])
+    for i in range(0, len(chunk), 2):
+        row = [
+            types.InlineKeyboardButton(text=key, callback_data=f"tech_srv:{key}")
+            for key in chunk[i:i + 2]
+        ]
+        rows.append(row)
+
+    nav: list[types.InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(types.InlineKeyboardButton(
+            text="◀️", callback_data=f"tech_srvpage:{page - 1}"))
+    nav.append(types.InlineKeyboardButton(
+        text=f"{page + 1}/{total_pages}", callback_data="srv_noop"))
+    if page < total_pages - 1:
+        nav.append(types.InlineKeyboardButton(
+            text="▶️", callback_data=f"tech_srvpage:{page + 1}"))
+    rows.append(nav)
     rows.append([types.InlineKeyboardButton(
         text="◀️ К серверам", callback_data="srv_back")])
+    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _tech_kind_keyboard(server_key: str, has_tech: bool,
+                        has_staff: bool) -> types.InlineKeyboardMarkup:
+    """Клавиатура выбора типа обращения для выбранного сервера техраздела."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if has_tech:
+        rows.append([types.InlineKeyboardButton(
+            text="🛠 Технический вопрос",
+            callback_data=f"tech_kind:tech:{server_key}")])
+    if has_staff:
+        rows.append([types.InlineKeyboardButton(
+            text="👨‍🔧 Жалоба на тех. специалиста",
+            callback_data=f"tech_kind:staff:{server_key}")])
+    rows.append([types.InlineKeyboardButton(
+        text="◀️ К выбору сервера", callback_data="tech_open")])
     rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -356,33 +394,48 @@ async def srv_back(call: types.CallbackQuery, state: FSMContext):
 
 # ---------------- Технический раздел ----------------
 
-@router.callback_query(ComplaintForm.choosing_server, F.data == "tech_open")
+@router.callback_query(F.data == "tech_open")
 async def tech_open(call: types.CallbackQuery, state: FSMContext):
+    """Открывает выбор сервера технического раздела."""
     if not check_access(call.from_user.id):
         await call.answer()
         return
-    subs = await get_technical_subsections()
-    if not subs:
+    servers = await get_technical_servers()
+    if not servers:
         logger.warning("Техраздел открыт, но подразделы не загружены — нужна /sync.")
         await call.answer(
-            "Подразделы технического раздела не загружены. "
-            "Админу нужно выполнить /sync.",
+            "Технический раздел не загружен. Админу нужно выполнить /sync.",
             show_alert=True,
         )
         return
-    await state.update_data(tech_subs=subs)
-    await state.set_state(ComplaintForm.choosing_tech_subsection)
-    logger.info("Пользователь %s открыл технический раздел (%d подразделов).",
-                describe_user(call.from_user), len(subs))
+    await state.update_data(tech_servers=servers)
+    await state.set_state(ComplaintForm.choosing_tech_server)
+    logger.info("Пользователь %s открыл технический раздел (%d серверов).",
+                describe_user(call.from_user), len(servers))
     await call.message.edit_text(
-        "🛠 <b>Технический раздел</b> — выберите подраздел:",
-        reply_markup=_tech_subsections_keyboard(subs),
+        "🛠 <b>Технический раздел — выберите сервер:</b>",
+        reply_markup=_tech_servers_keyboard(servers, page=0),
     )
     await call.answer()
 
 
-@router.callback_query(ComplaintForm.choosing_tech_subsection, F.data == "srv_back")
-async def tech_back(call: types.CallbackQuery, state: FSMContext):
+@router.callback_query(ComplaintForm.choosing_tech_server,
+                       F.data.startswith("tech_srvpage:"))
+async def tech_srv_page(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    page = int(call.data.split(":", 1)[1])
+    data = await state.get_data()
+    servers = data.get("tech_servers", [])
+    await call.message.edit_reply_markup(
+        reply_markup=_tech_servers_keyboard(servers, page=page))
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_tech_server, F.data == "srv_back")
+async def tech_to_servers(call: types.CallbackQuery, state: FSMContext):
+    """Возврат от техраздела к обычному списку игровых серверов."""
     if not check_access(call.from_user.id):
         await call.answer()
         return
@@ -396,49 +449,73 @@ async def tech_back(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.callback_query(ComplaintForm.choosing_tech_subsection,
-                       F.data.startswith("tech_pick:"))
-async def tech_pick(call: types.CallbackQuery, state: FSMContext):
+@router.callback_query(ComplaintForm.choosing_tech_server,
+                       F.data.startswith("tech_srv:"))
+async def tech_srv_pick(call: types.CallbackQuery, state: FSMContext):
+    """Выбран сервер техраздела — показываем доступные типы обращений."""
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    server_key = call.data.split(":", 1)[1]
+    has_tech = await get_technical_node(server_key, "tech") is not None
+    has_staff = await get_technical_node(server_key, "staff") is not None
+    if not (has_tech or has_staff):
+        await call.answer("Для этого сервера нет техразделов.", show_alert=True)
+        return
+    await state.update_data(tech_server_key=server_key)
+    await state.set_state(ComplaintForm.choosing_tech_kind)
+    await call.message.edit_text(
+        f"🛠 Технический раздел → <b>{escape(server_key)}</b>\n\n"
+        "Выберите тип обращения:",
+        reply_markup=_tech_kind_keyboard(server_key, has_tech, has_staff),
+    )
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_tech_kind,
+                       F.data.startswith("tech_kind:"))
+async def tech_kind_pick(call: types.CallbackQuery, state: FSMContext):
+    """Выбран тип (tech/staff) — фиксируем форумный node и запускаем форму."""
     if not check_access(call.from_user.id):
         await call.answer()
         return
     try:
-        node_id = int(call.data.split(":", 1)[1])
-    except (ValueError, AttributeError, IndexError):
-        logger.warning("tech_pick: некорректный callback data %r", call.data)
+        _, kind, server_key = call.data.split(":", 2)
+    except ValueError:
         await call.answer("Ошибка данных кнопки.", show_alert=True)
         return
 
-    data = await state.get_data()
-    subs = data.get("tech_subs", [])
-    name = next((n for n, nid in subs if nid == node_id), None)
-    if name is None:
-        logger.warning("tech_pick: node_id=%s не найден в tech_subs.", node_id)
+    node = await get_technical_node(server_key, kind)
+    if not node:
         await call.answer("Подраздел не найден, начните заново.", show_alert=True)
         return
 
+    # tech — обращение без цели; staff — жалоба на тех. специалиста (с целью)
+    category_key = "technical" if kind == "tech" else "tech_staff"
+    label = ("🛠 Технический вопрос" if kind == "tech"
+             else "👨‍🔧 Жалоба на тех. специалиста")
+
     await state.update_data(
-        section_id=node_id,
+        section_id=node["node_id"],
         server_node_id=TECHNICAL_SECTION_NODE_ID,
-        server_name="Технический раздел",
-        category_key="technical",
-        category_label=name,
-        # технический раздел не использует шаблоны и цель
+        server_name=f"{server_key} (техраздел)",
+        category_key=category_key,
+        category_label=label,
         template_summary=None,
         template_description=None,
     )
     await state.set_state(ComplaintForm.waiting_for_your_nickname)
-    logger.info("Пользователь %s выбрал подраздел техраздела «%s» (node=%s).",
-                describe_user(call.from_user), name, node_id)
+    logger.info("Пользователь %s выбрал техраздел: сервер «%s», тип «%s» (node=%s).",
+                describe_user(call.from_user), server_key, kind, node["node_id"])
 
     await call.message.edit_text(
-        f"🛠 Технический раздел → <b>{escape(name)}</b>",
+        f"🛠 Технический раздел → <b>{escape(server_key)}</b> → {escape(label)}",
     )
-    rules_text = RULES.get("technical")
+    rules_text = RULES.get(category_key)
     if rules_text:
         await call.message.answer(rules_text)
     await call.message.answer(
-        "👤 <b>Шаг 2: Введите Ваш Nick_Name</b> на сервере:",
+        "👤 <b>Шаг: Введите Ваш Nick_Name</b> на сервере:",
         reply_markup=_cancel_kb(),
     )
     await call.answer()

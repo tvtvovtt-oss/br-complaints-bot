@@ -106,16 +106,35 @@ async def init_db():
                     raise
 
         # Кэш подразделов технического раздела (node 22). Глобальный список,
-        # не привязан к игровому серверу. node_id — форумный узел подраздела,
-        # в котором создаётся тема обращения.
+        # не привязан к таблице servers. Каждая запись — конечный форум, где
+        # создаётся тема. kind: 'tech' (технический вопрос, без цели) или
+        # 'staff' (жалоба на тех. специалиста, есть цель). server_key — цвет
+        # сервера (RED/GREEN/...) для группировки по серверам.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS technical_subsections (
                 node_id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'tech',
+                server_key TEXT,
                 position INTEGER NOT NULL DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Миграции для старой версии таблицы (была без kind/server_key)
+        for col, ddl in [
+            ("kind", "ALTER TABLE technical_subsections ADD COLUMN kind TEXT "
+                     "NOT NULL DEFAULT 'tech'"),
+            ("server_key", "ALTER TABLE technical_subsections ADD COLUMN "
+                           "server_key TEXT"),
+        ]:
+            if not await _column_exists("technical_subsections", col):
+                logger.info("Миграция: добавляю колонку '%s' в "
+                            "technical_subsections.", col)
+                try:
+                    await db.execute(ddl)
+                except aiosqlite.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
 
         # Кэш подразделов жалоб для каждого сервера
         # category_key — короткий ключ (players / admins / leaders / appeals)
@@ -580,16 +599,21 @@ async def get_servers() -> list[tuple[str, int]]:
 
 # ---------- Подразделы технического раздела ----------
 
-async def save_technical_subsections(subsections: list[tuple[str, int]]):
-    """Перезапись кэша подразделов техраздела. Принимает [(name, node_id), ...]
-    в порядке с форума."""
+async def save_technical_subsections(
+    subsections: list[tuple[str, int, str, str | None]],
+):
+    """Перезапись кэша подразделов техраздела.
+    Принимает [(name, node_id, kind, server_key), ...] в порядке с форума.
+    kind: 'tech' | 'staff'."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM technical_subsections")
         await db.executemany(
-            "INSERT INTO technical_subsections (name, node_id, position) "
-            "VALUES (?, ?, ?)",
-            [(name, node_id, idx)
-             for idx, (name, node_id) in enumerate(subsections)],
+            "INSERT INTO technical_subsections "
+            "(name, node_id, kind, server_key, position) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(name, node_id, kind, server_key, idx)
+             for idx, (name, node_id, kind, server_key)
+             in enumerate(subsections)],
         )
         await db.commit()
     logger.info("Кэш подразделов техраздела обновлён: %d записей.",
@@ -597,16 +621,50 @@ async def save_technical_subsections(subsections: list[tuple[str, int]]):
     await _trigger_backup()
 
 
-async def get_technical_subsections() -> list[tuple[str, int]]:
-    """Возвращает список [(name, node_id), ...] подразделов техраздела
-    в порядке с форума."""
+async def get_technical_subsections() -> list[dict]:
+    """Возвращает [{name, node_id, kind, server_key}, ...] в порядке с форума."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT name, node_id FROM technical_subsections "
-            "ORDER BY position, name"
+            "SELECT name, node_id, kind, server_key "
+            "FROM technical_subsections ORDER BY position, name"
         ) as cursor:
             rows = await cursor.fetchall()
-            return [(row[0], row[1]) for row in rows]
+            return [
+                {"name": r[0], "node_id": r[1],
+                 "kind": r[2] or "tech", "server_key": r[3]}
+                for r in rows
+            ]
+
+
+async def get_technical_servers() -> list[str]:
+    """Список server_key (цветов серверов), для которых есть хотя бы один
+    технический подраздел, в порядке появления на форуме."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT server_key, MIN(position) AS pos "
+            "FROM technical_subsections "
+            "WHERE server_key IS NOT NULL AND server_key != '' "
+            "GROUP BY server_key ORDER BY pos"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+
+async def get_technical_node(server_key: str, kind: str) -> dict | None:
+    """Находит конкретный форумный node по серверу и типу обращения.
+    Возвращает {name, node_id, kind, server_key} или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT name, node_id, kind, server_key "
+            "FROM technical_subsections "
+            "WHERE server_key = ? AND kind = ? LIMIT 1",
+            (server_key, kind),
+        ) as cursor:
+            r = await cursor.fetchone()
+            if not r:
+                return None
+            return {"name": r[0], "node_id": r[1],
+                    "kind": r[2] or "tech", "server_key": r[3]}
 
 
 # ---------- Категории жалоб ----------
