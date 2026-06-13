@@ -11,13 +11,16 @@ from src.config import COMPLAINT_CATEGORY_LABELS
 from src.forum.xenforo import (
     post_complaint, delete_thread, edit_thread_post,
     is_auth_error, is_noperm_error,
+    TECHNICAL_SECTION_NODE_ID,
 )
 from src.forum.templates import (
     RULES,
     NEEDS_DATE,
+    NO_TARGET,
     TARGET_LABEL,
     build_body,
     build_title,
+    make_title,
     get_builtin_templates,
 )
 from src.database import (
@@ -27,6 +30,7 @@ from src.database import (
     delete_complaint,
     get_servers,
     get_complaint_categories,
+    get_technical_subsections,
     get_active_account,
     get_account,
     update_account_cookies,
@@ -122,6 +126,7 @@ async def _pick_account_for_complaint(telegram_id: int) -> tuple[dict | None, st
 class ComplaintForm(StatesGroup):
     choosing_server = State()
     choosing_category = State()
+    choosing_tech_subsection = State()
     choosing_template = State()
     waiting_for_your_nickname = State()
     waiting_for_target_nickname = State()
@@ -186,8 +191,24 @@ def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
     if page < total_pages - 1:
         nav.append(types.InlineKeyboardButton(text="▶️", callback_data=f"srv_page:{page + 1}"))
     rows.append(nav)
+    # Технический раздел — отдельный глобальный раздел (не игровой сервер)
+    rows.append([types.InlineKeyboardButton(
+        text="🛠 Технический раздел", callback_data="tech_open")])
     rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
 
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _tech_subsections_keyboard(subs: list[tuple[str, int]]) -> types.InlineKeyboardMarkup:
+    """Inline-клавиатура с подразделами технического раздела (по одному в ряд —
+    названия могут быть длинными)."""
+    rows: list[list[types.InlineKeyboardButton]] = []
+    for name, node_id in subs:
+        rows.append([types.InlineKeyboardButton(
+            text=name, callback_data=f"tech_pick:{node_id}")])
+    rows.append([types.InlineKeyboardButton(
+        text="◀️ К серверам", callback_data="srv_back")])
+    rows.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cmpl_cancel")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -329,6 +350,96 @@ async def srv_back(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text(
         "📥 <b>Шаг 1: Выберите сервер</b>",
         reply_markup=_servers_keyboard(servers_list, page=0),
+    )
+    await call.answer()
+
+
+# ---------------- Технический раздел ----------------
+
+@router.callback_query(ComplaintForm.choosing_server, F.data == "tech_open")
+async def tech_open(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    subs = await get_technical_subsections()
+    if not subs:
+        logger.warning("Техраздел открыт, но подразделы не загружены — нужна /sync.")
+        await call.answer(
+            "Подразделы технического раздела не загружены. "
+            "Админу нужно выполнить /sync.",
+            show_alert=True,
+        )
+        return
+    await state.update_data(tech_subs=subs)
+    await state.set_state(ComplaintForm.choosing_tech_subsection)
+    logger.info("Пользователь %s открыл технический раздел (%d подразделов).",
+                describe_user(call.from_user), len(subs))
+    await call.message.edit_text(
+        "🛠 <b>Технический раздел</b> — выберите подраздел:",
+        reply_markup=_tech_subsections_keyboard(subs),
+    )
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_tech_subsection, F.data == "srv_back")
+async def tech_back(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    data = await state.get_data()
+    servers_list = data.get("servers_list", [])
+    await state.set_state(ComplaintForm.choosing_server)
+    await call.message.edit_text(
+        "📥 <b>Шаг 1: Выберите сервер</b>",
+        reply_markup=_servers_keyboard(servers_list, page=0),
+    )
+    await call.answer()
+
+
+@router.callback_query(ComplaintForm.choosing_tech_subsection,
+                       F.data.startswith("tech_pick:"))
+async def tech_pick(call: types.CallbackQuery, state: FSMContext):
+    if not check_access(call.from_user.id):
+        await call.answer()
+        return
+    try:
+        node_id = int(call.data.split(":", 1)[1])
+    except (ValueError, AttributeError, IndexError):
+        logger.warning("tech_pick: некорректный callback data %r", call.data)
+        await call.answer("Ошибка данных кнопки.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    subs = data.get("tech_subs", [])
+    name = next((n for n, nid in subs if nid == node_id), None)
+    if name is None:
+        logger.warning("tech_pick: node_id=%s не найден в tech_subs.", node_id)
+        await call.answer("Подраздел не найден, начните заново.", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=node_id,
+        server_node_id=TECHNICAL_SECTION_NODE_ID,
+        server_name="Технический раздел",
+        category_key="technical",
+        category_label=name,
+        # технический раздел не использует шаблоны и цель
+        template_summary=None,
+        template_description=None,
+    )
+    await state.set_state(ComplaintForm.waiting_for_your_nickname)
+    logger.info("Пользователь %s выбрал подраздел техраздела «%s» (node=%s).",
+                describe_user(call.from_user), name, node_id)
+
+    await call.message.edit_text(
+        f"🛠 Технический раздел → <b>{escape(name)}</b>",
+    )
+    rules_text = RULES.get("technical")
+    if rules_text:
+        await call.message.answer(rules_text)
+    await call.message.answer(
+        "👤 <b>Шаг 2: Введите Ваш Nick_Name</b> на сервере:",
+        reply_markup=_cancel_kb(),
     )
     await call.answer()
 
@@ -618,11 +729,25 @@ async def process_your_nickname(message: types.Message, state: FSMContext):
         return
 
     await state.update_data(your_nickname=value)
-    await state.set_state(ComplaintForm.waiting_for_target_nickname)
     logger.debug("Шаг: получен свой ник «%s» от %s.", value, describe_user(message.from_user))
 
     data = await state.get_data()
-    target = TARGET_LABEL.get(data["category_key"], "нарушителя")
+    key = data["category_key"]
+
+    # Категории без цели (технический раздел) — пропускаем ввод ника цели
+    # и идём сразу к сути обращения. В поле «цель» кладём название подраздела,
+    # чтобы история/очередь/уведомления отображались осмысленно.
+    if key in NO_TARGET:
+        await state.update_data(
+            target_nickname=data.get("category_label") or "Техраздел",
+        )
+        await state.set_state(ComplaintForm.waiting_for_summary)
+        await _autosave_draft(state, message.from_user.id)
+        await _ask_summary(message, key, state)
+        return
+
+    await state.set_state(ComplaintForm.waiting_for_target_nickname)
+    target = TARGET_LABEL.get(key, "нарушителя")
     await message.answer(
         f"👤 <b>Шаг 4: Введите Nick_Name {escape(target)}</b>:",
         reply_markup=_cancel_kb(),
@@ -688,6 +813,11 @@ async def _ask_summary(message: types.Message, key: str, state: FSMContext):
         prompt = (
             "🏷 <b>Шаг: Краткая суть жалобы</b> (для заголовка темы)\n"
             "Например: <code>Электронные заявления не проверяются</code>"
+        )
+    elif key == "technical":
+        prompt = (
+            "🏷 <b>Суть обращения</b> (короткая фраза для заголовка темы)\n"
+            "Например: <code>Не приходит SMS-код</code>"
         )
     else:
         prompt = (
@@ -1077,8 +1207,12 @@ async def process_proof(message: types.Message, state: FSMContext):
     logger.debug("Шаг: получены доказательства (%d симв.). Готовлю превью.", len(value))
 
     # Защита от восстановленного черновика, в котором ключи могут отсутствовать
-    required = ("category_key", "your_nickname", "target_nickname",
-                "description", "summary", "section_id")
+    category_key = data.get("category_key")
+    required = ["category_key", "your_nickname", "description", "summary",
+                "section_id"]
+    # Цель обязательна только для категорий с целью (не для техраздела)
+    if category_key not in NO_TARGET:
+        required.append("target_nickname")
     missing = [k for k in required if k not in data or not data.get(k)]
     if missing:
         logger.warning("FSM-данные неполные для %s, не хватает: %s",
@@ -1094,12 +1228,17 @@ async def process_proof(message: types.Message, state: FSMContext):
     bb_code = build_body(
         category_key=data["category_key"],
         your_nickname=data["your_nickname"],
-        target_nickname=data["target_nickname"],
+        target_nickname=data.get("target_nickname", ""),
         description=data["description"],
         proof_link=value,
         punishment_date=data.get("punishment_date"),
     )
-    thread_title = build_title(data["target_nickname"], data["summary"])
+    thread_title = make_title(
+        data["category_key"],
+        data["your_nickname"],
+        data.get("target_nickname", ""),
+        data["summary"],
+    )
 
     await state.update_data(bb_code=bb_code, title=thread_title)
     await state.set_state(ComplaintForm.waiting_for_confirm)

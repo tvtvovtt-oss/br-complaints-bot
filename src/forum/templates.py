@@ -13,6 +13,8 @@ TARGET_LABEL = {
     "admins":  "администратора",
     "leaders": "лидера",
     "appeals": "администратора",
+    # technical — цель не нужна, обращение «о себе/проблеме»
+    "technical": "—",
 }
 
 
@@ -22,11 +24,16 @@ SUMMARY_LABEL = {
     "admins":  "Суть жалобы",
     "leaders": "Суть жалобы (описать максимально подробно и раскрыто)",
     "appeals": "Суть заявки",
+    "technical": "Суть обращения",
 }
 
 
 # Какие категории требуют поле "Дата выдачи/получения наказания"
 NEEDS_DATE = {"admins", "appeals"}
+
+# Категории без «цели» (нет ника нарушителя). Для них сценарий пропускает
+# шаг ввода ника цели и заголовок строится от ника автора обращения.
+NO_TARGET = {"technical"}
 
 
 # Краткие правила подачи (показываем пользователю перед началом заполнения).
@@ -74,7 +81,24 @@ RULES = {
         "целенаправленный багоюз, использование чит-ПО, распространение "
         "конфиденциальной информации, обман администрации."
     ),
+    "technical": (
+        "📌 <b>Правила обращения в технический раздел:</b>\n"
+        "• Заголовок: <code>Nick_Name | Суть обращения</code> "
+        "(пример: <code>Bruce_Banner | Не приходит SMS-код</code>).\n"
+        "• Опишите проблему максимально подробно: что делали, что ожидали, "
+        "что получили.\n"
+        "• Приложите скриншоты/видео ошибки, если они есть.\n"
+        "• Один вопрос — одна тема. Нельзя: мат, флуд, оффтоп."
+    ),
 }
+
+
+def make_title(category_key: str, your_nickname: str,
+               target_nickname: str | None, summary: str) -> str:
+    """Заголовок темы. Для категорий с целью — 'Ник_цели | Суть',
+    для категорий без цели (technical) — 'Ваш_ник | Суть'."""
+    subject = your_nickname if category_key in NO_TARGET else (target_nickname or "")
+    return TITLE_TEMPLATE.format(target=subject, summary=summary)
 
 
 def build_body(category_key: str, your_nickname: str, target_nickname: str,
@@ -95,6 +119,16 @@ def build_body(category_key: str, your_nickname: str, target_nickname: str,
         f"1. Ваш Nick_Name: "
         f"[COLOR=rgb(255, 255, 255)]{your_nickname}[/COLOR]"
     )
+
+    # Технический раздел: цели нет, дата не нужна. Структура — обращение
+    # от своего имени с сутью, описанием и доказательствами.
+    if category_key in NO_TARGET:
+        return (
+            f"{line_you}\n"
+            f"2. {summary_label}: {description}\n"
+            f"3. Доказательства/вложения: {proof_link}"
+        )
+
     line_target = (
         f"2. Nick_Name {target_label}: "
         f"[COLOR=rgb(235, 10, 10)]{target_nickname}[/COLOR]"

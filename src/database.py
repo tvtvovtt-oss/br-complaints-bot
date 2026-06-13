@@ -105,6 +105,18 @@ async def init_db():
                 if "duplicate column" not in str(e).lower():
                     raise
 
+        # Кэш подразделов технического раздела (node 22). Глобальный список,
+        # не привязан к игровому серверу. node_id — форумный узел подраздела,
+        # в котором создаётся тема обращения.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS technical_subsections (
+                node_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Кэш подразделов жалоб для каждого сервера
         # category_key — короткий ключ (players / admins / leaders / appeals)
         # category_name — оригинальное название с форума
@@ -561,6 +573,37 @@ async def get_servers() -> list[tuple[str, int]]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT name, node_id FROM servers ORDER BY position, name"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [(row[0], row[1]) for row in rows]
+
+
+# ---------- Подразделы технического раздела ----------
+
+async def save_technical_subsections(subsections: list[tuple[str, int]]):
+    """Перезапись кэша подразделов техраздела. Принимает [(name, node_id), ...]
+    в порядке с форума."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM technical_subsections")
+        await db.executemany(
+            "INSERT INTO technical_subsections (name, node_id, position) "
+            "VALUES (?, ?, ?)",
+            [(name, node_id, idx)
+             for idx, (name, node_id) in enumerate(subsections)],
+        )
+        await db.commit()
+    logger.info("Кэш подразделов техраздела обновлён: %d записей.",
+                len(subsections))
+    await _trigger_backup()
+
+
+async def get_technical_subsections() -> list[tuple[str, int]]:
+    """Возвращает список [(name, node_id), ...] подразделов техраздела
+    в порядке с форума."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT name, node_id FROM technical_subsections "
+            "ORDER BY position, name"
         ) as cursor:
             rows = await cursor.fetchall()
             return [(row[0], row[1]) for row in rows]

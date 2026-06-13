@@ -77,4 +77,5 @@ COMPLAINT_CATEGORY_LABELS: dict[str, str] = {
     "admins":  "🛡 Жалоба на администрацию",
     "leaders": "👑 Жалоба на лидера",
     "appeals": "⚖️ Обжалование наказания",
+    "technical": "🛠 Технический раздел",
 }

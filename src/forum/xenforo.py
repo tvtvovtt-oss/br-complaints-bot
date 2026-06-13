@@ -22,6 +22,12 @@ FORUM_HOST = httpx.URL(FORUM_URL).host
 # /forums/some-name.123/  или  /forums/123/  или  /categories/some-name.123/
 NODE_ID_RE = re.compile(r"(?:forums|categories)/(?:[^/]+\.)?(\d+)/?")
 
+# node_id «Технического раздела» на форуме Black Russia. Это глобальный
+# раздел (не привязан к игровому серверу) с дочерними под-форумами —
+# «подразделами». Их список бот получает динамически через
+# discover_technical_subsections().
+TECHNICAL_SECTION_NODE_ID = 22
+
 # Ключевые слова для распознавания категорий жалоб (lowercase)
 COMPLAINT_CATEGORY_KEYWORDS = {
     "players": ("жалобы на игроков", "жалоба на игрока"),
@@ -1474,6 +1480,63 @@ def _parse_servers_from_html(html: str) -> list[tuple[str, int]]:
             seen.add(node_id)
             servers.append((name, node_id))
     return servers
+
+
+def _parse_subforums_from_html(html: str) -> list[tuple[str, int]]:
+    """Извлекает дочерние под-форумы (подразделы) со страницы раздела.
+    Возвращает [(имя, node_id), ...] в порядке с форума, без дублей."""
+    soup = _soup(html)
+    subs: list[tuple[str, int]] = []
+    seen: set[int] = set()
+    for title_tag in soup.find_all(["h3", "h4"], class_="node-title"):
+        a_tag = title_tag.find("a", href=True)
+        if not a_tag:
+            continue
+        name = a_tag.text.strip()
+        if not name:
+            continue
+        node_id = _extract_node_id(a_tag["href"])
+        if node_id and node_id not in seen:
+            seen.add(node_id)
+            subs.append((name, node_id))
+    return subs
+
+
+async def discover_technical_subsections() -> tuple[bool, list[tuple[str, int]] | str]:
+    """Сканирует страницу «Технического раздела» (node 22) и собирает список
+    его дочерних под-форумов (подразделов).
+
+    Возвращает (успех, [(имя, node_id), ...] в порядке с форума | текст_ошибки).
+    Каждый подраздел — отдельный форумный node, в котором создаётся тема.
+    """
+    if not load_cookies():
+        logger.warning("Дискавери техраздела прерван: куки не загружены.")
+        return False, "Куки не загружены."
+
+    url = f"{FORUM_URL}/forums/{TECHNICAL_SECTION_NODE_ID}/"
+    logger.info("Сканирую технический раздел: %s", url)
+    async with _session() as client:
+        try:
+            response = await client.get(url)
+            response = await _ensure_no_ddos(client, response, url,
+                                              persist_cookie=True)
+            if response.status_code != 200:
+                logger.error("HTTP %s при загрузке техраздела.", response.status_code)
+                return False, f"HTTP {response.status_code} при загрузке техраздела."
+
+            subs = _parse_subforums_from_html(response.text)
+            if not subs:
+                logger.warning("В техническом разделе не найдено подразделов.")
+                return False, "Подразделы технического раздела не найдены."
+
+            logger.info("Технический раздел: найдено подразделов %d.", len(subs))
+            return True, subs
+        except httpx.RequestError as e:
+            logger.error("Сетевая ошибка при сканировании техраздела: %s", e)
+            return False, f"Ошибка сети: {e}"
+        except Exception as e:
+            logger.exception("Ошибка при сканировании техраздела")
+            return False, f"Ошибка: {e}"
 
 
 def _parse_categories_from_soup(soup: BeautifulSoup) -> dict[str, tuple[str, int]]:

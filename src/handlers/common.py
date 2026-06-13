@@ -13,6 +13,7 @@ from src.forum.xenforo import (
     check_auth_for_cookies,
     discover_servers,
     discover_all_complaint_categories,
+    discover_technical_subsections,
     invalidate_cookies_cache,
     forum_login,
     forum_submit_2fa,
@@ -21,6 +22,7 @@ from src.forum.xenforo import (
 from src.database import (
     save_servers,
     save_complaint_categories,
+    save_technical_subsections,
     upsert_account,
     list_accounts,
     set_active_account,
@@ -605,11 +607,33 @@ async def sync_forum_structure(message: types.Message):
     if failed_servers:
         logger.warning("Серверы без категорий жалоб: %s", ", ".join(failed_servers))
 
+    # Технический раздел (node 22) — глобальные подразделы, не привязаны
+    # к серверам. Сканируем отдельно и не валим всю синхронизацию, если он
+    # вдруг недоступен.
+    tech_line = ""
+    try:
+        await status.edit_text(
+            f"⏳ Синхронизация завершена по серверам.\n"
+            "Сканирую подразделы технического раздела..."
+        )
+        ok_tech, subs = await discover_technical_subsections()
+        if ok_tech and isinstance(subs, list):
+            await save_technical_subsections(subs)
+            tech_line = f"\n🛠 Подразделов техраздела: {len(subs)}"
+            logger.info("Технический раздел: сохранено подразделов %d.", len(subs))
+        else:
+            tech_line = f"\n⚠️ Техраздел: {escape(str(subs))}"
+            logger.warning("Не удалось получить подразделы техраздела: %s", subs)
+    except Exception:
+        logger.exception("Ошибка синхронизации технического раздела")
+        tech_line = "\n⚠️ Техраздел: ошибка сканирования"
+
     summary = (
         "🎉 <b>Синхронизация завершена!</b>\n\n"
         f"📊 Всего серверов: {total}\n"
         f"✅ Категории получены: {success_count}\n"
         f"❌ Без категорий: {fail_count}\n"
+        f"{tech_line}\n"
         f"⏱ Заняло: {elapsed:.1f} с"
     )
     if failed_servers:
