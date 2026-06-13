@@ -35,6 +35,7 @@ from src.premium_emoji import (
     PE_CHECK, PE_CROSS, PE_TRASH, PE_LINK, PE_LOADING, PE_BELL,
     PE_INFO, PE_EYE, PE_PENCIL, PE_TIME_PASSED, PE_SEND_UP, PE_BOT,
     PE_ARROW_DOWN_LIST, PE_PROFILE, PE_FILE, PE_TAG, PE_CLOCK, PE_CALENDAR,
+    PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT,
 )
 from src.labels import (
     LBL_STATS, LBL_BROADCAST, LBL_QUEUE, LBL_MAINTENANCE, LBL_CANCEL,
@@ -901,8 +902,9 @@ def _complaints_list_kb(page: int, total_pages: int,
     nav: list[types.InlineKeyboardButton] = []
     if page > 1:
         nav.append(types.InlineKeyboardButton(
-            text="◀️ Назад",
+            text="Назад",
             callback_data=f"adm_cs:{page - 1}:{status_filter or 'all'}",
+            icon_custom_emoji_id=PE_ARROW_LEFT,
         ))
     nav.append(types.InlineKeyboardButton(
         text=f"{page}/{total_pages or 1}",
@@ -911,8 +913,9 @@ def _complaints_list_kb(page: int, total_pages: int,
     ))
     if page < total_pages:
         nav.append(types.InlineKeyboardButton(
-            text="Вперёд ▶️",
+            text="Вперёд",
             callback_data=f"adm_cs:{page + 1}:{status_filter or 'all'}",
+            icon_custom_emoji_id=PE_ARROW_RIGHT,
         ))
     if nav:
         rows.append(nav)
@@ -994,7 +997,8 @@ def _complaint_actions_kb(complaint_id: int,
         ),
     ])
     rows.append([types.InlineKeyboardButton(
-        text="◀️ К списку", callback_data="adm_cs:1:all",
+        text="К списку", callback_data="adm_cs:1:all",
+        icon_custom_emoji_id=PE_ARROW_LEFT,
     )])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1315,8 +1319,9 @@ async def adm_complaint_delete_forum(call: types.CallbackQuery):
                     style=BTN_DANGER,
                 )],
                 [types.InlineKeyboardButton(
-                    text="◀️ Назад к карточке",
+                    text="Назад к карточке",
                     callback_data=f"adm_c_open:{cid}",
+                    icon_custom_emoji_id=PE_ARROW_LEFT,
                 )],
             ])
             await call.message.edit_text(

@@ -65,6 +65,7 @@ from src.premium_emoji import (
     PE_MEDIA_PHOTO, PE_FILE, PE_BELL, PE_GIFT, PE_CLOCK, PE_WRITE, PE_BOT,
     PE_SEND_UP, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_EYE, PE_GEOTAG,
     PE_MEGAPHONE, PE_ARROW_DOWN_LIST, PE_TIME_PASSED, PE_ADD_TEXT,
+    PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT,
 )
 from src.labels import (
     LBL_NEW_COMPLAINT, LBL_MY_COMPLAINTS, LBL_MY_TEMPLATES, LBL_FIND_COMPLAINT,
@@ -205,10 +206,14 @@ def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
     # Навигация
     nav: list[types.InlineKeyboardButton] = []
     if page > 0:
-        nav.append(types.InlineKeyboardButton(text="◀️", callback_data=f"srv_page:{page - 1}"))
+        nav.append(types.InlineKeyboardButton(
+            text="Назад", callback_data=f"srv_page:{page - 1}",
+            icon_custom_emoji_id=PE_ARROW_LEFT))
     nav.append(types.InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="srv_noop"))
     if page < total_pages - 1:
-        nav.append(types.InlineKeyboardButton(text="▶️", callback_data=f"srv_page:{page + 1}"))
+        nav.append(types.InlineKeyboardButton(
+            text="Вперёд", callback_data=f"srv_page:{page + 1}",
+            icon_custom_emoji_id=PE_ARROW_RIGHT))
     rows.append(nav)
     # Технический раздел — отдельный глобальный раздел (не игровой сервер)
     rows.append([types.InlineKeyboardButton(
@@ -243,15 +248,18 @@ def _tech_servers_keyboard(servers: list[str], page: int) -> types.InlineKeyboar
     nav: list[types.InlineKeyboardButton] = []
     if page > 0:
         nav.append(types.InlineKeyboardButton(
-            text="◀️", callback_data=f"tech_srvpage:{page - 1}"))
+            text="Назад", callback_data=f"tech_srvpage:{page - 1}",
+            icon_custom_emoji_id=PE_ARROW_LEFT))
     nav.append(types.InlineKeyboardButton(
         text=f"{page + 1}/{total_pages}", callback_data="srv_noop"))
     if page < total_pages - 1:
         nav.append(types.InlineKeyboardButton(
-            text="▶️", callback_data=f"tech_srvpage:{page + 1}"))
+            text="Вперёд", callback_data=f"tech_srvpage:{page + 1}",
+            icon_custom_emoji_id=PE_ARROW_RIGHT))
     rows.append(nav)
     rows.append([types.InlineKeyboardButton(
-        text="◀️ К серверам", callback_data="srv_back")])
+        text="К серверам", callback_data="srv_back",
+        icon_custom_emoji_id=PE_ARROW_LEFT)])
     rows.append([types.InlineKeyboardButton(
         text="Отмена", callback_data="cmpl_cancel",
         icon_custom_emoji_id=PE_CROSS,
@@ -276,7 +284,8 @@ def _tech_kind_keyboard(server_key: str, has_tech: bool,
             icon_custom_emoji_id=PE_PERSON_CROSS,
             style=BTN_PRIMARY)])
     rows.append([types.InlineKeyboardButton(
-        text="◀️ К выбору сервера", callback_data="tech_open")])
+        text="К выбору сервера", callback_data="tech_open",
+        icon_custom_emoji_id=PE_ARROW_LEFT)])
     rows.append([types.InlineKeyboardButton(
         text="Отмена", callback_data="cmpl_cancel",
         icon_custom_emoji_id=PE_CROSS,
@@ -295,7 +304,8 @@ def _categories_keyboard(categories: dict[str, tuple[str, int]]) -> types.Inline
             icon_custom_emoji_id=PE_TAG,
         )])
     rows.append([types.InlineKeyboardButton(
-        text="◀️ К серверам", callback_data="srv_back")])
+        text="К серверам", callback_data="srv_back",
+        icon_custom_emoji_id=PE_ARROW_LEFT)])
     rows.append([types.InlineKeyboardButton(
         text="Отмена", callback_data="cmpl_cancel",
         icon_custom_emoji_id=PE_CROSS,
@@ -636,7 +646,8 @@ def _templates_keyboard(builtin: dict[str, dict[str, str]],
     ])
     rows.append([
         types.InlineKeyboardButton(
-            text="◀️ К серверам", callback_data="srv_back"),
+            text="К серверам", callback_data="srv_back",
+            icon_custom_emoji_id=PE_ARROW_LEFT),
         types.InlineKeyboardButton(
             text="Отмена", callback_data="cmpl_cancel",
             icon_custom_emoji_id=PE_CROSS,
@@ -1726,7 +1737,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
                     used_account_name, used_account_id, attempt + 1)
         try:
             await status_msg.edit_text(
-                f"{te(PE_LOADING, '🔁')} Попытка {attempt + 1}/3: пробую через "
+                f"{te(PE_REPEAT, '🔁')} Попытка {attempt + 1}/3: пробую через "
                 f"<b>{escape(used_account_name)}</b>..."
             )
         except Exception:
@@ -1891,8 +1902,9 @@ def _complaint_detail_keyboard(complaint_id: int,
         style=BTN_DANGER,
     )])
     rows.append([types.InlineKeyboardButton(
-        text="◀️ К списку",
+        text="К списку",
         callback_data="cmpl_refresh",
+        icon_custom_emoji_id=PE_ARROW_LEFT,
     )])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2293,8 +2305,9 @@ async def utpl_edit_start(call: types.CallbackQuery, state: FSMContext):
             callback_data=f"utpl_efield:description:{tid}",
             icon_custom_emoji_id=PE_FILE,
             style=BTN_PRIMARY)],
-        [types.InlineKeyboardButton(text="◀️ Отмена",
+        [types.InlineKeyboardButton(text="Отмена",
             callback_data="utpl_back",
+            icon_custom_emoji_id=PE_ARROW_LEFT,
             style=BTN_DANGER)],
     ])
     try:
@@ -2437,7 +2450,8 @@ async def cmpl_edit_start(call: types.CallbackQuery, state: FSMContext):
             icon_custom_emoji_id=PE_LINK,
             style=BTN_PRIMARY)],
         [types.InlineKeyboardButton(
-            text="◀️ Отмена", callback_data=f"cmpl_open:{cid}",
+            text="Отмена", callback_data=f"cmpl_open:{cid}",
+            icon_custom_emoji_id=PE_ARROW_LEFT,
             style=BTN_DANGER)],
     ])
     await call.message.edit_text(
@@ -2818,11 +2832,13 @@ def _find_result_keyboard(
     nav = []
     if page > 0:
         nav.append(types.InlineKeyboardButton(
-            text="◀️", callback_data=f"find_page:{query}:{page - 1}",
+            text="Назад", callback_data=f"find_page:{query}:{page - 1}",
+            icon_custom_emoji_id=PE_ARROW_LEFT,
         ))
     if page < total_pages - 1:
         nav.append(types.InlineKeyboardButton(
-            text="▶️", callback_data=f"find_page:{query}:{page + 1}",
+            text="Вперёд", callback_data=f"find_page:{query}:{page + 1}",
+            icon_custom_emoji_id=PE_ARROW_RIGHT,
         ))
     if nav:
         rows.append(nav)

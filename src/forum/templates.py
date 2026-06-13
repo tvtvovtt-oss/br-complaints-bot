@@ -214,22 +214,22 @@ def build_title(target_nickname: str, summary: str) -> str:
 # Шаблоны для жалоб на игроков (категория players)
 PLAYER_TEMPLATES: dict[str, dict[str, str]] = {
     "dm": {
-        "name": "🔫 DM",
+        "name": "DM",
         "summary": "DM",
         "description": "Нанесение урона без весомой причины.",
     },
     "db": {
-        "name": "🚗 DB",
+        "name": "DB",
         "summary": "DB",
         "description": "Нанесение урона машиной без весомой причины.",
     },
     "ofense_parents": {
-        "name": "🤬 Оск. род.",
+        "name": "Оск. род.",
         "summary": "Оскорбление родителей",
         "description": "Оскорбление родственников в войсе/чате.",
     },
     "cheat": {
-        "name": "💻 Чит-ПО",
+        "name": "Чит-ПО",
         "summary": "Использование чит-ПО",
         "description": "Использование читов: аимбот, хитбоксы.",
     },
