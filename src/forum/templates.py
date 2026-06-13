@@ -32,7 +32,8 @@ SUMMARY_LABEL = {
 
 
 # Какие категории требуют поле "Дата выдачи/получения наказания"
-NEEDS_DATE = {"admins", "appeals"}
+# (для technical/tech_staff — «дата и время технической проблемы»).
+NEEDS_DATE = {"admins", "appeals", "technical", "tech_staff"}
 
 # Категории без «цели» (нет ника нарушителя). Для них сценарий пропускает
 # шаг ввода ника цели и заголовок строится от ника автора обращения.
@@ -114,7 +115,9 @@ def make_title(category_key: str, your_nickname: str,
 
 def build_body(category_key: str, your_nickname: str, target_nickname: str,
                description: str, proof_link: str,
-               punishment_date: str | None = None) -> str:
+               punishment_date: str | None = None,
+               server: str | None = None,
+               os_version: str | None = None) -> str:
     """Формирует BB-код тела сообщения по шаблону, соответствующему категории.
 
     Шаблоны взяты из правил форума:
@@ -122,7 +125,45 @@ def build_body(category_key: str, your_nickname: str, target_nickname: str,
     - leaders: 4 поля (Ваш ник / ник лидера / суть / доказательство)
     - admins:  5 полей (Ваш ник / ник админа / дата наказания / суть / доказательство)
     - appeals: 5 полей (Ваш ник / ник админа / дата наказания / суть заявки / доказательство)
+    - technical: 6 полей (ник / сервер / суть проблемы / скриншоты / дата / ОС)
+    - tech_staff: 6 полей (ник / ник спеца / сервер / описание / скриншоты / дата)
     """
+    def _white(s: str) -> str:
+        return f"[COLOR=rgb(255, 255, 255)]{s}[/COLOR]"
+
+    def _red(s: str) -> str:
+        return f"[COLOR=rgb(235, 10, 10)]{s}[/COLOR]"
+
+    date_val = punishment_date or "—"
+    server_val = server or "—"
+
+    # Технический раздел — обращение по проблеме мода (без цели).
+    if category_key == "technical":
+        return (
+            f"1. Ваш игровой никнейм: {_white(your_nickname)}\n"
+            f"2. Сервер, на котором Вы играете: {server_val}\n"
+            f"3. Суть возникшей проблемы (описать максимально подробно "
+            f"и раскрыто): {description}\n"
+            f"4. Любые скриншоты, которые могут помочь в решении проблемы "
+            f"(если таковые имеются): {proof_link}\n"
+            f"5. Дата и время произошедшей технической проблемы: {date_val}\n"
+            f"6. Операционная система и версия: {os_version or '—'}"
+        )
+
+    # Жалоба на технического специалиста (цель — его ник).
+    if category_key == "tech_staff":
+        return (
+            f"1. Ваш игровой никнейм: {_white(your_nickname)}\n"
+            f"2. Игровой никнейм технического специалиста: "
+            f"{_red(target_nickname)}\n"
+            f"3. Сервер, на котором Вы играете: {server_val}\n"
+            f"4. Описание ситуации (описать максимально подробно "
+            f"и раскрыто): {description}\n"
+            f"5. Любые скриншоты, которые могут помочь в решении проблемы "
+            f"(если таковые имеются): {proof_link}\n"
+            f"6. Дата и время произошедшей технической проблемы: {date_val}"
+        )
+
     summary_label = SUMMARY_LABEL.get(category_key, "Суть жалобы")
     target_label = TARGET_LABEL.get(category_key, "игрока")
 
@@ -130,15 +171,6 @@ def build_body(category_key: str, your_nickname: str, target_nickname: str,
         f"1. Ваш Nick_Name: "
         f"[COLOR=rgb(255, 255, 255)]{your_nickname}[/COLOR]"
     )
-
-    # Технический раздел: цели нет, дата не нужна. Структура — обращение
-    # от своего имени с сутью, описанием и доказательствами.
-    if category_key in NO_TARGET:
-        return (
-            f"{line_you}\n"
-            f"2. {summary_label}: {description}\n"
-            f"3. Доказательства/вложения: {proof_link}"
-        )
 
     line_target = (
         f"2. Nick_Name {target_label}: "

@@ -135,6 +135,7 @@ class ComplaintForm(StatesGroup):
     waiting_for_punishment_date = State()
     waiting_for_summary = State()
     waiting_for_description = State()
+    waiting_for_os = State()
     waiting_for_proof = State()
     waiting_for_confirm = State()
 
@@ -269,6 +270,35 @@ def _cancel_kb() -> types.ReplyKeyboardMarkup:
         keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
         resize_keyboard=True,
     )
+
+
+def _date_kb() -> types.ReplyKeyboardMarkup:
+    return types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="➖ Без даты")],
+            [types.KeyboardButton(text="❌ Отмена")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+async def _ask_date(message: types.Message, key: str) -> None:
+    """Запрашивает дату. Для техраздела — «дата и время проблемы»,
+    для админ/обжалований — «дата выдачи наказания»."""
+    if key in ("technical", "tech_staff"):
+        prompt = (
+            "📅 <b>Дата и время произошедшей технической проблемы</b> "
+            "(например: <code>15.05.2026 19:30</code>).\n\n"
+            "Если не помните точно — нажмите <b>«➖ Без даты»</b>."
+        )
+    else:
+        prompt = (
+            "📅 <b>Дата выдачи/получения наказания</b> "
+            "(например: <code>15.05.2026 19:30</code>).\n\n"
+            "Если дата неизвестна — нажмите <b>«➖ Без даты»</b>: "
+            "в жалобе будет прочерк."
+        )
+    await message.answer(prompt, reply_markup=_date_kb())
 
 
 # ---------------- Старт сценария ----------------
@@ -499,6 +529,7 @@ async def tech_kind_pick(call: types.CallbackQuery, state: FSMContext):
         section_id=node["node_id"],
         server_node_id=TECHNICAL_SECTION_NODE_ID,
         server_name=f"{server_key} (техраздел)",
+        tech_server_key=server_key,
         category_key=category_key,
         category_label=label,
         template_summary=None,
@@ -811,16 +842,19 @@ async def process_your_nickname(message: types.Message, state: FSMContext):
     data = await state.get_data()
     key = data["category_key"]
 
-    # Категории без цели (технический раздел) — пропускаем ввод ника цели
-    # и идём сразу к сути обращения. В поле «цель» кладём название подраздела,
-    # чтобы история/очередь/уведомления отображались осмысленно.
+    # Категории без цели (технический раздел) — пропускаем ввод ника цели.
+    # В поле «цель» кладём название подраздела для осмысленной истории.
     if key in NO_TARGET:
         await state.update_data(
             target_nickname=data.get("category_label") or "Техраздел",
         )
-        await state.set_state(ComplaintForm.waiting_for_summary)
         await _autosave_draft(state, message.from_user.id)
-        await _ask_summary(message, key, state)
+        if key in NEEDS_DATE:
+            await state.set_state(ComplaintForm.waiting_for_punishment_date)
+            await _ask_date(message, key)
+        else:
+            await state.set_state(ComplaintForm.waiting_for_summary)
+            await _ask_summary(message, key, state)
         return
 
     await state.set_state(ComplaintForm.waiting_for_target_nickname)
@@ -856,20 +890,7 @@ async def process_target_nickname(message: types.Message, state: FSMContext):
 
     if key in NEEDS_DATE:
         await state.set_state(ComplaintForm.waiting_for_punishment_date)
-        date_kb = types.ReplyKeyboardMarkup(
-            keyboard=[
-                [types.KeyboardButton(text="➖ Без даты")],
-                [types.KeyboardButton(text="❌ Отмена")],
-            ],
-            resize_keyboard=True,
-        )
-        await message.answer(
-            "📅 <b>Шаг 5: Дата выдачи/получения наказания</b> "
-            "(например: <code>15.05.2026 19:30</code>).\n\n"
-            "Если дата неизвестна — нажмите <b>«➖ Без даты»</b>: "
-            "в жалобе будет прочерк.",
-            reply_markup=date_kb,
-        )
+        await _ask_date(message, key)
     else:
         await state.set_state(ComplaintForm.waiting_for_summary)
         await _ask_summary(message, key, state)
@@ -1244,6 +1265,83 @@ async def process_proof_video(message: types.Message, state: FSMContext, bot: Bo
 
 
 
+async def _finalize_preview(message: types.Message, state: FSMContext) -> None:
+    """Собирает BB-тело и заголовок темы из state и показывает превью
+    с кнопками «Отправить»/«В очередь». Общий финал для обычных жалоб,
+    техобращений (после шага ОС) и т.д."""
+    data = await state.get_data()
+    bb_code = build_body(
+        category_key=data["category_key"],
+        your_nickname=data["your_nickname"],
+        target_nickname=data.get("target_nickname", ""),
+        description=data["description"],
+        proof_link=data.get("proof_link", ""),
+        punishment_date=data.get("punishment_date"),
+        server=data.get("tech_server_key"),
+        os_version=data.get("os_version"),
+    )
+    thread_title = make_title(
+        data["category_key"],
+        data["your_nickname"],
+        data.get("target_nickname", ""),
+        data["summary"],
+    )
+
+    await state.update_data(bb_code=bb_code, title=thread_title)
+    await state.set_state(ComplaintForm.waiting_for_confirm)
+
+    confirm_kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="✅ Отправить на форум")],
+            [
+                types.KeyboardButton(text="📦 В очередь"),
+                types.KeyboardButton(text="❌ Отмена"),
+            ],
+        ],
+        resize_keyboard=True,
+    )
+
+    poster = data.get("complaint_account_name") or "по текущим cookies.json"
+    poster_line_admin = (
+        f"👤 <b>От имени:</b> {escape(str(poster))}\n"
+        if is_admin(message.from_user.id) else ""
+    )
+
+    preview_text = (
+        "🧐 <b>Проверьте корректность перед отправкой:</b>\n\n"
+        f"{poster_line_admin}"
+        f"📍 <b>Сервер:</b> {escape(str(data.get('server_name', '?')))}\n"
+        f"📂 <b>Категория:</b> {escape(str(data.get('category_label', '?')))}\n"
+        f"📌 <b>Заголовок темы:</b> {escape(thread_title)}\n\n"
+        f"📄 <b>Текст сообщения:</b>\n"
+        f"<pre>{escape(bb_code)}</pre>\n"
+        "Нажмите <b>✅ Отправить на форум</b> для немедленной публикации "
+        "или <b>📦 В очередь</b> чтобы поставить в очередь "
+        "(публикация в фоне, когда освободится аккаунт)."
+    )
+    await message.answer(preview_text, reply_markup=confirm_kb)
+
+
+@router.message(ComplaintForm.waiting_for_os)
+async def process_os(message: types.Message, state: FSMContext):
+    """Шаг «Операционная система и версия» — только для технического вопроса."""
+    if not check_access(message.from_user.id):
+        return
+    if await _cancel_via_text(message, state):
+        return
+    value = (message.text or "").strip()
+    if not value or len(value) > 100:
+        await message.answer(
+            "Укажите ОС и версию (до 100 символов). "
+            "Например: <code>Android 14</code>, <code>Windows 11</code>.",
+            reply_markup=_cancel_kb(),
+        )
+        return
+    await state.update_data(os_version=value)
+    await _autosave_draft(state, message.from_user.id)
+    await _finalize_preview(message, state)
+
+
 @router.message(ComplaintForm.waiting_for_proof)
 async def process_proof(message: types.Message, state: FSMContext):
     if not check_access(message.from_user.id):
@@ -1302,58 +1400,19 @@ async def process_proof(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    bb_code = build_body(
-        category_key=data["category_key"],
-        your_nickname=data["your_nickname"],
-        target_nickname=data.get("target_nickname", ""),
-        description=data["description"],
-        proof_link=value,
-        punishment_date=data.get("punishment_date"),
-    )
-    thread_title = make_title(
-        data["category_key"],
-        data["your_nickname"],
-        data.get("target_nickname", ""),
-        data["summary"],
-    )
+    # Технический вопрос требует поле «ОС и версия» — спрашиваем перед превью.
+    if category_key == "technical" and not data.get("os_version"):
+        await state.set_state(ComplaintForm.waiting_for_os)
+        await _autosave_draft(state, message.from_user.id)
+        await message.answer(
+            "💻 <b>Операционная система и версия</b>\n"
+            "Например: <code>Android 14</code>, <code>iOS 17.5</code>, "
+            "<code>Windows 11</code>.",
+            reply_markup=_cancel_kb(),
+        )
+        return
 
-    await state.update_data(bb_code=bb_code, title=thread_title)
-    await state.set_state(ComplaintForm.waiting_for_confirm)
-
-    confirm_kb = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                types.KeyboardButton(text="✅ Отправить на форум"),
-            ],
-            [
-                types.KeyboardButton(text="📦 В очередь"),
-                types.KeyboardButton(text="❌ Отмена"),
-            ],
-        ],
-        resize_keyboard=True,
-    )
-
-    # Имя аккаунта мы сохранили на старте сценария.
-    # Обычным пользователям имя аккаунта-публикатора не показываем.
-    poster = data.get("complaint_account_name") or "по текущим cookies.json"
-    poster_line_admin = (
-        f"👤 <b>От имени:</b> {escape(str(poster))}\n"
-        if is_admin(message.from_user.id) else ""
-    )
-
-    preview_text = (
-        "🧐 <b>Проверьте корректность жалобы перед отправкой:</b>\n\n"
-        f"{poster_line_admin}"
-        f"📍 <b>Сервер:</b> {escape(str(data.get('server_name', '?')))}\n"
-        f"📂 <b>Категория:</b> {escape(str(data.get('category_label', '?')))}\n"
-        f"📌 <b>Заголовок темы:</b> {escape(thread_title)}\n\n"
-        f"📄 <b>Текст сообщения:</b>\n"
-        f"<pre>{escape(bb_code)}</pre>\n"
-        "Нажмите <b>✅ Отправить на форум</b> для немедленной публикации "
-        "или <b>📦 В очередь</b> чтобы поставить в очередь "
-        "(публикация в фоне, когда освободится аккаунт)."
-    )
-    await message.answer(preview_text, reply_markup=confirm_kb)
+    await _finalize_preview(message, state)
 
 
 @router.message(ComplaintForm.waiting_for_confirm, F.text == "📦 В очередь")
@@ -2487,6 +2546,7 @@ async def draft_resume(call: types.CallbackQuery, state: FSMContext):
         "ComplaintForm:waiting_for_punishment_date": ComplaintForm.waiting_for_punishment_date,
         "ComplaintForm:waiting_for_summary": ComplaintForm.waiting_for_summary,
         "ComplaintForm:waiting_for_description": ComplaintForm.waiting_for_description,
+        "ComplaintForm:waiting_for_os": ComplaintForm.waiting_for_os,
         "ComplaintForm:waiting_for_proof": ComplaintForm.waiting_for_proof,
         "ComplaintForm:waiting_for_confirm": ComplaintForm.waiting_for_confirm,
     }
