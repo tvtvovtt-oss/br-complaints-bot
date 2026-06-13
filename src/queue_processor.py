@@ -28,6 +28,7 @@ from src.database import (
     add_complaint,
     update_account_cookies,
     mark_account_needs_reauth,
+    release_account_cooldown,
     get_account_pool_status,
 )
 from src.forum.xenforo import post_complaint, is_auth_error, is_noperm_error
@@ -36,18 +37,19 @@ from src.settings import get_queue_settings, format_seconds
 logger = logging.getLogger(__name__)
 
 
-# Кулдаун аккаунтов (должен совпадать с COMPLAINT_COOLDOWN_SECONDS из complaint.py)
+# Кулдаун аккаунтов — fallback-дефолт, если настройка в БД недоступна.
+# Реальное значение читается из get_queue_settings() каждый проход.
 ACCOUNT_COOLDOWN_SECONDS = 180
 
-# Пауза между обработкой соседних жалоб
+# Пауза между обработкой соседних жалоб (fallback-дефолт)
 PROCESS_INTERVAL = 5
 
-# Максимум попыток на одну жалобу
+# Максимум попыток на одну жалобу (fallback-дефолт)
 MAX_ATTEMPTS = 3
 
-# Сколько жалоб обрабатываем одновременно. У каждой публикации свой аккаунт
-# из пула (claim_available_account), так что параллельные публикации не мешают
-# друг другу. 2 — компромисс: ускорение в 2 раза, но не перегружаем форум.
+# Сколько жалоб обрабатываем одновременно (fallback-дефолт). У каждой
+# публикации свой аккаунт из пула (claim_available_account), так что
+# параллельные публикации не мешают друг другу.
 PARALLEL_WORKERS = 2
 
 _last_admin_alerts: dict[str, float] = {}
@@ -156,23 +158,31 @@ async def _process_one(bot: Bot, item: dict, cfg: dict[str, int]) -> None:
     account_cooldown = cfg["account_cooldown_seconds"]
     alert_cooldown = cfg["admin_alert_cooldown_seconds"]
 
-    if item["attempts"] >= MAX_ATTEMPTS:
+    if item["attempts"] >= max_attempts:
         logger.warning("Жалоба #%s превысила лимит попыток (%d) — failed.",
-                       qid, MAX_ATTEMPTS)
+                       qid, max_attempts)
         await mark_queue_failed(qid, "превышен лимит попыток")
         await _notify_user(bot, telegram_id,
             f"❌ Жалоба из очереди на <b>{escape(target)}</b> "
-            f"не была опубликована после {MAX_ATTEMPTS} попыток.")
+            f"не была опубликована после {max_attempts} попыток.")
         return
 
     # Берём свободный аккаунт админа (общий пул)
     owner_id = ADMIN_IDS[0] if ADMIN_IDS else telegram_id
-    account = await claim_available_account(owner_id, ACCOUNT_COOLDOWN_SECONDS)
+    account = await claim_available_account(owner_id, account_cooldown)
 
     if not account:
         # Все аккаунты в кулдауне или нет аккаунтов вообще.
         # Не помечаем failed — просто пропускаем итерацию, попробуем позже.
+        # Перед этим уведомляем админов о проблеме пула (с антиспамом).
         logger.debug("Жалоба #%s ждёт свободный аккаунт.", qid)
+        try:
+            pool = await get_account_pool_status(owner_id)
+            await _alert_pool_problem(
+                bot, owner_id, pool, qid, target, alert_cooldown,
+            )
+        except Exception:
+            logger.debug("alert_pool_problem failed", exc_info=True)
         await asyncio.sleep(10)
         return
 
@@ -234,14 +244,17 @@ async def _process_one(bot: Bot, item: dict, cfg: dict[str, int]) -> None:
                 "оставляю в pending для другого аккаунта.",
                 qid, account["username"], section_id,
             )
+            # Аккаунт валиден, просто не подходит для этого раздела —
+            # возвращаем его в пул сразу, не держим 180с в кулдауне.
+            await release_account_cooldown(account["id"])
             return
 
         # increment_queue_attempt поднимает attempts на 1.
         await increment_queue_attempt(qid, error=str(result))
         new_attempts = item["attempts"] + 1
         logger.warning("Жалоба #%s провалила попытку %d/%d: %s",
-                       qid, new_attempts, MAX_ATTEMPTS, result)
-        if new_attempts >= MAX_ATTEMPTS:
+                       qid, new_attempts, max_attempts, result)
+        if new_attempts >= max_attempts:
             await mark_queue_failed(qid, str(result))
             await _notify_user(bot, telegram_id,
                 f"❌ <b>Жалоба из очереди не опубликована</b>\n\n"
@@ -252,20 +265,19 @@ async def _process_one(bot: Bot, item: dict, cfg: dict[str, int]) -> None:
 async def queue_processor_loop(bot: Bot) -> None:
     """Бесконечный цикл обработки очереди.
 
-    Обрабатывает до PARALLEL_WORKERS жалоб одновременно — у каждой свой
-    аккаунт из пула (через claim_available_account), параллелизм не
-    мешает кулдауну на стороне форума.
+    Обрабатывает до cfg["parallel_workers"] жалоб одновременно — у каждой
+    свой аккаунт из пула (через claim_available_account), параллелизм не
+    мешает кулдауну на стороне форума. Настройки (параллельность, интервал,
+    лимит попыток, кулдаун) читаются из БД каждый проход — админ может
+    менять их на лету через /settings.
     """
-    logger.info("Запущен процессор очереди жалоб (интервал %d сек, "
-                "параллельность %d).", PROCESS_INTERVAL, PARALLEL_WORKERS)
+    logger.info("Запущен процессор очереди жалоб.")
     await asyncio.sleep(60)  # стартовая задержка, как у других циклов
 
-    sem = asyncio.Semaphore(PARALLEL_WORKERS)
-
-    async def _run_one(item):
+    async def _run_one(item, cfg: dict[str, int], sem: asyncio.Semaphore):
         async with sem:
             try:
-                await asyncio.wait_for(_process_one(bot, item), timeout=120)
+                await asyncio.wait_for(_process_one(bot, item, cfg), timeout=120)
             except asyncio.TimeoutError:
                 logger.warning("Жалоба #%s — таймаут публикации.", item["id"])
                 await increment_queue_attempt(item["id"], "таймаут")
@@ -276,14 +288,32 @@ async def queue_processor_loop(bot: Bot) -> None:
 
     while True:
         try:
+            # Настройки перечитываем каждый проход — дешёвый SELECT, зато
+            # изменения из /settings применяются без рестарта бота.
+            try:
+                cfg = await get_queue_settings()
+            except Exception:
+                logger.debug("get_queue_settings failed, использую дефолты",
+                             exc_info=True)
+                cfg = {
+                    "account_cooldown_seconds": ACCOUNT_COOLDOWN_SECONDS,
+                    "process_interval_seconds": PROCESS_INTERVAL,
+                    "max_attempts": MAX_ATTEMPTS,
+                    "parallel_workers": PARALLEL_WORKERS,
+                    "admin_alert_cooldown_seconds": 600,
+                }
+            interval = cfg["process_interval_seconds"]
+
             pending = await list_queue_pending()
             if not pending:
-                await asyncio.sleep(PROCESS_INTERVAL)
+                await asyncio.sleep(interval)
                 continue
 
+            # Семафор создаём на каждый батч с актуальной параллельностью.
+            sem = asyncio.Semaphore(max(1, cfg["parallel_workers"]))
             # Запускаем все pending параллельно (semaphore ограничит).
-            await asyncio.gather(*(_run_one(item) for item in pending))
-            await asyncio.sleep(PROCESS_INTERVAL)
+            await asyncio.gather(*(_run_one(item, cfg, sem) for item in pending))
+            await asyncio.sleep(interval)
         except asyncio.CancelledError:
             logger.info("Процессор очереди остановлен.")
             raise

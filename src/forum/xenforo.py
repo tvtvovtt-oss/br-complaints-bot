@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from html import escape as escape_html
@@ -128,13 +129,26 @@ def load_cookies(use_cache: bool = True) -> dict:
         return {}
 
 
+def _atomic_write_json(path, data: dict) -> None:
+    """Атомарно пишет JSON: сначала во временный файл рядом, затем
+    os.replace() — атомарная замена на одной ФС. Так конкурентная запись
+    из разных корутин/тасков или падение процесса посреди dump не оставит
+    обрезанный/битый cookies.json.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 async def save_cookies_async(cookies_dict: dict) -> None:
     """Асинхронная запись кук в файл и обновление кэша под Lock."""
     global _cookies_cache, _cookies_mtime
     async with _cookies_lock:
         try:
-            with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-                json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
+            _atomic_write_json(COOKIES_PATH, cookies_dict)
             _cookies_cache = dict(cookies_dict)
             _cookies_mtime = COOKIES_PATH.stat().st_mtime
             logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))
@@ -148,8 +162,7 @@ def save_cookies(cookies_dict: dict) -> None:
     """
     global _cookies_cache, _cookies_mtime
     try:
-        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-            json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
+        _atomic_write_json(COOKIES_PATH, cookies_dict)
         _cookies_cache = dict(cookies_dict)
         _cookies_mtime = COOKIES_PATH.stat().st_mtime
         logger.debug("Куки сохранены в файл (%d записей).", len(cookies_dict))

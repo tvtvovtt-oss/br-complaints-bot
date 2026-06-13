@@ -178,12 +178,14 @@ async def broadcast_got_text(message: types.Message, state: FSMContext):
 
     await state.update_data(broadcast_text=text)
     users = await list_all_users()
-    await state.update_data(broadcast_recipients=users)
+    # Список получателей в state НЕ храним — на большой базе это лишняя
+    # нагрузка на storage, и список может устареть к моменту подтверждения.
+    # В broadcast_send перечитаем актуальный список из БД.
     await state.set_state(BroadcastForm.waiting_for_confirm)
 
     preview = (
         f"📢 <b>Рассылка готова</b>\n\n"
-        f"<b>Получателей:</b> {len(users)}\n\n"
+        f"<b>Получателей (примерно):</b> {len(users)}\n\n"
         f"<b>Превью сообщения:</b>\n"
         f"━━━━━━━━━━━━━━\n{text}\n━━━━━━━━━━━━━━\n\n"
         f"Подтверждаете? (это нельзя отменить после старта)"
@@ -208,8 +210,10 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
 
     data = await state.get_data()
     text = data.get("broadcast_text", "")
-    users: list[int] = data.get("broadcast_recipients", [])
     await state.clear()
+
+    # Перечитываем актуальный список получателей из БД (в state не хранили).
+    users: list[int] = await list_all_users()
 
     if not text or not users:
         await message.answer("Сообщение или список получателей пусты.",

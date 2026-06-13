@@ -245,8 +245,11 @@ async def main():
                 task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
+                    # Ожидаемо — мы сами отменили задачу.
                     pass
+                except Exception:
+                    logger.exception("Ошибка при остановке фоновой задачи.")
         logger.info("Закрываю HTTP-сессию бота...")
         await bot.session.close()
         logger.info("Сессия закрыта. Завершение работы.")
