@@ -43,6 +43,12 @@ from src.premium_emoji import (
     PE_CHART_GROW, PE_HOUSE, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_GIFT,
     PE_ARROW_DOWN_LIST,
 )
+from src.labels import (
+    LBL_NEW_COMPLAINT, LBL_MY_COMPLAINTS, LBL_MY_TEMPLATES, LBL_MY_PROFILE,
+    LBL_FIND_COMPLAINT, LBL_REPORT_BUG, LBL_QUEUE, LBL_MAINTENANCE,
+    LBL_BUG_REPORTS, LBL_CHECK_FORUM, LBL_SYNC_FORUM, LBL_ACCOUNTS,
+    LBL_LOGIN, LBL_STATS, LBL_BROADCAST, LBL_CANCEL,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -75,56 +81,56 @@ def account_owner_id(user_id: int) -> int:
 def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup:
     """Главная клавиатура бота. Админу показываем расширенный набор кнопок.
 
-    Текстовые ярлыки оставлены как есть (с обычными эмодзи) — на них
-    завязаны ``F.text``-фильтры. Премиум-юзерам Telegram дополнительно
-    отрисует анимированную иконку слева (``icon_custom_emoji_id``)
-    и подкрасит кнопку (``style``)."""
+    Текст кнопок — без обычных эмодзи (берётся из :mod:`src.labels`), премиум
+    иконку слева рисует ``icon_custom_emoji_id``, цвет — ``style``. Те же
+    LBL_*-константы используются в ``F.text``-фильтрах, поэтому текст кнопки
+    и фильтр всегда совпадают."""
     if is_admin_user:
         kb = [
             [
-                types.KeyboardButton(text="📝 Подать жалобу",
+                types.KeyboardButton(text=LBL_NEW_COMPLAINT,
                                      icon_custom_emoji_id=PE_PENCIL,
                                      style=BTN_PRIMARY),
-                types.KeyboardButton(text="📜 Мои жалобы",
+                types.KeyboardButton(text=LBL_MY_COMPLAINTS,
                                      icon_custom_emoji_id=PE_ARROW_DOWN_LIST),
             ],
             [
-                types.KeyboardButton(text="📋 Мои шаблоны",
+                types.KeyboardButton(text=LBL_MY_TEMPLATES,
                                      icon_custom_emoji_id=PE_FILE),
-                types.KeyboardButton(text="📦 Очередь жалоб",
+                types.KeyboardButton(text=LBL_QUEUE,
                                      icon_custom_emoji_id=PE_BOX),
             ],
             [
-                types.KeyboardButton(text="🔍 Найти жалобу",
+                types.KeyboardButton(text=LBL_FIND_COMPLAINT,
                                      icon_custom_emoji_id=PE_EYE),
-                types.KeyboardButton(text="📊 Мой профиль",
+                types.KeyboardButton(text=LBL_MY_PROFILE,
                                      icon_custom_emoji_id=PE_PROFILE),
             ],
             [
-                types.KeyboardButton(text="🔒 Режим обслуживания",
+                types.KeyboardButton(text=LBL_MAINTENANCE,
                                      icon_custom_emoji_id=PE_LOCK_CLOSED,
                                      style=BTN_DANGER),
-                types.KeyboardButton(text="🐞 Баг-репорты",
+                types.KeyboardButton(text=LBL_BUG_REPORTS,
                                      icon_custom_emoji_id=PE_BOT),
             ],
             [
-                types.KeyboardButton(text="🔍 Проверить статус форума",
+                types.KeyboardButton(text=LBL_CHECK_FORUM,
                                      icon_custom_emoji_id=PE_INFO),
-                types.KeyboardButton(text="🔄 Синхронизировать форум",
+                types.KeyboardButton(text=LBL_SYNC_FORUM,
                                      icon_custom_emoji_id=PE_LOADING,
                                      style=BTN_PRIMARY),
             ],
             [
-                types.KeyboardButton(text="👥 Аккаунты",
+                types.KeyboardButton(text=LBL_ACCOUNTS,
                                      icon_custom_emoji_id=PE_PEOPLE),
-                types.KeyboardButton(text="🔐 Войти по паролю",
+                types.KeyboardButton(text=LBL_LOGIN,
                                      icon_custom_emoji_id=PE_LOCK_CLOSED,
                                      style=BTN_PRIMARY),
             ],
             [
-                types.KeyboardButton(text="📊 Статистика",
+                types.KeyboardButton(text=LBL_STATS,
                                      icon_custom_emoji_id=PE_CHART_STATS),
-                types.KeyboardButton(text="📢 Рассылка",
+                types.KeyboardButton(text=LBL_BROADCAST,
                                      icon_custom_emoji_id=PE_MEGAPHONE,
                                      style=BTN_PRIMARY),
             ],
@@ -132,22 +138,22 @@ def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup
     else:
         kb = [
             [
-                types.KeyboardButton(text="📝 Подать жалобу",
+                types.KeyboardButton(text=LBL_NEW_COMPLAINT,
                                      icon_custom_emoji_id=PE_PENCIL,
                                      style=BTN_PRIMARY),
-                types.KeyboardButton(text="📜 Мои жалобы",
+                types.KeyboardButton(text=LBL_MY_COMPLAINTS,
                                      icon_custom_emoji_id=PE_ARROW_DOWN_LIST),
             ],
             [
-                types.KeyboardButton(text="📋 Мои шаблоны",
+                types.KeyboardButton(text=LBL_MY_TEMPLATES,
                                      icon_custom_emoji_id=PE_FILE),
-                types.KeyboardButton(text="📊 Мой профиль",
+                types.KeyboardButton(text=LBL_MY_PROFILE,
                                      icon_custom_emoji_id=PE_PROFILE),
             ],
             [
-                types.KeyboardButton(text="🔍 Найти жалобу",
+                types.KeyboardButton(text=LBL_FIND_COMPLAINT,
                                      icon_custom_emoji_id=PE_EYE),
-                types.KeyboardButton(text="🐞 Сообщить о баге",
+                types.KeyboardButton(text=LBL_REPORT_BUG,
                                      icon_custom_emoji_id=PE_BOT),
             ],
         ]
@@ -174,14 +180,14 @@ class LoginForm(StatesGroup):
 def _login_cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(
-            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+            text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
             style=BTN_DANGER)]],
         resize_keyboard=True,
     )
 
 
 @router.message(Command("login"))
-@router.message(F.text == "🔐 Войти по паролю")
+@router.message(F.text == LBL_LOGIN)
 async def login_start(message: types.Message, state: FSMContext):
     if await _deny_non_admin(message):
         return
@@ -205,7 +211,7 @@ async def _begin_login(message: types.Message, state: FSMContext,
 
 
 async def _login_cancel(message: types.Message, state: FSMContext) -> bool:
-    if message.text and message.text.strip() == "❌ Отмена":
+    if message.text and message.text.strip() == LBL_CANCEL:
         # Если внутри 2FA — закрываем httpx-клиент чтобы не утечь
         data = await state.get_data()
         twofa = data.get("twofa")
@@ -537,7 +543,7 @@ async def _deny_non_admin(message: types.Message) -> bool:
     return True
 
 
-@router.message(F.text == "🔍 Проверить статус форума")
+@router.message(F.text == LBL_CHECK_FORUM)
 async def check_forum_status(message: types.Message):
     if await _deny_non_admin(message):
         return
@@ -637,7 +643,7 @@ async def check_forum_status(message: types.Message):
 
 
 @router.message(Command("sync"))
-@router.message(F.text == "🔄 Синхронизировать форум")
+@router.message(F.text == LBL_SYNC_FORUM)
 async def sync_forum_structure(message: types.Message):
     """Синхронизирует список серверов и подразделы жалоб для каждого сервера.
     Категории получает параллельно (ускорение в ~6 раз против последовательного обхода)."""
@@ -881,13 +887,13 @@ def _accounts_keyboard(accounts: list[dict]) -> types.InlineKeyboardMarkup:
         actions: list[types.InlineKeyboardButton] = []
         if not acc["is_active"]:
             actions.append(types.InlineKeyboardButton(
-                text="↪️ Сделать активным",
+                text="Сделать активным",
                 callback_data=f"acc_use:{acc['id']}",
                 icon_custom_emoji_id=PE_PERSON_CHECK,
                 style=BTN_SUCCESS,
             ))
         actions.append(types.InlineKeyboardButton(
-            text="🗑 Удалить",
+            text="Удалить",
             callback_data=f"acc_del:{acc['id']}",
             icon_custom_emoji_id=PE_TRASH,
             style=BTN_DANGER,
@@ -895,7 +901,7 @@ def _accounts_keyboard(accounts: list[dict]) -> types.InlineKeyboardMarkup:
         rows.append(actions)
 
     rows.append([types.InlineKeyboardButton(
-        text="➕ Добавить аккаунт (вход)",
+        text="Добавить аккаунт (вход)",
         callback_data="acc_add",
         icon_custom_emoji_id=PE_LOCK_CLOSED,
         style=BTN_PRIMARY,
@@ -966,7 +972,7 @@ def _format_accounts_list(accounts: list[dict]) -> str:
 
 
 @router.message(Command("accounts"))
-@router.message(F.text == "👥 Аккаунты")
+@router.message(F.text == LBL_ACCOUNTS)
 async def cmd_accounts(message: types.Message):
     if await _deny_non_admin(message):
         return
@@ -1177,7 +1183,7 @@ async def global_cancel(message: types.Message, state: FSMContext):
 
 
 @router.message(Command("me"))
-@router.message(F.text == "📊 Мой профиль")
+@router.message(F.text == LBL_MY_PROFILE)
 async def cmd_me(message: types.Message):
     """Показывает информацию о пользователе и его статистику."""
     user = message.from_user

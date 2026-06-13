@@ -34,6 +34,7 @@ from src.premium_emoji import (
     PE_BOT, PE_CROSS, PE_CHECK, PE_PENCIL, PE_PARTY, PE_EYE, PE_WRITE,
     PE_ARROW_DOWN_LIST, PE_INFO, PE_BELL, PE_PROFILE,
 )
+from src.labels import LBL_CANCEL, LBL_SKIP, LBL_REPORT_BUG, LBL_BUG_REPORTS
 from src.effects import EFFECT_LIKE
 
 router = Router()
@@ -64,7 +65,7 @@ class AdminReplyForm(StatesGroup):
 def _bug_cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(
-            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+            text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
             style=BTN_DANGER)]],
         resize_keyboard=True,
     )
@@ -74,10 +75,10 @@ def _photo_step_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(
-                text="⏭ Пропустить", icon_custom_emoji_id=PE_CHECK,
+                text=LBL_SKIP, icon_custom_emoji_id=PE_CHECK,
                 style=BTN_SUCCESS)],
             [types.KeyboardButton(
-                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                 style=BTN_DANGER)],
         ],
         resize_keyboard=True,
@@ -88,16 +89,16 @@ def _admin_actions_kb(report_id: int) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [
             types.InlineKeyboardButton(
-                text="👁 В работе", callback_data=f"bug_progress:{report_id}",
+                text="В работе", callback_data=f"bug_progress:{report_id}",
                 icon_custom_emoji_id=PE_EYE,
                 style=BTN_PRIMARY),
             types.InlineKeyboardButton(
-                text="✅ Закрыть", callback_data=f"bug_close:{report_id}",
+                text="Закрыть", callback_data=f"bug_close:{report_id}",
                 icon_custom_emoji_id=PE_CHECK,
                 style=BTN_SUCCESS),
         ],
         [types.InlineKeyboardButton(
-            text="✍️ Ответить пользователю",
+            text="Ответить пользователю",
             callback_data=f"bug_reply:{report_id}",
             icon_custom_emoji_id=PE_WRITE,
             style=BTN_PRIMARY)],
@@ -107,7 +108,7 @@ def _admin_actions_kb(report_id: int) -> types.InlineKeyboardMarkup:
 # ---------------- Сценарий пользователя ----------------
 
 @router.message(Command("bug"))
-@router.message(F.text == "🐞 Сообщить о баге")
+@router.message(F.text == LBL_REPORT_BUG)
 async def bug_start(message: types.Message, state: FSMContext):
     if not check_access(message.from_user.id):
         return
@@ -147,7 +148,7 @@ async def bug_start(message: types.Message, state: FSMContext):
 
 
 async def _bug_cancel(message: types.Message, state: FSMContext) -> bool:
-    if message.text and message.text.strip() == "❌ Отмена":
+    if message.text and message.text.strip() == LBL_CANCEL:
         await state.clear()
         await message.answer(
             f"{te(PE_CROSS, '❌')} Отмена. Баг-репорт не отправлен.",
@@ -181,12 +182,12 @@ async def bug_text(message: types.Message, state: FSMContext):
     await state.set_state(BugForm.waiting_for_photo)
     await message.answer(
         f"{te(PE_PENCIL, '📸')} Если есть <b>скриншот</b> — пришлите его сейчас. "
-        "Если нет — нажмите «⏭ Пропустить».",
+        f"Если нет — нажмите «{LBL_SKIP}».",
         reply_markup=_photo_step_kb(),
     )
 
 
-@router.message(BugForm.waiting_for_photo, F.text == "⏭ Пропустить")
+@router.message(BugForm.waiting_for_photo, F.text == LBL_SKIP)
 async def bug_skip_photo(message: types.Message, state: FSMContext, bot: Bot):
     await _finalize_report(message, state, bot, photo_file_id=None)
 
@@ -234,7 +235,7 @@ async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
                 await message.answer(
                     f"{te(PE_CROSS, '🚫')} <b>Скриншот не принят:</b> "
                     f"{escape(reason)}.\n\n"
-                    "Пришлите другой скриншот или нажмите «⏭ Пропустить».",
+                    f"Пришлите другой скриншот или нажмите «{LBL_SKIP}».",
                     reply_markup=_photo_step_kb(),
                 )
                 return
@@ -247,7 +248,7 @@ async def bug_photo_invalid(message: types.Message, state: FSMContext):
     if await _bug_cancel(message, state):
         return
     await message.answer(
-        "Ожидаю скриншот картинкой или нажатие «⏭ Пропустить».",
+        f"Ожидаю скриншот картинкой или нажатие «{LBL_SKIP}».",
         reply_markup=_photo_step_kb(),
     )
 
@@ -329,7 +330,7 @@ async def _notify_admins(bot: Bot, report_id: int) -> None:
 # ---------------- Админская сторона ----------------
 
 @router.message(Command("bugs"))
-@router.message(F.text == "🐞 Баг-репорты")
+@router.message(F.text == LBL_BUG_REPORTS)
 async def cmd_bugs(message: types.Message):
     if not is_admin(message.from_user.id):
         return
@@ -417,7 +418,7 @@ async def bug_reply_start(call: types.CallbackQuery, state: FSMContext):
         f"баг-репорту <b>#{rid}</b>:",
         reply_markup=types.ReplyKeyboardMarkup(
             keyboard=[[types.KeyboardButton(
-                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                 style=BTN_DANGER)]],
             resize_keyboard=True,
         ),
@@ -430,7 +431,7 @@ async def bug_reply_send(message: types.Message, state: FSMContext, bot: Bot):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    if message.text and message.text.strip() == "❌ Отмена":
+    if message.text and message.text.strip() == LBL_CANCEL:
         await state.clear()
         await message.answer(
             f"{te(PE_CROSS, '❌')} Отменено.",

@@ -66,6 +66,11 @@ from src.premium_emoji import (
     PE_SEND_UP, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_EYE, PE_GEOTAG,
     PE_MEGAPHONE, PE_ARROW_DOWN_LIST, PE_TIME_PASSED, PE_ADD_TEXT,
 )
+from src.labels import (
+    LBL_NEW_COMPLAINT, LBL_MY_COMPLAINTS, LBL_MY_TEMPLATES, LBL_FIND_COMPLAINT,
+    LBL_CANCEL, LBL_NO_DATE, LBL_FROM_TEMPLATE, LBL_USE_TEMPLATE,
+    LBL_USE_UPLOADED, LBL_SEND_TO_FORUM, LBL_TO_QUEUE,
+)
 from src.status_monitor import status_label
 from src.validation import (
     validate_nickname,
@@ -207,11 +212,11 @@ def _servers_keyboard(servers: list, page: int) -> types.InlineKeyboardMarkup:
     rows.append(nav)
     # Технический раздел — отдельный глобальный раздел (не игровой сервер)
     rows.append([types.InlineKeyboardButton(
-        text="🛠 Технический раздел", callback_data="tech_open",
+        text="Технический раздел", callback_data="tech_open",
         icon_custom_emoji_id=PE_BOT,
         style=BTN_PRIMARY)])
     rows.append([types.InlineKeyboardButton(
-        text="❌ Отмена", callback_data="cmpl_cancel",
+        text="Отмена", callback_data="cmpl_cancel",
         icon_custom_emoji_id=PE_CROSS,
         style=BTN_DANGER)])
 
@@ -248,7 +253,7 @@ def _tech_servers_keyboard(servers: list[str], page: int) -> types.InlineKeyboar
     rows.append([types.InlineKeyboardButton(
         text="◀️ К серверам", callback_data="srv_back")])
     rows.append([types.InlineKeyboardButton(
-        text="❌ Отмена", callback_data="cmpl_cancel",
+        text="Отмена", callback_data="cmpl_cancel",
         icon_custom_emoji_id=PE_CROSS,
         style=BTN_DANGER)])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -260,20 +265,20 @@ def _tech_kind_keyboard(server_key: str, has_tech: bool,
     rows: list[list[types.InlineKeyboardButton]] = []
     if has_tech:
         rows.append([types.InlineKeyboardButton(
-            text="🛠 Технический вопрос",
+            text="Технический вопрос",
             callback_data=f"tech_kind:tech:{server_key}",
             icon_custom_emoji_id=PE_BOT,
             style=BTN_PRIMARY)])
     if has_staff:
         rows.append([types.InlineKeyboardButton(
-            text="👨‍🔧 Жалоба на тех. специалиста",
+            text="Жалоба на тех. специалиста",
             callback_data=f"tech_kind:staff:{server_key}",
             icon_custom_emoji_id=PE_PERSON_CROSS,
             style=BTN_PRIMARY)])
     rows.append([types.InlineKeyboardButton(
         text="◀️ К выбору сервера", callback_data="tech_open")])
     rows.append([types.InlineKeyboardButton(
-        text="❌ Отмена", callback_data="cmpl_cancel",
+        text="Отмена", callback_data="cmpl_cancel",
         icon_custom_emoji_id=PE_CROSS,
         style=BTN_DANGER)])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -292,7 +297,7 @@ def _categories_keyboard(categories: dict[str, tuple[str, int]]) -> types.Inline
     rows.append([types.InlineKeyboardButton(
         text="◀️ К серверам", callback_data="srv_back")])
     rows.append([types.InlineKeyboardButton(
-        text="❌ Отмена", callback_data="cmpl_cancel",
+        text="Отмена", callback_data="cmpl_cancel",
         icon_custom_emoji_id=PE_CROSS,
         style=BTN_DANGER)])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
@@ -301,7 +306,7 @@ def _categories_keyboard(categories: dict[str, tuple[str, int]]) -> types.Inline
 def _cancel_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(
-            text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+            text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
             style=BTN_DANGER)]],
         resize_keyboard=True,
     )
@@ -311,9 +316,9 @@ def _date_kb() -> types.ReplyKeyboardMarkup:
     return types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(
-                text="➖ Без даты", icon_custom_emoji_id=PE_TIME_PASSED)],
+                text=LBL_NO_DATE, icon_custom_emoji_id=PE_TIME_PASSED)],
             [types.KeyboardButton(
-                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                 style=BTN_DANGER)],
         ],
         resize_keyboard=True,
@@ -328,13 +333,13 @@ async def _ask_date(message: types.Message, key: str) -> None:
             f"{te(PE_CALENDAR, '📅')} <b>Дата и время произошедшей "
             "технической проблемы</b> "
             "(например: <code>15.05.2026 19:30</code>).\n\n"
-            f"Если не помните точно — нажмите <b>«➖ Без даты»</b>."
+            f"Если не помните точно — нажмите <b>«{LBL_NO_DATE}»</b>."
         )
     else:
         prompt = (
             f"{te(PE_CALENDAR, '📅')} <b>Дата выдачи/получения наказания</b> "
             "(например: <code>15.05.2026 19:30</code>).\n\n"
-            f"Если дата неизвестна — нажмите <b>«➖ Без даты»</b>: "
+            f"Если дата неизвестна — нажмите <b>«{LBL_NO_DATE}»</b>: "
             "в жалобе будет прочерк."
         )
     await message.answer(prompt, reply_markup=_date_kb())
@@ -343,7 +348,7 @@ async def _ask_date(message: types.Message, key: str) -> None:
 # ---------------- Старт сценария ----------------
 
 @router.message(Command("new_complaint"))
-@router.message(F.text == "📝 Подать жалобу")
+@router.message(F.text == LBL_NEW_COMPLAINT)
 async def start_complaint_flow(message: types.Message, state: FSMContext):
     if not check_access(message.from_user.id):
         return
@@ -616,16 +621,16 @@ def _templates_keyboard(builtin: dict[str, dict[str, str]],
     # Пользовательские шаблоны — по одному в ряд (могут быть длинные имена)
     for ut in user_templates:
         rows.append([types.InlineKeyboardButton(
-            text=f"⭐ {ut['name']}",
+            text=f"{ut['name']}",
             callback_data=f"tpl_use:u:{ut['id']}",
             icon_custom_emoji_id=PE_GIFT,
         )])
     rows.append([
         types.InlineKeyboardButton(
-            text="✍️ Своё описание", callback_data="tpl_skip",
+            text="Своё описание", callback_data="tpl_skip",
             icon_custom_emoji_id=PE_WRITE),
         types.InlineKeyboardButton(
-            text="➕ Создать шаблон", callback_data="tpl_new",
+            text="Создать шаблон", callback_data="tpl_new",
             icon_custom_emoji_id=PE_PENCIL,
             style=BTN_SUCCESS),
     ])
@@ -633,7 +638,7 @@ def _templates_keyboard(builtin: dict[str, dict[str, str]],
         types.InlineKeyboardButton(
             text="◀️ К серверам", callback_data="srv_back"),
         types.InlineKeyboardButton(
-            text="❌ Отмена", callback_data="cmpl_cancel",
+            text="Отмена", callback_data="cmpl_cancel",
             icon_custom_emoji_id=PE_CROSS,
             style=BTN_DANGER),
     ])
@@ -875,8 +880,8 @@ async def cb_cancel(call: types.CallbackQuery, state: FSMContext):
 
 
 async def _cancel_via_text(message: types.Message, state: FSMContext) -> bool:
-    """Если пользователь прислал '❌ Отмена' — выходим из сценария."""
-    if message.text and message.text.strip() == "❌ Отмена":
+    """Если пользователь прислал 'Отмена' — выходим из сценария."""
+    if message.text and message.text.strip() == LBL_CANCEL:
         logger.info("Пользователь %s отменил сценарий жалобы (через текстовую кнопку).",
                     describe_user(message.from_user))
         await state.clear()
@@ -1002,15 +1007,15 @@ async def _ask_summary(message: types.Message, key: str, state: FSMContext):
     if template_summary:
         prompt += (
             f"\n\n<i>Из шаблона:</i> <code>{escape(template_summary)}</code>"
-            "\nНажмите «✅ Из шаблона», чтобы использовать его."
+            f"\nНажмите «{LBL_FROM_TEMPLATE}», чтобы использовать его."
         )
         kb = types.ReplyKeyboardMarkup(
             keyboard=[
                 [types.KeyboardButton(
-                    text="✅ Из шаблона", icon_custom_emoji_id=PE_FILE,
+                    text=LBL_FROM_TEMPLATE, icon_custom_emoji_id=PE_FILE,
                     style=BTN_SUCCESS)],
                 [types.KeyboardButton(
-                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                    text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                     style=BTN_DANGER)],
             ],
             resize_keyboard=True,
@@ -1030,7 +1035,7 @@ async def process_punishment_date(message: types.Message, state: FSMContext):
     text = (message.text or "").strip()
 
     # Кнопка «Без даты» — пишем в жалобе прочерк, дата необязательна
-    if text == "➖ Без даты":
+    if text == LBL_NO_DATE:
         value = "—"
     else:
         ok, value = validate_date(text)
@@ -1039,14 +1044,14 @@ async def process_punishment_date(message: types.Message, state: FSMContext):
                         describe_user(message.from_user), value)
             await message.answer(
                 f"{te(PE_CROSS, '❌')} {escape(value)}\n\nПопробуйте ещё раз "
-                "или нажмите «➖ Без даты»:",
+                f"или нажмите «{LBL_NO_DATE}»:",
                 reply_markup=types.ReplyKeyboardMarkup(
                     keyboard=[
                         [types.KeyboardButton(
-                            text="➖ Без даты",
+                            text=LBL_NO_DATE,
                             icon_custom_emoji_id=PE_TIME_PASSED)],
                         [types.KeyboardButton(
-                            text="❌ Отмена",
+                            text=LBL_CANCEL,
                             icon_custom_emoji_id=PE_CROSS,
                             style=BTN_DANGER)],
                     ],
@@ -1073,7 +1078,7 @@ async def process_summary(message: types.Message, state: FSMContext):
     data = await state.get_data()
 
     # Кнопка "Из шаблона" — берём заранее заготовленную суть
-    if text == "✅ Из шаблона" and data.get("template_summary"):
+    if text == LBL_FROM_TEMPLATE and data.get("template_summary"):
         value = data["template_summary"]
     else:
         ok, value = validate_summary(text)
@@ -1117,11 +1122,11 @@ async def process_summary(message: types.Message, state: FSMContext):
         kb = types.ReplyKeyboardMarkup(
             keyboard=[
                 [types.KeyboardButton(
-                    text="✅ Использовать шаблон",
+                    text=LBL_USE_TEMPLATE,
                     icon_custom_emoji_id=PE_FILE,
                     style=BTN_SUCCESS)],
                 [types.KeyboardButton(
-                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                    text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                     style=BTN_DANGER)],
             ],
             resize_keyboard=True,
@@ -1141,7 +1146,7 @@ async def process_description(message: types.Message, state: FSMContext):
     text = (message.text or "").strip()
     data = await state.get_data()
 
-    if text == "✅ Использовать шаблон" and data.get("template_description"):
+    if text == LBL_USE_TEMPLATE and data.get("template_description"):
         value = data["template_description"]
     else:
         ok, value = validate_description(text)
@@ -1272,7 +1277,7 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
     await status_msg.edit_text(
         f"{te(PE_CHECK, '✅')} Загружено: "
         f"<a href=\"{escape(result)}\">{escape(result)}</a>\n\n"
-        "Можете прислать ещё скриншот, либо нажмите кнопку «✅ Использовать загруженное» "
+        "Можете прислать ещё скриншот, либо нажмите кнопку «Использовать загруженное» "
         "или пришлите дополнительные ссылки текстом.",
         disable_web_page_preview=True,
     )
@@ -1280,11 +1285,11 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
     use_kb = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(
-                text="✅ Использовать загруженное",
+                text=LBL_USE_UPLOADED,
                 icon_custom_emoji_id=PE_PAPERCLIP,
                 style=BTN_SUCCESS)],
             [types.KeyboardButton(
-                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                 style=BTN_DANGER)],
         ],
         resize_keyboard=True,
@@ -1365,18 +1370,18 @@ async def process_proof_video(message: types.Message, state: FSMContext, bot: Bo
     await status_msg.edit_text(
         f"{te(PE_CHECK, '✅')} Загружено: "
         f"<a href=\"{escape(result)}\">{escape(result)}</a>\n\n"
-        "Можете прислать ещё файлы, либо нажмите кнопку «✅ Использовать загруженное».",
+        "Можете прислать ещё файлы, либо нажмите кнопку «Использовать загруженное».",
         disable_web_page_preview=True,
     )
 
     use_kb = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(
-                text="✅ Использовать загруженное",
+                text=LBL_USE_UPLOADED,
                 icon_custom_emoji_id=PE_PAPERCLIP,
                 style=BTN_SUCCESS)],
             [types.KeyboardButton(
-                text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                 style=BTN_DANGER)],
         ],
         resize_keyboard=True,
@@ -1416,15 +1421,15 @@ async def _finalize_preview(message: types.Message, state: FSMContext) -> None:
     confirm_kb = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(
-                text="✅ Отправить на форум",
+                text=LBL_SEND_TO_FORUM,
                 icon_custom_emoji_id=PE_SEND_UP,
                 style=BTN_SUCCESS)],
             [
                 types.KeyboardButton(
-                    text="📦 В очередь", icon_custom_emoji_id=PE_BOX,
+                    text=LBL_TO_QUEUE, icon_custom_emoji_id=PE_BOX,
                     style=BTN_PRIMARY),
                 types.KeyboardButton(
-                    text="❌ Отмена", icon_custom_emoji_id=PE_CROSS,
+                    text=LBL_CANCEL, icon_custom_emoji_id=PE_CROSS,
                     style=BTN_DANGER),
             ],
         ],
@@ -1485,9 +1490,9 @@ async def process_proof(message: types.Message, state: FSMContext):
     text = (message.text or "").strip()
     data = await state.get_data()
 
-    # Если пользователь нажал кнопку "✅ Использовать загруженное" — берём
+    # Если пользователь нажал кнопку "Использовать загруженное" — берём
     # накопленные ссылки из state
-    if text == "✅ Использовать загруженное":
+    if text == LBL_USE_UPLOADED:
         accumulated = (data.get("_uploaded_links") or "").strip()
         if not accumulated:
             await message.answer(
@@ -1549,7 +1554,7 @@ async def process_proof(message: types.Message, state: FSMContext):
     await _finalize_preview(message, state)
 
 
-@router.message(ComplaintForm.waiting_for_confirm, F.text == "📦 В очередь")
+@router.message(ComplaintForm.waiting_for_confirm, F.text == LBL_TO_QUEUE)
 async def process_enqueue(message: types.Message, state: FSMContext):
     """Кладёт жалобу в очередь — фоновый процессор её опубликует, когда
     освободится свободный аккаунт. Полезно когда все аккаунты в кулдауне."""
@@ -1586,7 +1591,7 @@ async def process_enqueue(message: types.Message, state: FSMContext):
     )
 
 
-@router.message(ComplaintForm.waiting_for_confirm, F.text == "✅ Отправить на форум")
+@router.message(ComplaintForm.waiting_for_confirm, F.text == LBL_SEND_TO_FORUM)
 async def process_confirm(message: types.Message, state: FSMContext):
     if not check_access(message.from_user.id):
         return
@@ -1833,7 +1838,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-@router.message(ComplaintForm.waiting_for_confirm, F.text == "❌ Отмена")
+@router.message(ComplaintForm.waiting_for_confirm, F.text == LBL_CANCEL)
 async def cancel_confirm(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
@@ -1854,7 +1859,7 @@ def _complaints_list_keyboard(complaints: list[dict]) -> types.InlineKeyboardMar
             icon_custom_emoji_id=PE_ARROW_DOWN_LIST,
         )])
     rows.append([types.InlineKeyboardButton(
-        text="🔄 Обновить", callback_data="cmpl_refresh",
+        text="Обновить", callback_data="cmpl_refresh",
         icon_custom_emoji_id=PE_LOADING,
         style=BTN_PRIMARY,
     )])
@@ -1867,20 +1872,20 @@ def _complaint_detail_keyboard(complaint_id: int,
     rows: list[list[types.InlineKeyboardButton]] = []
     if has_thread:
         rows.append([types.InlineKeyboardButton(
-            text="✏️ Редактировать на форуме",
+            text="Редактировать на форуме",
             callback_data=f"cmpl_edit:{complaint_id}",
             icon_custom_emoji_id=PE_PENCIL,
             style=BTN_PRIMARY,
         )])
         rows.append([
             types.InlineKeyboardButton(
-                text="🗑 Удалить с форума",
+                text="Удалить с форума",
                 callback_data=f"cmpl_delf:{complaint_id}",
                 icon_custom_emoji_id=PE_TRASH,
                 style=BTN_DANGER),
         ])
     rows.append([types.InlineKeyboardButton(
-        text="🗂 Удалить из истории",
+        text="Удалить из истории",
         callback_data=f"cmpl_del:{complaint_id}",
         icon_custom_emoji_id=PE_TRASH,
         style=BTN_DANGER,
@@ -1923,7 +1928,7 @@ def _format_complaints_list(complaints: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-@router.message(F.text == "📜 Мои жалобы")
+@router.message(F.text == LBL_MY_COMPLAINTS)
 async def show_my_complaints(message: types.Message):
     if not check_access(message.from_user.id):
         return
@@ -2138,7 +2143,7 @@ async def cmpl_del(call: types.CallbackQuery):
 # ---------------- Управление пользовательскими шаблонами ----------------
 
 @router.message(Command("templates"))
-@router.message(F.text == "📋 Мои шаблоны")
+@router.message(F.text == LBL_MY_TEMPLATES)
 async def cmd_templates(message: types.Message):
     """Показывает пользовательские шаблоны (по всем категориям)."""
     if not check_access(message.from_user.id):
@@ -2163,13 +2168,13 @@ async def cmd_templates(message: types.Message):
     for ut in user_tpls:
         rows.append([
             types.InlineKeyboardButton(
-                text=f"✏️ {ut['name']}",
+                text=f"{ut['name']}",
                 callback_data=f"utpl_edit:{ut['id']}",
                 icon_custom_emoji_id=PE_PENCIL,
                 style=BTN_PRIMARY,
             ),
             types.InlineKeyboardButton(
-                text="🗑",
+                text="Удалить",
                 callback_data=f"utpl_del:{ut['id']}",
                 icon_custom_emoji_id=PE_TRASH,
                 style=BTN_DANGER,
@@ -2226,7 +2231,7 @@ async def utpl_del(call: types.CallbackQuery):
         return
 
     rows = [[types.InlineKeyboardButton(
-        text=f"🗑 {ut['name']}", callback_data=f"utpl_del:{ut['id']}",
+        text=f"{ut['name']}", callback_data=f"utpl_del:{ut['id']}",
         icon_custom_emoji_id=PE_TRASH,
         style=BTN_DANGER,
     )] for ut in user_tpls]
@@ -2276,15 +2281,15 @@ async def utpl_edit_start(call: types.CallbackQuery, state: FSMContext):
         "Что меняем?"
     )
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="✏️ Имя",
+        [types.InlineKeyboardButton(text="Имя",
             callback_data=f"utpl_efield:name:{tid}",
             icon_custom_emoji_id=PE_ADD_TEXT,
             style=BTN_PRIMARY)],
-        [types.InlineKeyboardButton(text="✏️ Суть",
+        [types.InlineKeyboardButton(text="Суть",
             callback_data=f"utpl_efield:summary:{tid}",
             icon_custom_emoji_id=PE_PENCIL,
             style=BTN_PRIMARY)],
-        [types.InlineKeyboardButton(text="✏️ Описание",
+        [types.InlineKeyboardButton(text="Описание",
             callback_data=f"utpl_efield:description:{tid}",
             icon_custom_emoji_id=PE_FILE,
             style=BTN_PRIMARY)],
@@ -2424,11 +2429,11 @@ async def cmpl_edit_start(call: types.CallbackQuery, state: FSMContext):
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(
-            text="📝 Описание", callback_data=f"cmpl_efield:desc:{cid}",
+            text="Описание", callback_data=f"cmpl_efield:desc:{cid}",
             icon_custom_emoji_id=PE_FILE,
             style=BTN_PRIMARY)],
         [types.InlineKeyboardButton(
-            text="🔗 Доказательства", callback_data=f"cmpl_efield:proof:{cid}",
+            text="Доказательства", callback_data=f"cmpl_efield:proof:{cid}",
             icon_custom_emoji_id=PE_LINK,
             style=BTN_PRIMARY)],
         [types.InlineKeyboardButton(
@@ -2708,13 +2713,13 @@ async def cmd_draft(message: types.Message, state: FSMContext):
     )
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(
-            text="📝 Продолжить с этого шага",
+            text="Продолжить с этого шага",
             callback_data="draft_resume",
             icon_custom_emoji_id=PE_PENCIL,
             style=BTN_SUCCESS,
         )],
         [types.InlineKeyboardButton(
-            text="🗑 Удалить черновик",
+            text="Удалить черновик",
             callback_data="draft_delete",
             icon_custom_emoji_id=PE_TRASH,
             style=BTN_DANGER,
@@ -2802,7 +2807,7 @@ def _find_result_keyboard(
         if url:
             rows.append([
                 types.InlineKeyboardButton(
-                    text=f"🔗 #{item['id']} {escape(item['nickname'][:18])}",
+                    text=f"#{item['id']} {escape(item['nickname'][:18])}",
                     url=url,
                     icon_custom_emoji_id=PE_LINK,
                 )
@@ -2869,7 +2874,7 @@ def _format_find_results(
 
 
 @router.message(Command("find"))
-@router.message(F.text.startswith("🔍 Найти жалобу"))
+@router.message(F.text == LBL_FIND_COMPLAINT)
 async def cmd_find(message: types.Message):
     """Поиск жалоб по нику цели.
 

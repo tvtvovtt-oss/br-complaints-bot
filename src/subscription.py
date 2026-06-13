@@ -89,7 +89,7 @@ def build_subscribe_keyboard(channels: list[str]) -> InlineKeyboardMarkup:
         url = f"https://t.me/{ch}"
         rows.append([
             InlineKeyboardButton(
-                text=f"📢 Подписаться на @{ch}",
+                text=f"Подписаться на @{ch}",
                 url=url,
                 icon_custom_emoji_id=PE_MEGAPHONE,
                 style=BTN_PRIMARY,
@@ -97,7 +97,7 @@ def build_subscribe_keyboard(channels: list[str]) -> InlineKeyboardMarkup:
         ])
     rows.append([
         InlineKeyboardButton(
-            text="✅ Проверить подписку",
+            text="Проверить подписку",
             callback_data=RESUB_CHECK_CB,
             icon_custom_emoji_id=PE_CHECK,
             style=BTN_SUCCESS,

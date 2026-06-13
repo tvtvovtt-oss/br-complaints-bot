@@ -26,6 +26,9 @@ from src.middleware import (
     UserTrackingMiddleware,
 )
 from src.subscription import SubscriptionMiddleware, set_middleware as set_sub_middleware
+from src.premium_emoji import (
+    te, PE_LOADING, PE_PEOPLE, PE_PENCIL, PE_LOCK_CLOSED, PE_BOT,
+)
 from src.status_monitor import status_monitor_loop
 from src.queue_processor import queue_processor_loop
 from src.error_reporter import install as install_error_reporter
@@ -150,33 +153,36 @@ async def main():
     await asyncio.sleep(2)
 
     # Регистрируем команды для автокомплита в Telegram (когда юзер набирает /)
+    # ВАЖНО: описания команд в Telegram — это всегда обычный текст, кастомные
+    # (премиум) эмодзи там не поддерживаются API. Поэтому здесь намеренно без
+    # эмодзи — чтобы не было «обычных» эмодзи в списке команд.
     public_commands = [
         BotCommand(command="start", description="Главное меню"),
-        BotCommand(command="new_complaint", description="📝 Подать жалобу"),
-        BotCommand(command="templates", description="📋 Мои шаблоны"),
-        BotCommand(command="bug", description="🐞 Сообщить о баге"),
-        BotCommand(command="me", description="👤 Мой профиль"),
-        BotCommand(command="cancel", description="❌ Отменить действие"),
-        BotCommand(command="help", description="📖 Справка"),
+        BotCommand(command="new_complaint", description="Подать жалобу"),
+        BotCommand(command="templates", description="Мои шаблоны"),
+        BotCommand(command="bug", description="Сообщить о баге"),
+        BotCommand(command="me", description="Мой профиль"),
+        BotCommand(command="cancel", description="Отменить действие"),
+        BotCommand(command="help", description="Справка"),
     ]
     admin_commands = public_commands + [
-        BotCommand(command="login", description="🔐 Войти по паролю"),
-        BotCommand(command="accounts", description="👥 Аккаунты форума"),
-        BotCommand(command="sync", description="🔄 Синхронизировать форум"),
-        BotCommand(command="check", description="🔍 Проверить статусы жалоб"),
-        BotCommand(command="checkurl", description="🔍 Проверить статус темы"),
-        BotCommand(command="stats", description="📊 Статистика"),
-        BotCommand(command="broadcast", description="📢 Рассылка"),
-        BotCommand(command="queue", description="📦 Очередь жалоб"),
-        BotCommand(command="complaints", description="📋 Все жалобы (просмотр)"),
-        BotCommand(command="delcomplaint", description="🗂 Удалить жалобу по id"),
-        BotCommand(command="bugs", description="🐞 Список баг-репортов"),
-        BotCommand(command="ban", description="🚫 Забанить пользователя"),
-        BotCommand(command="unban", description="✅ Разбанить пользователя"),
-        BotCommand(command="banlist", description="🚫 Список забаненных"),
-        BotCommand(command="maintenance", description="🔒 Режим обслуживания"),
-        BotCommand(command="dbinfo", description="🛠 Состояние БД"),
-        BotCommand(command="subs", description="🔔 Каналы подписки"),
+        BotCommand(command="login", description="Войти по паролю"),
+        BotCommand(command="accounts", description="Аккаунты форума"),
+        BotCommand(command="sync", description="Синхронизировать форум"),
+        BotCommand(command="check", description="Проверить статусы жалоб"),
+        BotCommand(command="checkurl", description="Проверить статус темы"),
+        BotCommand(command="stats", description="Статистика"),
+        BotCommand(command="broadcast", description="Рассылка"),
+        BotCommand(command="queue", description="Очередь жалоб"),
+        BotCommand(command="complaints", description="Все жалобы (просмотр)"),
+        BotCommand(command="delcomplaint", description="Удалить жалобу по id"),
+        BotCommand(command="bugs", description="Список баг-репортов"),
+        BotCommand(command="ban", description="Забанить пользователя"),
+        BotCommand(command="unban", description="Разбанить пользователя"),
+        BotCommand(command="banlist", description="Список забаненных"),
+        BotCommand(command="maintenance", description="Режим обслуживания"),
+        BotCommand(command="dbinfo", description="Состояние БД"),
+        BotCommand(command="subs", description="Каналы подписки"),
     ]
     try:
         await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
@@ -216,11 +222,11 @@ async def main():
         accs_count = accs_per_admin[0] if accs_per_admin else 0
 
         startup_text = (
-            "🚀 <b>Бот запущен</b>\n\n"
-            f"👥 Известных пользователей: <b>{users_n}</b>\n"
-            f"📝 Жалоб в БД: <b>{total_complaints}</b>\n"
-            f"🔑 Аккаунтов в пуле: <b>{accs_count}</b>\n"
-            f"📡 @{bot_info.username}\n"
+            f"{te(PE_LOADING, '🚀')} <b>Бот запущен</b>\n\n"
+            f"{te(PE_PEOPLE, '👥')} Известных пользователей: <b>{users_n}</b>\n"
+            f"{te(PE_PENCIL, '📝')} Жалоб в БД: <b>{total_complaints}</b>\n"
+            f"{te(PE_LOCK_CLOSED, '🔑')} Аккаунтов в пуле: <b>{accs_count}</b>\n"
+            f"{te(PE_BOT, '📡')} @{bot_info.username}\n"
             f"<i>{platform.python_version()} • {platform.system()}</i>"
         )
         for admin_id in ADMIN_IDS:
