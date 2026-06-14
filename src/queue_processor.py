@@ -33,6 +33,7 @@ from src.database import (
 )
 from src.forum.xenforo import post_complaint, is_auth_error, is_noperm_error
 from src.settings import get_queue_settings, format_seconds
+from src.premium_emoji import te, PE_WARNING, PE_TARGET
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ async def _alert_pool_problem(
         await _notify_admins(
             bot,
             f"queue_pool:{owner_id}:no_accounts",
-            "⚠️ <b>Очередь жалоб ждёт аккаунты</b>\n\n"
+            f"{te(PE_WARNING, '⚠️')} <b>Очередь жалоб ждёт аккаунты</b>\n\n"
             f"Жалоба <code>#{queue_id}</code> на <b>{escape(target)}</b> не может быть опубликована: "
             "в пуле нет ни одного форумного аккаунта.\n\n"
             "Добавьте аккаунт через <code>/login</code> или кнопку <b>🔐 Войти по паролю</b>.",
@@ -124,7 +125,7 @@ async def _alert_pool_problem(
         await _notify_admins(
             bot,
             f"queue_pool:{owner_id}:all_reauth",
-            "⚠️ <b>Очередь жалоб остановилась</b>\n\n"
+            f"{te(PE_WARNING, '⚠️')} <b>Очередь жалоб остановилась</b>\n\n"
             f"Все форумные аккаунты требуют повторный вход: <b>{needs_reauth}/{total}</b>.\n"
             f"Жалоба <code>#{queue_id}</code> на <b>{escape(target)}</b> ждёт рабочий аккаунт.\n\n"
             "Откройте <code>/accounts</code> и перелогиньте аккаунты через <code>/login</code>.",
@@ -217,7 +218,7 @@ async def _process_one(bot: Bot, item: dict, cfg: dict[str, int]) -> None:
         )
         await _notify_user(bot, telegram_id,
             f"🎉 <b>Жалоба из очереди опубликована!</b>\n\n"
-            f"🎯 Цель: <b>{escape(target)}</b>\n"
+            f"{te(PE_TARGET, '🎯')} Цель: <b>{escape(target)}</b>\n"
             f"🔗 <a href=\"{escape(result)}\">Открыть тему на форуме</a>")
     else:
         # AUTH-ошибка — куки протухли, помечаем аккаунт как нужный перелогин.

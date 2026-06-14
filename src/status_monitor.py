@@ -20,6 +20,7 @@ from src.database import (
 )
 from src.forum.xenforo import fetch_complaint_status
 from src.effects import EFFECT_CONFETTI
+from src.premium_emoji import te, PE_COMMENT, PE_SEARCH
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ async def _notify_user(bot: Bot, complaint: dict, new_status: str,
     comment_part = ""
     if admin_comment:
         comment_part = (
-            f"\n\n📝 <b>Комментарий администратора:</b>\n"
+            f"\n\n{te(PE_COMMENT, '💬')} <b>Комментарий администратора:</b>\n"
             f"<blockquote>{escape(admin_comment)}</blockquote>"
         )
 
@@ -104,7 +105,8 @@ async def _notify_user(bot: Bot, complaint: dict, new_status: str,
         effect = None
     elif new_status == "review":
         text = (
-            f"🔎 <b>Вашу жалобу на «{nickname}» взяли на рассмотрение.</b>\n\n"
+            f"{te(PE_SEARCH, '🔎')} <b>Вашу жалобу на «{nickname}» взяли "
+            f"на рассмотрение.</b>\n\n"
             f"Статус: <b>{label}</b>{link_part}{comment_part}\n\n"
             "<i>Скоро придёт окончательное решение.</i>"
         )

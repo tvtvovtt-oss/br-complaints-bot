@@ -36,6 +36,7 @@ from src.premium_emoji import (
     PE_INFO, PE_EYE, PE_PENCIL, PE_TIME_PASSED, PE_SEND_UP, PE_BOT,
     PE_ARROW_DOWN_LIST, PE_PROFILE, PE_FILE, PE_TAG, PE_CLOCK, PE_CALENDAR,
     PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_GEOTAG, PE_WRITE,
+    PE_BAN, PE_TARGET, PE_SEARCH, PE_COMMENT, PE_WARNING,
 )
 from src.labels import (
     LBL_STATS, LBL_BROADCAST, LBL_QUEUE, LBL_MAINTENANCE, LBL_CANCEL,
@@ -97,7 +98,7 @@ async def cmd_stats(message: types.Message):
             lines.append(f"   • <code>{tg_id}</code> — {count}")
 
     if s["top_targets"]:
-        lines.append(f"\n{te(PE_PERSON_CROSS, '🎯')} <b>Топ нарушителей:</b>")
+        lines.append(f"\n{te(PE_TARGET, '🎯')} <b>Топ нарушителей:</b>")
         for nick, count in s["top_targets"]:
             lines.append(f"   • <b>{escape(nick)}</b> — {count}")
 
@@ -317,7 +318,7 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
     summary = (
         f"{te(PE_MEGAPHONE, '📢')} <b>Рассылка завершена</b>\n\n"
         f"{te(PE_SEND_UP, '📤')} Отправлено: <b>{delivered}</b>\n"
-        f"{te(PE_PERSON_CROSS, '🚫')} Заблокировали бота: <b>{blocked}</b>\n"
+        f"{te(PE_BAN, '🚫')} Заблокировали бота: <b>{blocked}</b>\n"
         f"{te(PE_CROSS, '❌')} Других ошибок: <b>{failed}</b>"
     )
     try:
@@ -807,7 +808,7 @@ async def cmd_ban(message: types.Message, command: Command):
     )
     reason_part = f"\nПричина: <i>{escape(reason)}</i>" if reason else ""
     await message.answer(
-        f"{te(PE_PERSON_CROSS, '🚫')} <b>Пользователь {user_id} забанен</b> "
+        f"{te(PE_BAN, '🚫')} <b>Пользователь {user_id} забанен</b> "
         f"{suffix}.{reason_part}"
     )
 
@@ -860,7 +861,7 @@ async def cmd_baninfo(message: types.Message, command: Command):
     by = rec.get("banned_by") or "—"
     when = escape(str(rec.get("banned_at") or "—"))
     await message.answer(
-        f"{te(PE_PERSON_CROSS, '🚫')} <b>Пользователь {raw} забанен</b>\n"
+        f"{te(PE_BAN, '🚫')} <b>Пользователь {raw} забанен</b>\n"
         f"Причина: <i>{reason}</i>\n"
         f"Кто: <code>{by}</code>\n"
         f"Когда: <code>{when}</code>"
@@ -877,7 +878,7 @@ async def cmd_banlist(message: types.Message):
         await message.answer(f"{te(PE_INFO, '📭')} Список банов пуст.")
         return
 
-    lines = [f"{te(PE_PERSON_CROSS, '🚫')} <b>Забанено: {len(bans)}</b>\n"]
+    lines = [f"{te(PE_BAN, '🚫')} <b>Забанено: {len(bans)}</b>\n"]
     for b in bans[:50]:
         reason = escape(b["reason"]) if b["reason"] else "<i>без причины</i>"
         lines.append(
