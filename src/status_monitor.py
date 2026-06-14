@@ -20,7 +20,10 @@ from src.database import (
 )
 from src.forum.xenforo import fetch_complaint_status
 from src.effects import EFFECT_CONFETTI
-from src.premium_emoji import te, PE_COMMENT, PE_SEARCH
+from src.premium_emoji import (
+    te, PE_COMMENT, PE_SEARCH, PE_TIME_PASSED, PE_CHECK, PE_CROSS,
+    PE_LOCK_CLOSED, PE_INFO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,19 +36,19 @@ BATCH_SIZE = 10
 DELAY_BETWEEN_REQUESTS = 1.5
 
 
-# Человекочитаемые подписи для статусов
+# Человекочитаемые подписи для статусов (премиум-эмодзи + обычный fallback)
 STATUS_LABELS = {
-    "pending":  "⏳ Ожидание",
-    "review":   "🔎 На рассмотрении",
-    "accepted": "✅ Принята",
-    "rejected": "❌ Отклонена",
-    "closed":   "🔒 Закрыта",
-    "unknown":  "❔ Неизвестно",
+    "pending":  f"{te(PE_TIME_PASSED, '⏳')} Ожидание",
+    "review":   f"{te(PE_SEARCH, '🔎')} На рассмотрении",
+    "accepted": f"{te(PE_CHECK, '✅')} Принята",
+    "rejected": f"{te(PE_CROSS, '❌')} Отклонена",
+    "closed":   f"{te(PE_LOCK_CLOSED, '🔒')} Закрыта",
+    "unknown":  f"{te(PE_INFO, '❔')} Неизвестно",
 }
 
 
 def status_label(status: str) -> str:
-    return STATUS_LABELS.get(status, f"❔ {status}")
+    return STATUS_LABELS.get(status, f"{te(PE_INFO, '❔')} {status}")
 
 
 async def _notify_user(bot: Bot, complaint: dict, new_status: str,

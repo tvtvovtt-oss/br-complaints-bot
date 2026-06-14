@@ -41,7 +41,7 @@ from src.premium_emoji import (
     PE_LINK, PE_INFO, PE_BOT, PE_EYE, PE_SEND_UP, PE_BELL, PE_CLOCK, PE_PARTY,
     PE_WRITE, PE_GEOTAG, PE_BOX, PE_CALENDAR, PE_TAG, PE_LOADING, PE_CHART_STATS,
     PE_CHART_GROW, PE_HOUSE, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_GIFT,
-    PE_ARROW_DOWN_LIST,
+    PE_ARROW_DOWN_LIST, PE_STAR,
 )
 from src.labels import (
     LBL_NEW_COMPLAINT, LBL_MY_COMPLAINTS, LBL_MY_TEMPLATES, LBL_MY_PROFILE,
@@ -451,7 +451,7 @@ async def cmd_start(message: types.Message):
             f"{te(PE_FILE, '📁')} Альтернатива — пришлите готовый файл "
             "<code>cookies.json</code>.\n\n"
             f"{te(PE_LOADING, '🔄')} После входа выполните "
-            "<b>🔄 Синхронизировать форум</b>."
+            "<b>Синхронизировать форум</b>."
         )
     else:
         welcome_text = (
@@ -610,7 +610,7 @@ async def check_forum_status(message: types.Message):
         f"{te(PE_CROSS, '❌')} {fail_count}\n"
     ]
     for acc, ok, info in results:
-        marker_active = " ⭐" if acc["is_active"] else ""
+        marker_active = f" {te(PE_STAR, '⭐')}" if acc["is_active"] else ""
         if ok:
             lines.append(
                 f"{te(PE_CHECK, '✅')} <b>{escape(acc['username'])}</b>"
@@ -874,13 +874,13 @@ def _accounts_keyboard(accounts: list[dict]) -> types.InlineKeyboardMarkup:
     переключиться (если не активен) и удалить."""
     rows: list[list[types.InlineKeyboardButton]] = []
     for acc in accounts:
-        marker = "✅ " if acc["is_active"] else ""
-        # Первая строка: имя как заголовок (без действия)
+        # Активный аккаунт помечаем премиум-галочкой в ИКОНКЕ кнопки —
+        # в тексте кнопки премиум-эмодзи Telegram не отображает.
         rows.append([
             types.InlineKeyboardButton(
-                text=f"{marker}{acc['username']}",
+                text=acc['username'],
                 callback_data=f"acc_noop:{acc['id']}",
-                icon_custom_emoji_id=PE_PROFILE,
+                icon_custom_emoji_id=PE_CHECK if acc["is_active"] else PE_PROFILE,
             )
         ])
         # Вторая строка: действия

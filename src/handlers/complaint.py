@@ -65,7 +65,7 @@ from src.premium_emoji import (
     PE_MEDIA_PHOTO, PE_FILE, PE_BELL, PE_GIFT, PE_CLOCK, PE_WRITE, PE_BOT,
     PE_SEND_UP, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_EYE, PE_GEOTAG,
     PE_MEGAPHONE, PE_ARROW_DOWN_LIST, PE_TIME_PASSED, PE_ADD_TEXT,
-    PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT,
+    PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_STAR,
 )
 from src.labels import (
     LBL_NEW_COMPLAINT, LBL_MY_COMPLAINTS, LBL_MY_TEMPLATES, LBL_FIND_COMPLAINT,
@@ -633,7 +633,7 @@ def _templates_keyboard(builtin: dict[str, dict[str, str]],
         rows.append([types.InlineKeyboardButton(
             text=f"{ut['name']}",
             callback_data=f"tpl_use:u:{ut['id']}",
-            icon_custom_emoji_id=PE_GIFT,
+            icon_custom_emoji_id=PE_STAR,
         )])
     rows.append([
         types.InlineKeyboardButton(
@@ -733,7 +733,7 @@ async def tpl_use(call: types.CallbackQuery, state: FSMContext):
             return
         summary = ut["summary"]
         description = ut["description"]
-        name = f"⭐ {ut['name']}"
+        name = f"{te(PE_STAR, '⭐')} {ut['name']}"
 
     await state.update_data(template_summary=summary, template_description=description)
     await state.set_state(ComplaintForm.waiting_for_your_nickname)
@@ -2172,7 +2172,7 @@ async def cmd_templates(message: types.Message):
         await message.answer(
             f"{te(PE_FILE, '📋')} У вас пока нет своих шаблонов.\n\n"
             "Чтобы создать — выберите при подаче жалобы кнопку "
-            "<b>➕ Создать шаблон</b>."
+            f"<b>{te(PE_PENCIL, '➕')} Создать шаблон</b>."
         )
         return
 
@@ -2198,7 +2198,7 @@ async def cmd_templates(message: types.Message):
         "players": "🎮 игроки", "admins": "🛡 админы",
         "leaders": "👑 лидеры", "appeals": "⚖️ обжалования",
     }
-    lines = [f"{te(PE_GIFT, '⭐')} <b>Ваши шаблоны жалоб:</b>\n"]
+    lines = [f"{te(PE_STAR, '⭐')} <b>Ваши шаблоны жалоб:</b>\n"]
     for ut in user_tpls:
         lines.append(
             f"<b>{escape(ut['name'])}</b> "
@@ -2207,7 +2207,8 @@ async def cmd_templates(message: types.Message):
             f"   <i>Описание:</i> {escape(ut['description'][:120])}"
             f"{'…' if len(ut['description']) > 120 else ''}"
         )
-    lines.append("\n<i>✏️ — изменить, 🗑 — удалить.</i>")
+    lines.append(f"\n<i>{te(PE_PENCIL, '✏️')} — изменить, "
+                 f"{te(PE_TRASH, '🗑')} — удалить.</i>")
     await message.answer("\n\n".join(lines), reply_markup=kb)
 
 
@@ -2252,7 +2253,7 @@ async def utpl_del(call: types.CallbackQuery):
         "players": "🎮 игроки", "admins": "🛡 админы",
         "leaders": "👑 лидеры", "appeals": "⚖️ обжалования",
     }
-    lines = [f"{te(PE_GIFT, '⭐')} <b>Ваши шаблоны жалоб:</b>\n"]
+    lines = [f"{te(PE_STAR, '⭐')} <b>Ваши шаблоны жалоб:</b>\n"]
     for ut in user_tpls:
         lines.append(
             f"<b>{escape(ut['name'])}</b> "
