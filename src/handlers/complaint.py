@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from src.config import COMPLAINT_CATEGORY_LABELS
 from src.forum.xenforo import (
     post_complaint, delete_thread, edit_thread_post,
-    is_auth_error, is_noperm_error,
+    is_auth_error, is_noperm_error, is_flood_error, parse_flood_wait_seconds,
     TECHNICAL_SECTION_NODE_ID,
 )
 from src.forum.templates import (
@@ -1699,14 +1699,26 @@ async def process_confirm(message: types.Message, state: FSMContext):
         # иначе при первой же 403-ке весь пул сгорит.
         is_auth = is_auth_error(last_error)
         is_noperm = is_noperm_error(last_error)
+        is_flood = is_flood_error(last_error)
 
         if is_auth and used_account_id:
             try:
                 await mark_account_needs_reauth(used_account_id)
             except Exception:
                 logger.exception("mark_account_needs_reauth failed")
+        elif is_flood and used_account_id:
+            # Флуд-таймер форума: аккаунт рабочий, просто постил недавно.
+            # Ставим кулдаун ровно на запрошенное время и пробуем другой.
+            wait_s = parse_flood_wait_seconds(last_error) or COMPLAINT_COOLDOWN_SECONDS
+            logger.info("Аккаунт «%s» (id=%s) во флуд-таймере на %d с — "
+                        "ставлю кулдаун и пробую другой.",
+                        used_account_name, used_account_id, wait_s)
+            try:
+                await set_account_cooldown(used_account_id, wait_s + 5)
+            except Exception:
+                logger.exception("set_account_cooldown (flood) failed")
         elif not (is_auth or is_noperm):
-            # Не AUTH/NOPERM — нет смысла пробовать другой аккаунт
+            # Не AUTH/NOPERM/FLOOD — нет смысла пробовать другой аккаунт
             # (валидация формы, сетевая ошибка, форум упал и т.п.).
             break
 
@@ -1834,6 +1846,23 @@ async def process_confirm(message: types.Message, state: FSMContext):
         logger.error("Не удалось опубликовать жалобу от %s. Причина: %s. "
                      "Перебрано аккаунтов: %d.",
                      describe_user(message.from_user), result, len(tried_ids))
+
+        # Флуд-таймер форума: аккаунт(ы) рабочие, просто нужно подождать.
+        # Не пугаем пользователя «ошибкой» — предлагаем подождать/очередь.
+        if is_flood_error(str(result)):
+            wait_s = parse_flood_wait_seconds(str(result)) or COMPLAINT_COOLDOWN_SECONDS
+            # Сбрасываем флаг публикации, иначе кнопки «В очередь»/повтор
+            # будут заблокированы защитой от двойного тапа.
+            await state.update_data(_publishing=False)
+            await status_msg.edit_text(
+                f"{te(PE_TIME_PASSED, '⏳')} <b>Форум просит подождать</b>\n\n"
+                f"Свободные аккаунты сейчас на флуд-таймере форума "
+                f"(≈ <b>{_format_cooldown(wait_s)}</b>).\n\n"
+                f"Нажмите <b>{te(PE_BOX, '📦')} В очередь</b> — бот сам "
+                "опубликует, как только таймер пройдёт, или повторите позже."
+            )
+            return
+
         tried_part = ""
         if is_admin(message.from_user.id) and len(tried_ids) > 1:
             tried_part = (

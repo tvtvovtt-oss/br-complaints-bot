@@ -1368,6 +1368,33 @@ def is_noperm_error(error_text: str) -> bool:
     return error_text.startswith("NOPERM:") or error_text.startswith("NOPERM ")
 
 
+# Флуд-контроль XenForo: «Вам необходимо подождать, по крайней мере, N секунд
+# перед выполнением этого действия.» — аккаунт недавно постил, временный
+# лимит. Куки валидны, аккаунт рабочий — нужно лишь выждать N секунд.
+_FLOOD_RE = re.compile(r"подожд\w*.*?(\d+)\s*секунд", re.IGNORECASE | re.DOTALL)
+
+
+def is_flood_error(error_text: str) -> bool:
+    """True если форум вернул флуд-таймер (нужно подождать N секунд)."""
+    if not error_text:
+        return False
+    low = error_text.lower()
+    return "подожд" in low and "секунд" in low
+
+
+def parse_flood_wait_seconds(error_text: str) -> Optional[int]:
+    """Извлекает число секунд из флуд-сообщения форума. None если не нашёл."""
+    if not error_text:
+        return None
+    m = _FLOOD_RE.search(error_text)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 # ---------------- Автообнаружение структуры форума ----------------
 
 def _extract_node_id(href: str) -> Optional[int]:

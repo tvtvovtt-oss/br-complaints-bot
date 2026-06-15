@@ -29,9 +29,13 @@ from src.database import (
     update_account_cookies,
     mark_account_needs_reauth,
     release_account_cooldown,
+    set_account_cooldown,
     get_account_pool_status,
 )
-from src.forum.xenforo import post_complaint, is_auth_error, is_noperm_error
+from src.forum.xenforo import (
+    post_complaint, is_auth_error, is_noperm_error,
+    is_flood_error, parse_flood_wait_seconds,
+)
 from src.settings import get_queue_settings, format_seconds
 from src.premium_emoji import te, PE_WARNING, PE_TARGET
 
@@ -248,6 +252,20 @@ async def _process_one(bot: Bot, item: dict, cfg: dict[str, int]) -> None:
             # Аккаунт валиден, просто не подходит для этого раздела —
             # возвращаем его в пул сразу, не держим 180с в кулдауне.
             await release_account_cooldown(account["id"])
+            return
+
+        # FLOOD — флуд-таймер форума: аккаунт рабочий, постил недавно.
+        # Ставим ему кулдаун ровно на запрошенное время и НЕ считаем это
+        # проваленной попыткой — жалоба останется pending для другого
+        # аккаунта или того же после паузы.
+        if is_flood_error(str(result)):
+            wait_s = parse_flood_wait_seconds(str(result)) or account_cooldown
+            logger.info(
+                "Жалоба #%s: аккаунт «%s» во флуд-таймере на %d с — "
+                "ставлю кулдаун, оставляю в pending.",
+                qid, account["username"], wait_s,
+            )
+            await set_account_cooldown(account["id"], wait_s + 5)
             return
 
         # increment_queue_attempt поднимает attempts на 1.
