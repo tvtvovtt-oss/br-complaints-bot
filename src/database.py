@@ -1,9 +1,33 @@
 import json as _json
 import logging
+from contextlib import asynccontextmanager
+
 import aiosqlite
 from src.config import DB_PATH
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _db():
+    """Единая точка подключения к SQLite со здравыми PRAGMA.
+
+    - busy_timeout=5000 — writer ждёт до 5с вместо мгновенного
+      «database is locked» при конкурентных BEGIN IMMEDIATE / параллельных
+      воркерах очереди.
+    - journal_mode=WAL — читатели не блокируют писателя; снимок .db для
+      бэкапа консистентен (storage_backup делает wal_checkpoint).
+    - synchronous=NORMAL — безопасный компромисс скорости/надёжности под WAL.
+    """
+    db = await aiosqlite.connect(DB_PATH)
+    try:
+        await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        yield db
+    finally:
+        await db.close()
+
 
 
 # Триггер фонового бэкапа в Telegram-канал. Импортируется лениво, чтобы
@@ -34,7 +58,7 @@ async def _trigger_backup_immediate() -> None:
 async def init_db():
     """Инициализация базы данных и создание таблиц."""
     logger.info("Инициализирую SQLite-базу данных: %s", DB_PATH)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         # История поданных жалоб
         await db.execute("""
             CREATE TABLE IF NOT EXISTS complaints (
@@ -320,7 +344,7 @@ async def add_complaint(telegram_id: int, nickname: str, description: str,
     можно было пересобрать корректный BB-код и заголовок, а также для
     статистики по серверам.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             """
             INSERT INTO complaints
@@ -346,7 +370,7 @@ async def add_complaint(telegram_id: int, nickname: str, description: str,
 
 async def get_user_complaints(telegram_id: int):
     """Получение истории жалоб конкретного пользователя."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT id, nickname, description, proof_link, forum_thread_url, "
             "status, created_at, summary "
@@ -381,7 +405,7 @@ async def search_complaints_by_nick(
     Возвращает не более `limit` записей, новые первыми.
     """
     like = f"%{nickname.strip()}%"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         if telegram_id is not None:
             async with db.execute(
                 "SELECT id, telegram_id, nickname, forum_thread_url, "
@@ -419,7 +443,7 @@ async def search_complaints_by_nick(
 async def get_user_complaint_stats(telegram_id: int) -> dict:
     """Расширенная статистика жалоб пользователя: счётчики по статусам,
     процент успеха и топ-3 цели (по числу жалоб)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         # Счётчики по статусам
         async with db.execute(
             "SELECT status, COUNT(*) FROM complaints "
@@ -463,7 +487,7 @@ async def get_user_complaint_stats(telegram_id: int) -> dict:
 
 async def get_complaint(complaint_id: int) -> dict | None:
     """Возвращает жалобу по id (или None)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT id, telegram_id, nickname, description, proof_link, "
             "forum_thread_url, status, notified_status, created_at, "
@@ -501,7 +525,7 @@ async def list_complaints_for_status_check() -> list[dict]:
     Финальные статусы — accepted/rejected/closed — не проверяются повторно
     (тема уже решена админом форума, нет смысла дёргать). Перепроверяем
     только pending/unknown/review."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT id, telegram_id, nickname, forum_thread_url, status, "
             "notified_status, account_id, admin_comment "
@@ -525,7 +549,7 @@ async def list_complaints_for_status_check() -> list[dict]:
 
 async def update_complaint_status(complaint_id: int, status: str) -> None:
     """Обновляет статус жалобы и время последней проверки."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE complaints SET status = ?, "
             "last_status_check = CURRENT_TIMESTAMP WHERE id = ?",
@@ -538,7 +562,7 @@ async def update_complaint_admin_comment(complaint_id: int,
                                             comment: str | None) -> None:
     """Сохраняет комментарий админа форума к жалобе (для показа автору
     и в карточке жалобы)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE complaints SET admin_comment = ? WHERE id = ?",
             (comment, complaint_id),
@@ -548,7 +572,7 @@ async def update_complaint_admin_comment(complaint_id: int,
 
 async def mark_complaint_notified(complaint_id: int, status: str) -> None:
     """Помечает что пользователь уведомлён об этом статусе."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE complaints SET notified_status = ? WHERE id = ?",
             (status, complaint_id),
@@ -559,7 +583,7 @@ async def mark_complaint_notified(complaint_id: int, status: str) -> None:
 async def delete_complaint(telegram_id: int, complaint_id: int) -> bool:
     """Удаляет жалобу из истории пользователя (только из БД, тему на форуме
     не трогаем). Возвращает True если успешно."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             "DELETE FROM complaints WHERE id = ? AND telegram_id = ?",
             (complaint_id, telegram_id),
@@ -577,7 +601,7 @@ async def delete_complaint(telegram_id: int, complaint_id: int) -> bool:
 async def save_servers(servers: list[tuple[str, int]]):
     """Перезапись кэша серверов. Принимает список [(name, node_id), ...]
     в том порядке, в котором они идут на форуме."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute("DELETE FROM servers")
         await db.executemany(
             "INSERT INTO servers (name, node_id, position) VALUES (?, ?, ?)",
@@ -589,7 +613,7 @@ async def save_servers(servers: list[tuple[str, int]]):
 
 async def get_servers() -> list[tuple[str, int]]:
     """Возвращает список [(name, node_id), ...] в порядке с форума."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT name, node_id FROM servers ORDER BY position, name"
         ) as cursor:
@@ -605,7 +629,7 @@ async def save_technical_subsections(
     """Перезапись кэша подразделов техраздела.
     Принимает [(name, node_id, kind, server_key), ...] в порядке с форума.
     kind: 'tech' | 'staff'."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute("DELETE FROM technical_subsections")
         await db.executemany(
             "INSERT INTO technical_subsections "
@@ -623,7 +647,7 @@ async def save_technical_subsections(
 
 async def get_technical_subsections() -> list[dict]:
     """Возвращает [{name, node_id, kind, server_key}, ...] в порядке с форума."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT name, node_id, kind, server_key "
             "FROM technical_subsections ORDER BY position, name"
@@ -639,7 +663,7 @@ async def get_technical_subsections() -> list[dict]:
 async def get_technical_servers() -> list[str]:
     """Список server_key (цветов серверов), для которых есть хотя бы один
     технический подраздел, в порядке появления на форуме."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT server_key, MIN(position) AS pos "
             "FROM technical_subsections "
@@ -653,7 +677,7 @@ async def get_technical_servers() -> list[str]:
 async def get_technical_node(server_key: str, kind: str) -> dict | None:
     """Находит конкретный форумный node по серверу и типу обращения.
     Возвращает {name, node_id, kind, server_key} или None."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT name, node_id, kind, server_key "
             "FROM technical_subsections "
@@ -673,7 +697,7 @@ async def save_complaint_categories(server_node_id: int, categories: dict[str, t
     """Сохранение категорий жалоб для сервера.
     categories: {category_key: (category_name, category_node_id)}
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "DELETE FROM complaint_categories WHERE server_node_id = ?",
             (server_node_id,),
@@ -693,7 +717,7 @@ async def save_complaint_categories(server_node_id: int, categories: dict[str, t
 
 async def get_complaint_categories(server_node_id: int) -> dict[str, tuple[str, int]]:
     """Возвращает {category_key: (category_name, category_node_id)} для сервера."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT category_key, category_name, category_node_id "
             "FROM complaint_categories WHERE server_node_id = ?",
@@ -720,7 +744,7 @@ async def upsert_account(telegram_id: int, username: str, login: str | None,
     Возвращает id записи в таблице accounts.
     """
     cookies_str = _json.dumps(cookies, ensure_ascii=False)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             if make_active:
@@ -764,7 +788,7 @@ async def list_accounts(telegram_id: int) -> list[dict]:
     [{id, username, login, is_active, cooldown_until, needs_reauth,
       created_at, updated_at}, ...]
     Активный аккаунт идёт первым."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT id, username, login, is_active, cooldown_until,
@@ -793,7 +817,7 @@ async def list_accounts(telegram_id: int) -> list[dict]:
 
 async def get_account_pool_status(telegram_id: int) -> dict:
     """Returns aggregate availability info for a user's forum account pool."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT
@@ -848,7 +872,7 @@ async def get_account_pool_status(telegram_id: int) -> dict:
 async def get_active_account(telegram_id: int) -> dict | None:
     """Возвращает активный аккаунт пользователя со всеми полями включая cookies,
     либо None если аккаунтов нет."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT id, username, login, cookies_json, is_active,
@@ -876,7 +900,7 @@ async def get_active_account(telegram_id: int) -> dict | None:
 
 async def get_account(account_id: int) -> dict | None:
     """Возвращает аккаунт по id."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT id, telegram_id, username, login, cookies_json, is_active,
@@ -902,7 +926,7 @@ async def get_account(account_id: int) -> dict | None:
 
 async def set_active_account(telegram_id: int, account_id: int) -> bool:
     """Делает аккаунт активным. Возвращает True если успешно."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT id FROM accounts WHERE id = ? AND telegram_id = ?",
             (account_id, telegram_id),
@@ -927,7 +951,7 @@ async def set_active_account(telegram_id: int, account_id: int) -> bool:
 async def delete_account(telegram_id: int, account_id: int) -> bool:
     """Удаляет аккаунт. Если он был активным, активным становится
     самый недавно использованный из оставшихся (если такие есть)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT is_active FROM accounts WHERE id = ? AND telegram_id = ?",
             (account_id, telegram_id),
@@ -972,7 +996,7 @@ async def update_account_cookies(account_id: int, cookies: dict) -> None:
     deploy на хостинге свежие куки точно успели уйти в Telegram-канал и
     после рестарта восстановились актуальные, а не вчерашние."""
     cookies_str = _json.dumps(cookies, ensure_ascii=False)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE accounts SET cookies_json = ?, updated_at = CURRENT_TIMESTAMP "
             "WHERE id = ?",
@@ -985,7 +1009,7 @@ async def update_account_cookies(account_id: int, cookies: dict) -> None:
 async def set_account_cooldown(account_id: int, seconds: int) -> None:
     """Ставит кулдаун на аккаунт: cooldown_until = now + seconds.
     После этой метки аккаунт снова можно использовать."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE accounts "
             "SET cooldown_until = datetime('now', ? || ' seconds') "
@@ -1010,7 +1034,7 @@ async def find_available_account(telegram_id: int) -> dict | None:
     Использует BEGIN IMMEDIATE чтобы исключить гонку при параллельной
     подаче нескольких жалоб разными пользователями.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         # Эксклюзивная транзакция — гарантирует, что между SELECT и решением
         # не вмешается другой коннект и не выберет тот же аккаунт.
         await db.execute("BEGIN IMMEDIATE")
@@ -1083,7 +1107,7 @@ async def find_available_account(telegram_id: int) -> dict | None:
 async def add_user_template(telegram_id: int, category_key: str,
                              name: str, summary: str, description: str) -> int:
     """Сохраняет пользовательский шаблон. Возвращает id."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             """
             INSERT INTO user_templates
@@ -1102,7 +1126,7 @@ async def add_user_template(telegram_id: int, category_key: str,
 
 async def list_user_templates(telegram_id: int, category_key: str) -> list[dict]:
     """Список пользовательских шаблонов для категории."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT id, name, summary, description "
             "FROM user_templates WHERE telegram_id = ? AND category_key = ? "
@@ -1117,7 +1141,7 @@ async def list_user_templates(telegram_id: int, category_key: str) -> list[dict]
 
 
 async def get_user_template(template_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT id, telegram_id, category_key, name, summary, description "
             "FROM user_templates WHERE id = ?",
@@ -1133,7 +1157,7 @@ async def get_user_template(template_id: int) -> dict | None:
 
 
 async def delete_user_template(telegram_id: int, template_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             "DELETE FROM user_templates WHERE id = ? AND telegram_id = ?",
             (template_id, telegram_id),
@@ -1166,7 +1190,7 @@ async def update_user_template(telegram_id: int, template_id: int,
         "UPDATE user_templates SET " + ", ".join(sets)
         + " WHERE id = ? AND telegram_id = ?"
     )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(sql, params)
         await db.commit()
         return cur.rowcount > 0
@@ -1178,7 +1202,7 @@ async def add_bug_report(telegram_id: int, username: str | None,
                           full_name: str | None, text: str,
                           photo_file_id: str | None = None) -> int:
     """Сохраняет баг-репорт. Возвращает id."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             """
             INSERT INTO bug_reports
@@ -1194,7 +1218,7 @@ async def add_bug_report(telegram_id: int, username: str | None,
 
 
 async def get_bug_report(report_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT id, telegram_id, username, full_name, text, photo_file_id,
@@ -1218,7 +1242,7 @@ async def list_bug_reports(only_open: bool = False, limit: int = 20) -> list[dic
     """Возвращает последние N баг-репортов. only_open — только в статусах
     new/in_progress."""
     where = "WHERE status IN ('new', 'in_progress')" if only_open else ""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             f"""
             SELECT id, telegram_id, username, full_name, text, status, created_at
@@ -1243,7 +1267,7 @@ async def list_bug_reports(only_open: bool = False, limit: int = 20) -> list[dic
 async def set_bug_report_status(report_id: int, status: str,
                                   admin_reply: str | None = None) -> None:
     """Обновляет статус и опционально текст ответа админа."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         if admin_reply is not None:
             await db.execute(
                 "UPDATE bug_reports SET status = ?, admin_reply = ?, "
@@ -1261,7 +1285,7 @@ async def set_bug_report_status(report_id: int, status: str,
 
 async def count_recent_bug_reports(telegram_id: int, within_minutes: int) -> int:
     """Сколько баг-репортов от пользователя за последние N минут."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT COUNT(*) FROM bug_reports
@@ -1297,7 +1321,7 @@ async def update_complaint_content(complaint_id: int, telegram_id: int,
         sql = "UPDATE complaints SET proof_link = ? WHERE id = ? AND telegram_id = ?"
         params = (proof_link, complaint_id, telegram_id)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(sql, params)
         await db.commit()
         return cur.rowcount > 0
@@ -1319,7 +1343,7 @@ async def claim_available_account(telegram_id: int,
 
     SQLite 3.35+ требуется для RETURNING.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             async with db.execute(
@@ -1361,7 +1385,7 @@ async def claim_available_account(telegram_id: int,
 async def release_account_cooldown(account_id: int) -> None:
     """Сбрасывает кулдаун аккаунта (если публикация провалилась —
     возвращаем аккаунт в пул сразу, не ждём 180 сек)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE accounts SET cooldown_until = NULL WHERE id = ?",
             (account_id,),
@@ -1382,7 +1406,7 @@ async def mark_account_needs_reauth(account_id: int) -> None:
     каким-то образом не отработал в фильтре — аккаунт хотя бы не дёргался
     в каждой жалобе.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE accounts "
             "SET needs_reauth = 1, "
@@ -1400,7 +1424,7 @@ async def clear_account_needs_reauth(account_id: int) -> None:
     """Снимает флаг needs_reauth и сбрасывает кулдаун. Используется когда
     периодическая проверка обнаруживает, что куки на самом деле живы
     (это значит флаг был поставлен ложно, например на 403 от DDoS-Guard)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE accounts "
             "SET needs_reauth = 0, "
@@ -1420,7 +1444,7 @@ async def set_account_encrypted_password(account_id: int,
     """Сохраняет/удаляет зашифрованный пароль аккаунта.
     Делает немедленный бэкап — пароль слишком ценный, чтобы потерять при
     rolling deploy."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE accounts SET encrypted_password = ? WHERE id = ?",
             (encrypted_password, account_id),
@@ -1430,7 +1454,7 @@ async def set_account_encrypted_password(account_id: int,
 
 
 async def get_account_encrypted_password(account_id: int) -> str | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT encrypted_password FROM accounts WHERE id = ?",
             (account_id,),
@@ -1442,7 +1466,7 @@ async def get_account_encrypted_password(account_id: int) -> str | None:
 async def list_accounts_with_passwords() -> list[dict]:
     """Возвращает все аккаунты у которых есть encrypted_password.
     Используется в авто-перелогине."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT id, telegram_id, username, login, cookies_json,
@@ -1467,7 +1491,7 @@ async def list_accounts_with_passwords() -> list[dict]:
 async def enqueue_complaint(telegram_id: int, section_id: int, title: str,
                               bb_code: str, target_nickname: str,
                               description: str, proof_link: str) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             """
             INSERT INTO complaint_queue
@@ -1488,7 +1512,7 @@ async def enqueue_complaint(telegram_id: int, section_id: int, title: str,
 
 async def list_queue_pending() -> list[dict]:
     """Возвращает все жалобы в статусе pending, отсортированные по времени."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT id, telegram_id, section_id, title, bb_code,
@@ -1514,7 +1538,7 @@ async def list_queue_pending() -> list[dict]:
 
 async def list_user_queue(telegram_id: int) -> list[dict]:
     """Очередь конкретного пользователя со всеми статусами."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             """
             SELECT id, section_id, target_nickname, status, last_error,
@@ -1539,7 +1563,7 @@ async def list_user_queue(telegram_id: int) -> list[dict]:
 
 
 async def mark_queue_done(queue_id: int, forum_thread_url: str) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE complaint_queue "
             "SET status = 'done', forum_thread_url = ?, "
@@ -1551,7 +1575,7 @@ async def mark_queue_done(queue_id: int, forum_thread_url: str) -> None:
 
 
 async def mark_queue_failed(queue_id: int, error: str) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE complaint_queue "
             "SET status = 'failed', last_error = ?, "
@@ -1565,7 +1589,7 @@ async def mark_queue_failed(queue_id: int, error: str) -> None:
 
 async def increment_queue_attempt(queue_id: int, error: str | None = None) -> None:
     """Увеличить счётчик попыток (для retry в pending)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE complaint_queue "
             "SET attempts = attempts + 1, last_error = ? WHERE id = ?",
@@ -1575,7 +1599,7 @@ async def increment_queue_attempt(queue_id: int, error: str | None = None) -> No
 
 
 async def cancel_queue_item(telegram_id: int, queue_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             "DELETE FROM complaint_queue "
             "WHERE id = ? AND telegram_id = ? AND status = 'pending'",
@@ -1597,7 +1621,7 @@ async def list_all_users() -> list[int]:
     взаимодействии и пополняется бэкфилом при init_db (см. `_backfill_users`).
     Это O(N) по индексу, без UNION'ов 5 таблиц.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_users_table(db)
         async with db.execute(
             "SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL"
@@ -1632,7 +1656,7 @@ async def _backfill_users(db: aiosqlite.Connection) -> int:
 
 async def get_stats(within_days: int = 7) -> dict:
     """Возвращает агрегированную статистику за последние N дней."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_users_table(db)
         # Всего пользователей: считаем по таблице users (все кто хотя бы
         # нажимал /start) + UNION со старыми таблицами на случай миграции.
@@ -1741,7 +1765,7 @@ async def get_stats(within_days: int = 7) -> dict:
 async def list_all_complaints(limit: int = 30) -> list[dict]:
     """Возвращает последние N жалоб всех пользователей. Используется админом
     в /check и /stats."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT id, telegram_id, nickname, description, proof_link, "
             "forum_thread_url, status, created_at "
@@ -1763,7 +1787,7 @@ async def list_all_complaints(limit: int = 30) -> list[dict]:
 
 async def count_complaints_by_status() -> dict:
     """Возвращает {status: count} по всем жалобам в БД (для админ-сводки)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT COALESCE(status, 'pending'), COUNT(*) "
             "FROM complaints GROUP BY COALESCE(status, 'pending')"
@@ -1791,7 +1815,7 @@ async def save_draft(telegram_id: int, state_data: dict, step: str | None = None
             pass
 
     payload = _json.dumps(safe_data, ensure_ascii=False)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             """
             INSERT INTO drafts (telegram_id, state_data, step, updated_at)
@@ -1808,7 +1832,7 @@ async def save_draft(telegram_id: int, state_data: dict, step: str | None = None
 
 async def get_draft(telegram_id: int) -> dict | None:
     """Возвращает черновик пользователя {state_data, step, updated_at} или None."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             "SELECT state_data, step, updated_at FROM drafts WHERE telegram_id = ?",
             (telegram_id,),
@@ -1824,7 +1848,7 @@ async def get_draft(telegram_id: int) -> dict | None:
 
 
 async def delete_draft(telegram_id: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "DELETE FROM drafts WHERE telegram_id = ?", (telegram_id,)
         )
@@ -1845,7 +1869,7 @@ async def _ensure_settings_table(db: aiosqlite.Connection) -> None:
 
 async def get_setting(key: str, default: str | None = None) -> str | None:
     """Получает значение настройки бота. None если не задано."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_settings_table(db)
         async with db.execute(
             "SELECT value FROM settings WHERE key = ?", (key,)
@@ -1856,7 +1880,7 @@ async def get_setting(key: str, default: str | None = None) -> str | None:
 
 async def set_setting(key: str, value: str) -> None:
     """Устанавливает значение настройки бота."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_settings_table(db)
         await db.execute(
             """
@@ -1943,7 +1967,7 @@ async def _seed_default_subscription_channels(db: aiosqlite.Connection) -> None:
 
 async def list_subscription_channels() -> list[str]:
     """Возвращает список username каналов обязательной подписки."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_subscriptions_table(db)
         async with db.execute(
             "SELECT channel_username FROM subscription_channels "
@@ -1965,7 +1989,7 @@ async def add_subscription_channel(raw: str, added_by: int) -> tuple[bool, str]:
             "❌ Некорректный username. Укажите как @channel "
             "(5-32 символа, латиница/цифры/подчёркивание), например: @borzyyyy1"
         )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_subscriptions_table(db)
         try:
             await db.execute(
@@ -1989,7 +2013,7 @@ async def remove_subscription_channel(raw: str) -> tuple[bool, str]:
     username = _normalize_channel_username(raw)
     if not username:
         return False, "❌ Некорректный username."
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_subscriptions_table(db)
         cur = await db.execute(
             "DELETE FROM subscription_channels WHERE channel_username = ?",
@@ -2019,7 +2043,7 @@ async def ban_user(telegram_id: int, reason: str | None = None,
                     banned_by: int | None = None) -> bool:
     """Добавляет пользователя в бан-лист. Возвращает True если добавлено
     впервые (False — уже был забанен и просто обновили причину)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_bans_table(db)
         async with db.execute(
             "SELECT 1 FROM banned_users WHERE telegram_id = ?",
@@ -2047,7 +2071,7 @@ async def ban_user(telegram_id: int, reason: str | None = None,
 
 async def unban_user(telegram_id: int) -> bool:
     """Снимает бан. True если пользователь был забанен."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_bans_table(db)
         cur = await db.execute(
             "DELETE FROM banned_users WHERE telegram_id = ?",
@@ -2063,7 +2087,7 @@ async def unban_user(telegram_id: int) -> bool:
 
 async def is_banned(telegram_id: int) -> dict | None:
     """Возвращает запись о бане {reason, banned_by, banned_at} или None."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_bans_table(db)
         async with db.execute(
             "SELECT reason, banned_by, banned_at FROM banned_users "
@@ -2078,7 +2102,7 @@ async def is_banned(telegram_id: int) -> dict | None:
 
 async def list_banned() -> list[dict]:
     """Все забаненные."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_bans_table(db)
         async with db.execute(
             "SELECT telegram_id, reason, banned_by, banned_at "
@@ -2125,7 +2149,7 @@ async def list_complaints_paginated(
     where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     offset = max(0, (page - 1) * page_size)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         async with db.execute(
             f"SELECT COUNT(*) FROM complaints {where_sql}", params,
         ) as cur:
@@ -2159,7 +2183,7 @@ async def admin_delete_complaint(complaint_id: int) -> bool:
     """Админское удаление жалобы из БД без проверки автора (в отличие от
     delete_complaint, где telegram_id обязателен). Возвращает True если
     запись удалилась."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         cur = await db.execute(
             "DELETE FROM complaints WHERE id = ?", (complaint_id,),
         )
@@ -2194,7 +2218,7 @@ async def track_user(telegram_id: int, username: str | None = None,
     раз — создаёт запись, иначе обновляет last_seen_at и инкрементит счётчик."""
     if not telegram_id or telegram_id <= 0:
         return
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_users_table(db)
         await db.execute(
             """
@@ -2216,7 +2240,7 @@ async def track_user(telegram_id: int, username: str | None = None,
 
 async def list_tracked_users(limit: int | None = None) -> list[dict]:
     """Все известные пользователи с метаданными (для админ-команд)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_users_table(db)
         sql = (
             "SELECT telegram_id, username, full_name, first_seen_at, "
@@ -2240,7 +2264,7 @@ async def list_tracked_users(limit: int | None = None) -> list[dict]:
 
 
 async def count_tracked_users() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         await _ensure_users_table(db)
         async with db.execute("SELECT COUNT(*) FROM users") as cur:
             row = await cur.fetchone()

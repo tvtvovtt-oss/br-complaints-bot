@@ -599,7 +599,7 @@ async def cmd_db_info(message: types.Message):
     """Диагностика: сколько записей в каждой таблице БД."""
     if not is_admin(message.from_user.id):
         return
-    import aiosqlite
+    from src.database import _db
     from src.config import DB_PATH
 
     tables = [
@@ -610,7 +610,7 @@ async def cmd_db_info(message: types.Message):
         f"{te(PE_CHART_STATS, '📊')} <b>Состояние БД</b>\n"
         f"<code>{escape(str(DB_PATH))}</code>\n"
     ]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db() as db:
         for t in tables:
             try:
                 async with db.execute(f"SELECT COUNT(*) FROM {t}") as cur:

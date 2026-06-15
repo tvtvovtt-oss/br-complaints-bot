@@ -1375,11 +1375,14 @@ _FLOOD_RE = re.compile(r"подожд\w*.*?(\d+)\s*секунд", re.IGNORECASE 
 
 
 def is_flood_error(error_text: str) -> bool:
-    """True если форум вернул флуд-таймер (нужно подождать N секунд)."""
+    """True если форум вернул флуд-таймер (нужно подождать N секунд).
+
+    Требуем, чтобы реально нашлось число секунд — иначе сообщения вроде
+    «подождите несколько секунд» не вешали бы аккаунту ложный кулдаун.
+    """
     if not error_text:
         return False
-    low = error_text.lower()
-    return "подожд" in low and "секунд" in low
+    return parse_flood_wait_seconds(error_text) is not None
 
 
 def parse_flood_wait_seconds(error_text: str) -> Optional[int]:

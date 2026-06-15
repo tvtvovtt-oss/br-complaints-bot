@@ -1843,14 +1843,13 @@ async def process_confirm(message: types.Message, state: FSMContext):
             message_effect_id=EFFECT_CONFETTI,
         )
     else:
-        logger.error("Не удалось опубликовать жалобу от %s. Причина: %s. "
-                     "Перебрано аккаунтов: %d.",
-                     describe_user(message.from_user), result, len(tried_ids))
-
-        # Флуд-таймер форума: аккаунт(ы) рабочие, просто нужно подождать.
-        # Не пугаем пользователя «ошибкой» — предлагаем подождать/очередь.
+        # Флуд-таймер форума — ожидаемое событие, НЕ ошибка. Логируем INFO
+        # (иначе error_reporter спамит админу), форму сохраняем для повтора.
         if is_flood_error(str(result)):
             wait_s = parse_flood_wait_seconds(str(result)) or COMPLAINT_COOLDOWN_SECONDS
+            logger.info("Публикация жалобы от %s отложена флуд-таймером "
+                        "форума (~%dс).",
+                        describe_user(message.from_user), wait_s)
             # Сбрасываем флаг публикации, иначе кнопки «В очередь»/повтор
             # будут заблокированы защитой от двойного тапа.
             await state.update_data(_publishing=False)
@@ -1863,6 +1862,9 @@ async def process_confirm(message: types.Message, state: FSMContext):
             )
             return
 
+        logger.error("Не удалось опубликовать жалобу от %s. Причина: %s. "
+                     "Перебрано аккаунтов: %d.",
+                     describe_user(message.from_user), result, len(tried_ids))
         tried_part = ""
         if is_admin(message.from_user.id) and len(tried_ids) > 1:
             tried_part = (
@@ -1874,6 +1876,10 @@ async def process_confirm(message: types.Message, state: FSMContext):
             f"Описание ошибки:\n<code>{escape(str(result))}</code>"
             f"{tried_part}"
         )
+        # Форму НЕ стираем — пользователь может повторить отправку или
+        # поставить жалобу в очередь. Снимаем только флаг публикации.
+        await state.update_data(_publishing=False)
+        return
 
     await state.clear()
 
