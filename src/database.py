@@ -34,7 +34,7 @@ async def _db():
 # избежать циклического импорта (storage_backup → aiogram → ...).
 async def _trigger_backup() -> None:
     try:
-        from src.storage_backup import schedule_backup
+        from src.services.storage_backup import schedule_backup
         await schedule_backup()
     except Exception:
         # Бэкап не должен ломать основные операции — глушим всё
@@ -47,7 +47,7 @@ async def _trigger_backup_immediate() -> None:
     данные точно ушли в канал до того, как хостинг сделает rolling-deploy
     и стартует с устаревшего бэкапа."""
     try:
-        from src.storage_backup import force_backup, is_enabled
+        from src.services.storage_backup import force_backup, is_enabled
         if not is_enabled():
             return
         await force_backup()

@@ -32,8 +32,8 @@ from src.database import (
     get_user_complaint_stats,
 )
 from src.logger import describe_user
-from src.effects import EFFECT_CONFETTI, EFFECT_FIRE, EFFECT_LIKE, EFFECT_HEART
-from src.premium_emoji import (
+from src.ui.effects import EFFECT_CONFETTI, EFFECT_FIRE, EFFECT_LIKE, EFFECT_HEART
+from src.ui.premium_emoji import (
     te,
     BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
     PE_SETTINGS, PE_PROFILE, PE_PEOPLE, PE_FILE, PE_LOCK_CLOSED, PE_LOCK_OPEN,
@@ -43,7 +43,7 @@ from src.premium_emoji import (
     PE_CHART_GROW, PE_HOUSE, PE_PERSON_CHECK, PE_PERSON_CROSS, PE_GIFT,
     PE_ARROW_DOWN_LIST, PE_STAR,
 )
-from src.labels import (
+from src.ui.labels import (
     LBL_NEW_COMPLAINT, LBL_MY_COMPLAINTS, LBL_MY_TEMPLATES, LBL_MY_PROFILE,
     LBL_FIND_COMPLAINT, LBL_REPORT_BUG, LBL_QUEUE, LBL_MAINTENANCE,
     LBL_BUG_REPORTS, LBL_CHECK_FORUM, LBL_SYNC_FORUM, LBL_ACCOUNTS,
@@ -81,7 +81,7 @@ def account_owner_id(user_id: int) -> int:
 def main_menu_keyboard(is_admin_user: bool = False) -> types.ReplyKeyboardMarkup:
     """Главная клавиатура бота. Админу показываем расширенный набор кнопок.
 
-    Текст кнопок — без обычных эмодзи (берётся из :mod:`src.labels`), премиум
+    Текст кнопок — без обычных эмодзи (берётся из :mod:`src.ui.labels`), премиум
     иконку слева рисует ``icon_custom_emoji_id``, цвет — ``style``. Те же
     LBL_*-константы используются в ``F.text``-фильтрах, поэтому текст кнопки
     и фильтр всегда совпадают."""
@@ -1191,7 +1191,7 @@ async def cmd_me(message: types.Message):
     stats = await get_user_complaint_stats(user.id)
 
     import asyncio
-    from src.image_generator import generate_profile_card
+    from src.services.image_generator import generate_profile_card
     from aiogram.types import BufferedInputFile
 
     user_info = {
@@ -1237,5 +1237,5 @@ async def cmd_me(message: types.Message):
 # равно обрабатывается здесь, чтобы не дублировать логику в bot.py.
 @router.callback_query(F.data == "resub:check")
 async def cb_resub_check(callback: types.CallbackQuery, bot: Bot):
-    from src.subscription import recheck_and_reply
+    from src.middlewares.subscription import recheck_and_reply
     await recheck_and_reply(bot, callback)

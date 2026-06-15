@@ -19,8 +19,8 @@ from src.database import (
     get_user_complaint_stats,
 )
 from src.forum.xenforo import fetch_complaint_status
-from src.effects import EFFECT_CONFETTI
-from src.premium_emoji import (
+from src.ui.effects import EFFECT_CONFETTI
+from src.ui.premium_emoji import (
     te, PE_COMMENT, PE_SEARCH, PE_TIME_PASSED, PE_CHECK, PE_CROSS,
     PE_LOCK_CLOSED, PE_INFO,
 )

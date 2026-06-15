@@ -2,7 +2,7 @@
 на форуме Black Russia. Используются в сценарии подачи жалобы.
 """
 
-from src.premium_emoji import te, PE_TAG
+from src.ui.premium_emoji import te, PE_TAG
 
 # Заголовок темы строится по схеме "<ник_цели> | <краткая_суть>".
 # В правилах форума она единая для всех 4-х категорий.

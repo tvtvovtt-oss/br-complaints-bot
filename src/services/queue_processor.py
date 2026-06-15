@@ -36,8 +36,8 @@ from src.forum.xenforo import (
     post_complaint, is_auth_error, is_noperm_error,
     is_flood_error, parse_flood_wait_seconds,
 )
-from src.settings import get_queue_settings, format_seconds
-from src.premium_emoji import te, PE_WARNING, PE_TARGET
+from src.utils.settings import get_queue_settings, format_seconds
+from src.ui.premium_emoji import te, PE_WARNING, PE_TARGET
 
 logger = logging.getLogger(__name__)
 

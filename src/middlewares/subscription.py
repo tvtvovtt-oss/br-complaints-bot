@@ -25,7 +25,7 @@ from aiogram.types import (
 
 from src.config import ADMIN_IDS
 from src.database import list_subscription_channels
-from src.premium_emoji import (
+from src.ui.premium_emoji import (
     te, BTN_SUCCESS, BTN_PRIMARY,
     PE_BELL, PE_CHECK, PE_MEGAPHONE,
 )

@@ -55,8 +55,8 @@ from src.handlers.common import (
     check_access, _menu_for, is_admin, account_owner_id,
 )
 from src.logger import describe_user
-from src.effects import EFFECT_CONFETTI, EFFECT_LIKE, EFFECT_HEART
-from src.premium_emoji import (
+from src.ui.effects import EFFECT_CONFETTI, EFFECT_LIKE, EFFECT_HEART
+from src.ui.premium_emoji import (
     te,
     BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
     PE_PENCIL, PE_TRASH, PE_CROSS, PE_CHECK, PE_BOX, PE_CALENDAR, PE_TAG,
@@ -67,13 +67,13 @@ from src.premium_emoji import (
     PE_MEGAPHONE, PE_ARROW_DOWN_LIST, PE_TIME_PASSED, PE_ADD_TEXT,
     PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_STAR,
 )
-from src.labels import (
+from src.ui.labels import (
     LBL_NEW_COMPLAINT, LBL_MY_COMPLAINTS, LBL_MY_TEMPLATES, LBL_FIND_COMPLAINT,
     LBL_CANCEL, LBL_NO_DATE, LBL_FROM_TEMPLATE, LBL_USE_TEMPLATE,
     LBL_USE_UPLOADED, LBL_SEND_TO_FORUM, LBL_TO_QUEUE,
 )
-from src.status_monitor import status_label
-from src.validation import (
+from src.services.status_monitor import status_label
+from src.utils.validation import (
     validate_nickname,
     validate_date,
     validate_summary,
@@ -1175,7 +1175,7 @@ async def process_description(message: types.Message, state: FSMContext):
     logger.debug("Шаг: получено описание (%d симв.).", len(value))
     await _autosave_draft(state, message.from_user.id)
 
-    from src.uploader import has_uploader
+    from src.services.uploader import has_uploader
     if has_uploader():
         proof_hint = (
             f"{te(PE_LINK, '🔗')} <b>Доказательства</b>\n\n"
@@ -1203,7 +1203,7 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
     if not check_access(message.from_user.id):
         return
 
-    from src.uploader import has_uploader, upload_image
+    from src.services.uploader import has_uploader, upload_image
     if not has_uploader():
         await message.answer(
             f"{te(PE_MEDIA_PHOTO, '📷')} Картинки автозагружаются только если "
@@ -1247,7 +1247,7 @@ async def process_proof_photo(message: types.Message, state: FSMContext, bot: Bo
         return
 
     # Проверка на NSFW/gore/экстремистскую символику
-    from src.moderation import check_image, has_moderation
+    from src.services.moderation import check_image, has_moderation
     if has_moderation():
         await status_msg.edit_text(
             f"{te(PE_LOADING, '⏳')} Проверяю содержимое скриншота..."
@@ -1317,7 +1317,7 @@ async def process_proof_video(message: types.Message, state: FSMContext, bot: Bo
     if not check_access(message.from_user.id):
         return
 
-    from src.uploader import upload_video_catbox
+    from src.services.uploader import upload_video_catbox
     import os
     import tempfile
 
@@ -2889,7 +2889,7 @@ def _format_find_results(
     admin_mode: bool,
 ) -> str:
     """Текст ответа на /find."""
-    from src.status_monitor import status_label as slabel
+    from src.services.status_monitor import status_label as slabel
     total = len(results)
     if not total:
         return (

@@ -28,14 +28,14 @@ from src.handlers.common import (
     check_access, _menu_for, is_admin,
 )
 from src.logger import describe_user
-from src.premium_emoji import (
+from src.ui.premium_emoji import (
     te,
     BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
     PE_BOT, PE_CROSS, PE_CHECK, PE_PENCIL, PE_PARTY, PE_EYE, PE_WRITE,
     PE_ARROW_DOWN_LIST, PE_INFO, PE_BELL, PE_PROFILE,
 )
-from src.labels import LBL_CANCEL, LBL_SKIP, LBL_REPORT_BUG, LBL_BUG_REPORTS
-from src.effects import EFFECT_LIKE
+from src.ui.labels import LBL_CANCEL, LBL_SKIP, LBL_REPORT_BUG, LBL_BUG_REPORTS
+from src.ui.effects import EFFECT_LIKE
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -205,7 +205,7 @@ async def bug_photo(message: types.Message, state: FSMContext, bot: Bot):
 
     # NSFW-фильтр (если включён). Качаем картинку, проверяем, и если ок —
     # сохраняем file_id как обычно. Сами байты больше нигде не нужны.
-    from src.moderation import has_moderation, check_image
+    from src.services.moderation import has_moderation, check_image
     if has_moderation():
         # Защита от слишком больших файлов (теоретически Telegram отдаёт
         # photo до ~10 МБ, но проверяем на всякий — мало ли клиент отправит)

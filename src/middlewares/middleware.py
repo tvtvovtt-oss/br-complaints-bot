@@ -212,7 +212,7 @@ class MaintenanceMiddleware(BaseMiddleware):
     """
 
     async def __call__(self, handler, event, data):
-        from src.maintenance import is_enabled
+        from src.services.maintenance import is_enabled
         from src.config import ADMIN_IDS
 
         user = data.get("event_from_user")

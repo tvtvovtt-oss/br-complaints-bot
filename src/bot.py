@@ -21,18 +21,18 @@ from src.config import DB_PATH, COOKIES_PATH
 from src.database import init_db
 from src.handlers import common, complaint, bugreport, admin
 from src.logger import setup_logging
-from src.middleware import (
+from src.middlewares.middleware import (
     ThrottleMiddleware, CleanupMiddleware, MaintenanceMiddleware, BanMiddleware,
     UserTrackingMiddleware,
 )
-from src.subscription import SubscriptionMiddleware, set_middleware as set_sub_middleware
-from src.premium_emoji import (
+from src.middlewares.subscription import SubscriptionMiddleware, set_middleware as set_sub_middleware
+from src.ui.premium_emoji import (
     te, PE_LOADING, PE_PEOPLE, PE_PENCIL, PE_LOCK_CLOSED, PE_BOT,
 )
-from src.status_monitor import status_monitor_loop
-from src.queue_processor import queue_processor_loop
-from src.error_reporter import install as install_error_reporter
-from src.storage_backup import (
+from src.services.status_monitor import status_monitor_loop
+from src.services.queue_processor import queue_processor_loop
+from src.services.error_reporter import install as install_error_reporter
+from src.services.storage_backup import (
     is_enabled as backup_is_enabled,
     restore_db_from_channel,
     force_backup,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from math import ceil
 
-from src.settings import format_seconds
+from src.utils.settings import format_seconds
 
 
 def estimate_wait_seconds(

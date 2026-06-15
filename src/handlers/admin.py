@@ -27,7 +27,7 @@ from src.database import (
 )
 from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
-from src.premium_emoji import (
+from src.ui.premium_emoji import (
     te,
     BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
     PE_CHART_STATS, PE_CHART_GROW, PE_PEOPLE, PE_PERSON_CHECK,
@@ -38,11 +38,11 @@ from src.premium_emoji import (
     PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_GEOTAG, PE_WRITE,
     PE_BAN, PE_TARGET, PE_SEARCH, PE_COMMENT, PE_WARNING,
 )
-from src.labels import (
+from src.ui.labels import (
     LBL_STATS, LBL_BROADCAST, LBL_QUEUE, LBL_MAINTENANCE, LBL_CANCEL,
     LBL_SEND_TO_ALL,
 )
-from src.effects import EFFECT_LIKE, EFFECT_FIRE
+from src.ui.effects import EFFECT_LIKE, EFFECT_FIRE
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ async def cmd_stats(message: types.Message):
 
     # Графики — три картинки одна за одной
     try:
-        from src.charts import (
+        from src.services.charts import (
             render_complaints_by_day,
             render_status_pie,
             render_top_servers,
@@ -376,7 +376,7 @@ async def cmd_force_check(message: types.Message):
     """
     if not is_admin(message.from_user.id):
         return
-    from src.status_monitor import _check_once, status_label
+    from src.services.status_monitor import _check_once, status_label
     from src.database import (
         list_all_complaints, count_complaints_by_status,
     )
@@ -658,7 +658,7 @@ async def cmd_maintenance(message: types.Message):
     if not is_admin(message.from_user.id):
         return
 
-    from src.maintenance import is_enabled, enable, disable
+    from src.services.maintenance import is_enabled, enable, disable
 
     args = (message.text or "").split(maxsplit=1)
     arg = args[1].strip().lower() if len(args) >= 2 else ""
@@ -716,7 +716,7 @@ async def maint_on(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
         await call.answer("🔒 Только для админов.", show_alert=True)
         return
-    from src.maintenance import enable
+    from src.services.maintenance import enable
     await enable()
     try:
         await call.message.edit_text(
@@ -740,7 +740,7 @@ async def maint_off(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
         await call.answer("🔒 Только для админов.", show_alert=True)
         return
-    from src.maintenance import disable
+    from src.services.maintenance import disable
     await disable()
     try:
         await call.message.edit_text(
@@ -1536,7 +1536,7 @@ async def subs_got_channel(message: types.Message, state: FSMContext):
         # Сбрасываем кеш middleware, чтобы новые каналы начали проверяться
         # сразу же у всех пользователей.
         try:
-            from src.subscription import _get_active_middleware
+            from src.middlewares.subscription import _get_active_middleware
             mw = _get_active_middleware()
             if mw is not None:
                 mw.invalidate()
@@ -1575,7 +1575,7 @@ async def cb_subs_remove(call: types.CallbackQuery):
     ok, result = await remove_subscription_channel(channel)
     if ok:
         try:
-            from src.subscription import _get_active_middleware
+            from src.middlewares.subscription import _get_active_middleware
             mw = _get_active_middleware()
             if mw is not None:
                 mw.invalidate()
