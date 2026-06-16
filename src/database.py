@@ -1686,7 +1686,9 @@ async def get_stats(within_days: int | None = 7) -> dict:
             "SELECT COUNT(*), "
             "SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='review' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) "
             f"FROM complaints {w}",
             p,
         ) as cur:
@@ -1695,6 +1697,8 @@ async def get_stats(within_days: int | None = 7) -> dict:
             accepted = row[1] or 0
             rejected = row[2] or 0
             pending = row[3] or 0
+            review = row[4] or 0
+            closed = row[5] or 0
 
         # ТОП-5 пользователей по количеству жалоб
         w, p = _where()
@@ -1775,6 +1779,8 @@ async def get_stats(within_days: int | None = 7) -> dict:
         "accepted": accepted,
         "rejected": rejected,
         "pending": pending,
+        "review": review,
+        "closed": closed,
         "top_users": [(r[0], r[1]) for r in top_users],
         "top_targets": [(r[0], r[1]) for r in top_targets],
         "top_servers": top_servers,

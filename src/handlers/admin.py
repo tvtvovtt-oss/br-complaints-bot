@@ -109,7 +109,9 @@ async def _send_stats(message: types.Message, within_days: int | None) -> None:
         f"   {te(PE_CHECK, '✅')} Принято: <b>{s['accepted']}</b> "
         f"({rate:.0f}%)",
         f"   {te(PE_CROSS, '❌')} Отклонено: <b>{s['rejected']}</b>",
+        f"   {te(PE_SEARCH, '🔎')} На рассмотрении: <b>{s.get('review', 0)}</b>",
         f"   {te(PE_TIME_PASSED, '⏳')} Ожидание: <b>{s['pending']}</b>",
+        f"   {te(PE_LOCK_CLOSED, '🔒')} Закрыто: <b>{s.get('closed', 0)}</b>",
         f"{te(PE_BOX, '📦')} В очереди публикации: "
         f"<b>{s['queue_pending']}</b>",
     ]
