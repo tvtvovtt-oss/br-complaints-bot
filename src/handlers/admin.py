@@ -72,19 +72,38 @@ def _invalidate_ban_cache(telegram_id: int) -> None:
 
 # ---------------- Статистика ----------------
 
-@router.message(Command("stats"))
-@router.message(F.text == LBL_STATS)
-async def cmd_stats(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    s = await get_stats(within_days=7)
+def _period_label(within_days: int | None) -> str:
+    if within_days is None:
+        return "за всё время"
+    if within_days == 7:
+        return "за 7 дней"
+    return f"за {within_days} дн."
+
+
+def _stats_period_kb(current: int | None) -> types.InlineKeyboardMarkup:
+    def mark(v, txt):
+        return ("✓ " + txt) if v == current else txt
+    return types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text=mark(7, "7 дней"),
+                                   callback_data="stats_p:7"),
+        types.InlineKeyboardButton(text=mark(30, "30 дней"),
+                                   callback_data="stats_p:30"),
+        types.InlineKeyboardButton(text=mark(None, "Всё время"),
+                                   callback_data="stats_p:all"),
+    ]])
+
+
+async def _send_stats(message: types.Message, within_days: int | None) -> None:
+    s = await get_stats(within_days=within_days)
     rate = (s["accepted"] / s["total"] * 100) if s["total"] else 0
+    label = _period_label(within_days)
+    period_word = "за всё время" if s.get("all_time") else label
     lines = [
-        f"{te(PE_CHART_STATS, '📊')} <b>Статистика за 7 дней</b>\n",
+        f"{te(PE_CHART_STATS, '📊')} <b>Статистика {label}</b>\n",
         f"{te(PE_PEOPLE, '👥')} Всего пользователей: <b>{s['total_users']}</b>",
-        f"   {te(PE_PERSON_CHECK, '🆕')} Новых за 7 дн: "
+        f"   {te(PE_PERSON_CHECK, '🆕')} Новых {period_word}: "
         f"<b>{s.get('new_users', 0)}</b>",
-        f"   {te(PE_CHART_GROW, '🔥')} Активных за 7 дн: "
+        f"   {te(PE_CHART_GROW, '🔥')} Активных {period_word}: "
         f"<b>{s.get('active_users', 0)}</b>",
         f"{te(PE_PENCIL, '📝')} Жалоб подано: <b>{s['total']}</b>",
         f"   {te(PE_CHECK, '✅')} Принято: <b>{s['accepted']}</b> "
@@ -111,11 +130,14 @@ async def cmd_stats(message: types.Message):
             lines.append(f"   • <b>{escape(name)}</b> — {count}")
 
     if s["by_day"]:
-        lines.append(f"\n{te(PE_CHART_STATS, '📅')} <b>По дням:</b>")
+        day_title = ("По дням (последние 30)" if s.get("all_time")
+                     else "По дням")
+        lines.append(f"\n{te(PE_CHART_STATS, '📅')} <b>{day_title}:</b>")
         for d, count in s["by_day"]:
             lines.append(f"   {escape(str(d))}: {count}")
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines),
+                         reply_markup=_stats_period_kb(within_days))
 
     # Графики — три картинки одна за одной
     try:
@@ -150,6 +172,38 @@ async def cmd_stats(message: types.Message):
             )
     except Exception:
         logger.exception("Не удалось сгенерировать графики статистики")
+
+
+def _parse_stats_period(arg: str) -> int | None:
+    """'' → 7; 'all'/'всё'/'0' → None (всё время); число → дни."""
+    arg = (arg or "").strip().lower()
+    if not arg:
+        return 7
+    if arg in ("all", "всё", "все", "0"):
+        return None
+    if arg.isdigit():
+        return max(1, min(3650, int(arg)))
+    return 7
+
+
+@router.message(Command("stats"))
+@router.message(F.text == LBL_STATS)
+async def cmd_stats(message: types.Message, command: Command | None = None):
+    if not is_admin(message.from_user.id):
+        return
+    arg = command.args if command and command.args else ""
+    await _send_stats(message, _parse_stats_period(arg))
+
+
+@router.callback_query(F.data.startswith("stats_p:"))
+async def stats_period_cb(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer()
+        return
+    raw = call.data.split(":", 1)[1]
+    within = None if raw == "all" else int(raw)
+    await call.answer()
+    await _send_stats(call.message, within)
 
 
 # ---------------- Рассылка ----------------

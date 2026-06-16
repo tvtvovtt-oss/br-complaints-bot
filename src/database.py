@@ -1654,12 +1654,23 @@ async def _backfill_users(db: aiosqlite.Connection) -> int:
 
 # ---------- Статистика ----------
 
-async def get_stats(within_days: int = 7) -> dict:
-    """Возвращает агрегированную статистику за последние N дней."""
+async def get_stats(within_days: int | None = 7) -> dict:
+    """Возвращает агрегированную статистику. within_days=None — за всё время."""
+    all_time = within_days is None
+
+    def _where(extra: str | None = None) -> tuple[str, list]:
+        conds: list[str] = []
+        params: list = []
+        if not all_time:
+            conds.append("created_at >= datetime('now', ?)")
+            params.append(f"-{int(within_days)} days")
+        if extra:
+            conds.append(extra)
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        return where, params
+
     async with _db() as db:
         await _ensure_users_table(db)
-        # Всего пользователей: считаем по таблице users (все кто хотя бы
-        # нажимал /start) + UNION со старыми таблицами на случай миграции.
         async with db.execute(
             "SELECT COUNT(DISTINCT telegram_id) FROM ("
             " SELECT telegram_id FROM users"
@@ -1670,13 +1681,14 @@ async def get_stats(within_days: int = 7) -> dict:
             total_users = (await cur.fetchone())[0]
 
         # Жалобы за период
+        w, p = _where()
         async with db.execute(
             "SELECT COUNT(*), "
             "SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) "
-            "FROM complaints WHERE created_at >= datetime('now', ?)",
-            (f"-{int(within_days)} days",),
+            f"FROM complaints {w}",
+            p,
         ) as cur:
             row = await cur.fetchone()
             total = row[0] or 0
@@ -1685,42 +1697,46 @@ async def get_stats(within_days: int = 7) -> dict:
             pending = row[3] or 0
 
         # ТОП-5 пользователей по количеству жалоб
+        w, p = _where()
         async with db.execute(
-            "SELECT telegram_id, COUNT(*) AS n FROM complaints "
-            "WHERE created_at >= datetime('now', ?) "
+            f"SELECT telegram_id, COUNT(*) AS n FROM complaints {w} "
             "GROUP BY telegram_id ORDER BY n DESC LIMIT 5",
-            (f"-{int(within_days)} days",),
+            p,
         ) as cur:
             top_users = await cur.fetchall()
 
         # ТОП-5 нарушителей (на кого больше всего жалоб)
+        w, p = _where()
         async with db.execute(
-            "SELECT nickname, COUNT(*) AS n FROM complaints "
-            "WHERE created_at >= datetime('now', ?) "
+            f"SELECT nickname, COUNT(*) AS n FROM complaints {w} "
             "GROUP BY LOWER(nickname) ORDER BY n DESC LIMIT 5",
-            (f"-{int(within_days)} days",),
+            p,
         ) as cur:
             top_targets = await cur.fetchall()
 
-        # Топ-5 серверов по количеству жалоб (за период)
+        # Топ-5 серверов по количеству жалоб
+        w, p = _where("server_name IS NOT NULL AND server_name != ''")
         async with db.execute(
-            "SELECT server_name, COUNT(*) AS n FROM complaints "
-            "WHERE created_at >= datetime('now', ?) "
-            "AND server_name IS NOT NULL AND server_name != '' "
+            f"SELECT server_name, COUNT(*) AS n FROM complaints {w} "
             "GROUP BY server_name ORDER BY n DESC LIMIT 5",
-            (f"-{int(within_days)} days",),
+            p,
         ) as cur:
             top_servers_rows = await cur.fetchall()
         top_servers: list[tuple[str, int]] = [
             (r[0], r[1]) for r in top_servers_rows
         ]
 
-        # Активность по дням (последние 7 дней)
+        # Активность по дням. Для «всё время» ограничиваем последними
+        # 30 днями, иначе график станет нечитаемым.
+        if all_time:
+            day_where = "WHERE created_at >= datetime('now', '-30 days')"
+            day_params: list = []
+        else:
+            day_where, day_params = _where()
         async with db.execute(
-            "SELECT DATE(created_at) AS d, COUNT(*) FROM complaints "
-            "WHERE created_at >= datetime('now', ?) "
+            f"SELECT DATE(created_at) AS d, COUNT(*) FROM complaints {day_where} "
             "GROUP BY d ORDER BY d ASC",
-            (f"-{int(within_days)} days",),
+            day_params,
         ) as cur:
             by_day = await cur.fetchall()
 
@@ -1730,23 +1746,28 @@ async def get_stats(within_days: int = 7) -> dict:
         ) as cur:
             queue_pending = (await cur.fetchone())[0]
 
-        # Новые пользователи (зарегистрированы в users) и активные (last_seen)
-        # за выбранный период.
-        async with db.execute(
-            "SELECT COUNT(*) FROM users "
-            "WHERE first_seen_at >= datetime('now', ?)",
-            (f"-{int(within_days)} days",),
-        ) as cur:
-            new_users = (await cur.fetchone())[0]
-        async with db.execute(
-            "SELECT COUNT(*) FROM users "
-            "WHERE last_seen_at >= datetime('now', ?)",
-            (f"-{int(within_days)} days",),
-        ) as cur:
-            active_users = (await cur.fetchone())[0]
+        # Новые/активные пользователи за период (или за всё время = всего)
+        if all_time:
+            async with db.execute("SELECT COUNT(*) FROM users") as cur:
+                new_users = (await cur.fetchone())[0]
+            active_users = new_users
+        else:
+            async with db.execute(
+                "SELECT COUNT(*) FROM users "
+                "WHERE first_seen_at >= datetime('now', ?)",
+                (f"-{int(within_days)} days",),
+            ) as cur:
+                new_users = (await cur.fetchone())[0]
+            async with db.execute(
+                "SELECT COUNT(*) FROM users "
+                "WHERE last_seen_at >= datetime('now', ?)",
+                (f"-{int(within_days)} days",),
+            ) as cur:
+                active_users = (await cur.fetchone())[0]
 
     return {
         "within_days": within_days,
+        "all_time": all_time,
         "total_users": total_users,
         "new_users": new_users,
         "active_users": active_users,
