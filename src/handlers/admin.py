@@ -27,6 +27,9 @@ from src.database import (
 )
 from src.handlers.common import is_admin, _menu_for
 from src.logger import describe_user
+from src.utils.settings import (
+    SETTINGS, get_settings_values, set_int_setting, format_setting_value,
+)
 from src.ui.premium_emoji import (
     te,
     BTN_DANGER, BTN_SUCCESS, BTN_PRIMARY,
@@ -36,7 +39,7 @@ from src.ui.premium_emoji import (
     PE_INFO, PE_EYE, PE_PENCIL, PE_TIME_PASSED, PE_SEND_UP, PE_BOT,
     PE_ARROW_DOWN_LIST, PE_PROFILE, PE_FILE, PE_TAG, PE_CLOCK, PE_CALENDAR,
     PE_ARROW_LEFT, PE_ARROW_RIGHT, PE_REPEAT, PE_GEOTAG, PE_WRITE,
-    PE_BAN, PE_TARGET, PE_SEARCH, PE_COMMENT, PE_WARNING,
+    PE_BAN, PE_TARGET, PE_SEARCH, PE_COMMENT, PE_WARNING, PE_SETTINGS,
 )
 from src.ui.labels import (
     LBL_STATS, LBL_BROADCAST, LBL_QUEUE, LBL_MAINTENANCE, LBL_CANCEL,
@@ -760,32 +763,66 @@ async def maint_off(call: types.CallbackQuery):
 
 # ---------------- Бан / разбан пользователей ----------------
 
-def _parse_ban_args(args: str) -> tuple[int | None, str | None]:
-    """Парсит «<id> [причина...]» → (id, reason). Возвращает (None, None)
-    если id не распознан."""
+import re as _re
+
+_DURATION_RE = _re.compile(r"^(\d+)\s*([mhdw])$", _re.IGNORECASE)
+_DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def _parse_duration(token: str) -> int | None:
+    """'30m'/'12h'/'7d'/'2w' → секунды. None если не похоже на срок."""
+    m = _DURATION_RE.match((token or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)) * _DURATION_UNITS[m.group(2).lower()]
+
+
+def _fmt_duration(seconds: int) -> str:
+    for unit, label in (("w", "нед"), ("d", "дн"), ("h", "ч"), ("m", "мин")):
+        size = _DURATION_UNITS[unit]
+        if seconds % size == 0 and seconds >= size:
+            return f"{seconds // size} {label}"
+    return f"{seconds} с"
+
+
+def _parse_ban_args(args: str) -> tuple[int | None, int | None, str | None]:
+    """Парсит «<id> [срок] [причина...]» → (id, expires_seconds, reason).
+    Срок (30m/12h/7d/2w) опционален. Возвращает (None, None, None) если id
+    не распознан."""
     args = (args or "").strip()
     if not args:
-        return None, None
+        return None, None, None
     parts = args.split(maxsplit=1)
     raw_id = parts[0].lstrip("@").lstrip("#")
     if not raw_id.isdigit():
-        return None, None
-    reason = parts[1].strip() if len(parts) > 1 else None
-    return int(raw_id), reason
+        return None, None, None
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    expires = None
+    if rest:
+        first, _, tail = rest.partition(" ")
+        dur = _parse_duration(first)
+        if dur is not None:
+            expires = dur
+            rest = tail.strip()
+    return int(raw_id), expires, (rest or None)
 
 
 @router.message(Command("ban"))
 async def cmd_ban(message: types.Message, command: Command):
     """Забанить пользователя в боте. Использование:
-        /ban <telegram_id> [причина]
+        /ban <telegram_id> [срок] [причина]
+    Срок: 30m / 12h / 7d / 2w. Без срока — вечный бан.
     """
     if not is_admin(message.from_user.id):
         return
-    user_id, reason = _parse_ban_args(command.args or "")
+    user_id, expires, reason = _parse_ban_args(command.args or "")
     if user_id is None:
         await message.answer(
-            "Использование: <code>/ban &lt;telegram_id&gt; [причина]</code>\n"
-            "Пример: <code>/ban 123456789 спам жалобами</code>"
+            "Использование: <code>/ban &lt;telegram_id&gt; [срок] [причина]</code>\n"
+            "Срок: <code>30m</code> / <code>12h</code> / <code>7d</code> / "
+            "<code>2w</code> (без срока — навсегда).\n"
+            "Примеры: <code>/ban 123456789 7d спам</code>, "
+            "<code>/ban 123456789 мат</code>"
         )
         return
 
@@ -797,19 +834,23 @@ async def cmd_ban(message: types.Message, command: Command):
 
     new_ban = await ban_user(
         telegram_id=user_id, reason=reason, banned_by=message.from_user.id,
+        expires_seconds=expires,
     )
     _invalidate_ban_cache(user_id)
-    logger.info("Админ %s забанил user_id=%s. Причина: %s.",
-                describe_user(message.from_user), user_id, reason or "—")
+    logger.info("Админ %s забанил user_id=%s. Причина: %s. Срок: %s.",
+                describe_user(message.from_user), user_id, reason or "—",
+                _fmt_duration(expires) if expires else "вечно")
 
     suffix = (
         te(PE_BELL, "🆕") if new_ban
         else f"{te(PE_LOADING, '🔁')} (обновлён)"
     )
+    term = (f"\n{te(PE_CLOCK, '⏳')} Срок: <b>{_fmt_duration(expires)}</b>"
+            if expires else f"\n{te(PE_LOCK_CLOSED, '🔒')} Срок: <b>навсегда</b>")
     reason_part = f"\nПричина: <i>{escape(reason)}</i>" if reason else ""
     await message.answer(
         f"{te(PE_BAN, '🚫')} <b>Пользователь {user_id} забанен</b> "
-        f"{suffix}.{reason_part}"
+        f"{suffix}.{term}{reason_part}"
     )
 
 
@@ -860,11 +901,14 @@ async def cmd_baninfo(message: types.Message, command: Command):
     reason = escape(rec.get("reason") or "—")
     by = rec.get("banned_by") or "—"
     when = escape(str(rec.get("banned_at") or "—"))
+    exp = rec.get("expires_at")
+    term = (f"\n{te(PE_CLOCK, '⏳')} До: <code>{escape(str(exp))}</code>"
+            if exp else f"\n{te(PE_LOCK_CLOSED, '🔒')} Срок: <b>навсегда</b>")
     await message.answer(
         f"{te(PE_BAN, '🚫')} <b>Пользователь {raw} забанен</b>\n"
         f"Причина: <i>{reason}</i>\n"
         f"Кто: <code>{by}</code>\n"
-        f"Когда: <code>{when}</code>"
+        f"Когда: <code>{when}</code>{term}"
     )
 
 
@@ -881,13 +925,125 @@ async def cmd_banlist(message: types.Message):
     lines = [f"{te(PE_BAN, '🚫')} <b>Забанено: {len(bans)}</b>\n"]
     for b in bans[:50]:
         reason = escape(b["reason"]) if b["reason"] else "<i>без причины</i>"
+        exp = b.get("expires_at")
+        term = f" • до <code>{escape(str(exp))}</code>" if exp else " • навсегда"
         lines.append(
             f"• <code>{b['telegram_id']}</code> — {reason}\n"
-            f"   <i>{escape(str(b['banned_at']))}</i>"
+            f"   <i>{escape(str(b['banned_at']))}</i>{term}"
         )
     if len(bans) > 50:
         lines.append(f"\n…и ещё {len(bans) - 50}")
     await message.answer("\n\n".join(lines))
+
+
+# ---------------- Настройки очереди/мониторинга ----------------
+
+def _setting_step(setting) -> int:
+    """Шаг изменения настройки кнопками −/＋."""
+    if setting.unit == "sec":
+        return 30
+    return 1
+
+
+def _settings_text() -> str:
+    lines = [f"{te(PE_SETTINGS, '⚙️')} <b>Настройки бота</b>\n"]
+    for s in SETTINGS.values():
+        lines.append(f"• <b>{escape(s.label)}</b> — <i>{escape(s.description)}</i>")
+    lines.append("\nМеняйте кнопками ниже (−/＋) или командой "
+                 "<code>/set &lt;ключ&gt; &lt;значение&gt;</code>.")
+    return "\n".join(lines)
+
+
+async def _settings_kb() -> types.InlineKeyboardMarkup:
+    values = await get_settings_values()
+    rows: list[list[types.InlineKeyboardButton]] = []
+    for key, s in SETTINGS.items():
+        val = values[key]
+        rows.append([
+            types.InlineKeyboardButton(
+                text="➖", callback_data=f"setadj:{key}:-"),
+            types.InlineKeyboardButton(
+                text=f"{s.label}: {format_setting_value(s, val)}",
+                callback_data="set_noop"),
+            types.InlineKeyboardButton(
+                text="➕", callback_data=f"setadj:{key}:+"),
+        ])
+    rows.append([types.InlineKeyboardButton(
+        text="Обновить", callback_data="set_refresh",
+        icon_custom_emoji_id=PE_LOADING)])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("settings"))
+async def cmd_settings(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer(_settings_text(), reply_markup=await _settings_kb())
+
+
+@router.message(Command("set"))
+async def cmd_set(message: types.Message, command: Command):
+    """Прямая установка: /set <ключ> <значение>."""
+    if not is_admin(message.from_user.id):
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2 or parts[0] not in SETTINGS or not parts[1].lstrip("-").isdigit():
+        keys = ", ".join(f"<code>{k}</code>" for k in SETTINGS)
+        await message.answer(
+            "Использование: <code>/set &lt;ключ&gt; &lt;значение&gt;</code>\n"
+            f"Ключи: {keys}"
+        )
+        return
+    key, raw = parts[0], int(parts[1])
+    applied = await set_int_setting(key, raw)
+    s = SETTINGS[key]
+    await message.answer(
+        f"{te(PE_CHECK, '✅')} <b>{escape(s.label)}</b> = "
+        f"<b>{format_setting_value(s, applied)}</b>",
+        reply_markup=await _settings_kb(),
+    )
+
+
+@router.callback_query(F.data == "set_noop")
+async def set_noop(call: types.CallbackQuery):
+    await call.answer()
+
+
+@router.callback_query(F.data == "set_refresh")
+async def set_refresh(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer()
+        return
+    try:
+        await call.message.edit_reply_markup(reply_markup=await _settings_kb())
+    except Exception:
+        pass
+    await call.answer("Обновлено")
+
+
+@router.callback_query(F.data.startswith("setadj:"))
+async def set_adjust(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("Только для админов.", show_alert=True)
+        return
+    try:
+        _, key, sign = call.data.split(":", 2)
+    except ValueError:
+        await call.answer()
+        return
+    if key not in SETTINGS:
+        await call.answer()
+        return
+    s = SETTINGS[key]
+    values = await get_settings_values()
+    step = _setting_step(s)
+    new_val = values[key] + (step if sign == "+" else -step)
+    applied = await set_int_setting(key, new_val)  # set_int_setting сам клампит
+    try:
+        await call.message.edit_reply_markup(reply_markup=await _settings_kb())
+    except Exception:
+        pass
+    await call.answer(f"{s.label}: {format_setting_value(s, applied)}")
 
 
 # ---------------- Просмотр всех жалоб (с пагинацией) ----------------

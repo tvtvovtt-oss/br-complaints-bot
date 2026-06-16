@@ -231,6 +231,12 @@ async def _process_one(bot: Bot, item: dict, cfg: dict[str, int]) -> None:
         if is_auth_error(str(result)):
             await mark_account_needs_reauth(account["id"])
             await increment_queue_attempt(qid, error=str(result))
+            try:
+                from src.services.admin_alerts import alert_account_reauth
+                await alert_account_reauth(bot, account["id"],
+                                           account["username"])
+            except Exception:
+                logger.debug("alert_account_reauth failed", exc_info=True)
             logger.warning(
                 "Жалоба #%s: аккаунт «%s» нуждается в перелогине, "
                 "пробуем другим на следующей итерации.",

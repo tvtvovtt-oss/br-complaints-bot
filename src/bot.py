@@ -183,6 +183,7 @@ async def main():
         BotCommand(command="maintenance", description="Режим обслуживания"),
         BotCommand(command="dbinfo", description="Состояние БД"),
         BotCommand(command="subs", description="Каналы подписки"),
+        BotCommand(command="settings", description="Настройки очереди/мониторинга"),
     ]
     try:
         await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())

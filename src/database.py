@@ -2037,12 +2037,27 @@ async def _ensure_bans_table(db: aiosqlite.Connection) -> None:
             banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Миграция: срок временного бана (NULL = вечный)
+    async with db.execute("PRAGMA table_info(banned_users)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    if "expires_at" not in cols:
+        try:
+            await db.execute(
+                "ALTER TABLE banned_users ADD COLUMN expires_at TIMESTAMP"
+            )
+        except aiosqlite.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
 
 async def ban_user(telegram_id: int, reason: str | None = None,
-                    banned_by: int | None = None) -> bool:
+                    banned_by: int | None = None,
+                    expires_seconds: int | None = None) -> bool:
     """Добавляет пользователя в бан-лист. Возвращает True если добавлено
-    впервые (False — уже был забанен и просто обновили причину)."""
+    впервые (False — уже был забанен и просто обновили причину).
+
+    expires_seconds — срок бана в секундах. None / 0 = вечный бан.
+    """
     async with _db() as db:
         await _ensure_bans_table(db)
         async with db.execute(
@@ -2051,20 +2066,39 @@ async def ban_user(telegram_id: int, reason: str | None = None,
         ) as cur:
             already = await cur.fetchone() is not None
 
-        await db.execute(
-            """
-            INSERT INTO banned_users (telegram_id, reason, banned_by, banned_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(telegram_id) DO UPDATE SET
-                reason = excluded.reason,
-                banned_by = excluded.banned_by,
-                banned_at = CURRENT_TIMESTAMP
-            """,
-            (telegram_id, reason, banned_by),
-        )
+        if expires_seconds and expires_seconds > 0:
+            await db.execute(
+                """
+                INSERT INTO banned_users
+                    (telegram_id, reason, banned_by, banned_at, expires_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, datetime('now', ?))
+                ON CONFLICT(telegram_id) DO UPDATE SET
+                    reason = excluded.reason,
+                    banned_by = excluded.banned_by,
+                    banned_at = CURRENT_TIMESTAMP,
+                    expires_at = excluded.expires_at
+                """,
+                (telegram_id, reason, banned_by,
+                 f"+{int(expires_seconds)} seconds"),
+            )
+        else:
+            await db.execute(
+                """
+                INSERT INTO banned_users
+                    (telegram_id, reason, banned_by, banned_at, expires_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                ON CONFLICT(telegram_id) DO UPDATE SET
+                    reason = excluded.reason,
+                    banned_by = excluded.banned_by,
+                    banned_at = CURRENT_TIMESTAMP,
+                    expires_at = NULL
+                """,
+                (telegram_id, reason, banned_by),
+            )
         await db.commit()
-    logger.info("Пользователь telegram_id=%s забанен (причина: %s, кем: %s).",
-                telegram_id, reason or "—", banned_by)
+    logger.info("Пользователь telegram_id=%s забанен (причина: %s, кем: %s, "
+                "срок: %s).", telegram_id, reason or "—", banned_by,
+                f"{expires_seconds}с" if expires_seconds else "вечно")
     await _trigger_backup()
     return not already
 
@@ -2086,32 +2120,47 @@ async def unban_user(telegram_id: int) -> bool:
 
 
 async def is_banned(telegram_id: int) -> dict | None:
-    """Возвращает запись о бане {reason, banned_by, banned_at} или None."""
+    """Возвращает запись о бане {reason, banned_by, banned_at, expires_at}
+    или None. Истёкший временный бан автоматически снимается."""
     async with _db() as db:
         await _ensure_bans_table(db)
         async with db.execute(
-            "SELECT reason, banned_by, banned_at FROM banned_users "
-            "WHERE telegram_id = ?",
+            "SELECT reason, banned_by, banned_at, expires_at, "
+            "CASE WHEN expires_at IS NOT NULL "
+            "     AND expires_at <= datetime('now') THEN 1 ELSE 0 END "
+            "FROM banned_users WHERE telegram_id = ?",
             (telegram_id,),
         ) as cur:
             row = await cur.fetchone()
-            if not row:
-                return None
-            return {"reason": row[0], "banned_by": row[1], "banned_at": row[2]}
+        if not row:
+            return None
+        if row[4]:  # срок истёк — авто-разбан
+            await db.execute(
+                "DELETE FROM banned_users WHERE telegram_id = ?",
+                (telegram_id,),
+            )
+            await db.commit()
+            logger.info("Временный бан telegram_id=%s истёк — снят.",
+                        telegram_id)
+            return None
+        return {"reason": row[0], "banned_by": row[1],
+                "banned_at": row[2], "expires_at": row[3]}
 
 
 async def list_banned() -> list[dict]:
-    """Все забаненные."""
+    """Все активные баны (истёкшие временные исключаются)."""
     async with _db() as db:
         await _ensure_bans_table(db)
         async with db.execute(
-            "SELECT telegram_id, reason, banned_by, banned_at "
-            "FROM banned_users ORDER BY banned_at DESC"
+            "SELECT telegram_id, reason, banned_by, banned_at, expires_at "
+            "FROM banned_users "
+            "WHERE expires_at IS NULL OR expires_at > datetime('now') "
+            "ORDER BY banned_at DESC"
         ) as cur:
             rows = await cur.fetchall()
             return [
                 {"telegram_id": r[0], "reason": r[1],
-                 "banned_by": r[2], "banned_at": r[3]}
+                 "banned_by": r[2], "banned_at": r[3], "expires_at": r[4]}
                 for r in rows
             ]
 

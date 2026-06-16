@@ -1706,6 +1706,12 @@ async def process_confirm(message: types.Message, state: FSMContext):
                 await mark_account_needs_reauth(used_account_id)
             except Exception:
                 logger.exception("mark_account_needs_reauth failed")
+            try:
+                from src.services.admin_alerts import alert_account_reauth
+                await alert_account_reauth(message.bot, used_account_id,
+                                           used_account_name)
+            except Exception:
+                logger.debug("alert_account_reauth failed", exc_info=True)
         elif is_flood and used_account_id:
             # Флуд-таймер форума: аккаунт рабочий, просто постил недавно.
             # Ставим кулдаун ровно на запрошенное время и пробуем другой.
