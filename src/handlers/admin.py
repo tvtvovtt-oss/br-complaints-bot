@@ -223,8 +223,10 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
     await state.set_state(BroadcastForm.waiting_for_text)
     await message.answer(
         f"{te(PE_MEGAPHONE, '📢')} <b>Рассылка по всем пользователям бота</b>\n\n"
-        "Отправьте текст сообщения. Поддерживается HTML (<code>&lt;b&gt;</code>, "
-        "<code>&lt;i&gt;</code>, <code>&lt;a href=...&gt;</code>).\n\n"
+        "Пришлите <b>любое сообщение</b> — оно уйдёт всем как есть:\n"
+        "• текст (с HTML-форматированием), фото, видео, GIF;\n"
+        "• документ, голосовое, кружок, стикер;\n"
+        "• опрос — <i>перешлите его боту</i> (создать опрос в личке нельзя).\n\n"
         f"Для отмены — нажмите {te(PE_CROSS, '❌')} Отмена.",
         reply_markup=types.ReplyKeyboardMarkup(
             keyboard=[[types.KeyboardButton(
@@ -244,34 +246,83 @@ async def _broadcast_cancel(message: types.Message, state: FSMContext) -> bool:
     return False
 
 
+def _content_label(message: types.Message) -> str:
+    """Человекочитаемый тип контента для превью."""
+    if message.poll:
+        return "опрос"
+    if message.photo:
+        return "фото"
+    if message.video:
+        return "видео"
+    if message.animation:
+        return "GIF"
+    if message.document:
+        return "документ"
+    if message.audio:
+        return "аудио"
+    if message.voice:
+        return "голосовое"
+    if message.video_note:
+        return "кружок"
+    if message.sticker:
+        return "стикер"
+    if message.text:
+        return "текст"
+    if message.caption:
+        return "медиа с подписью"
+    return "сообщение"
+
+
 @router.message(BroadcastForm.waiting_for_text)
-async def broadcast_got_text(message: types.Message, state: FSMContext):
+async def broadcast_got_content(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
     if await _broadcast_cancel(message, state):
         return
 
-    text = message.html_text or message.text or ""
-    if len(text.strip()) < 1:
+    poll = message.poll
+    has_content = bool(
+        poll or message.text or message.caption or message.photo
+        or message.video or message.animation or message.document
+        or message.audio or message.voice or message.video_note
+        or message.sticker
+    )
+    if not has_content:
         await message.answer(
-            f"{te(PE_INFO, 'ℹ️')} Сообщение не может быть пустым."
+            f"{te(PE_INFO, 'ℹ️')} Пришлите текст, фото, видео, документ или "
+            "перешлите опрос."
         )
         return
 
-    await state.update_data(broadcast_text=text)
+    # Сохраняем источник для copy_message; опрос — отдельно (его нельзя
+    # скопировать, пересоздаём через send_poll).
+    upd: dict = {
+        "content_chat_id": message.chat.id,
+        "content_message_id": message.message_id,
+        "content_is_poll": bool(poll),
+    }
+    if poll:
+        upd["poll"] = {
+            "question": poll.question,
+            "options": [o.text for o in poll.options],
+            "type": poll.type,
+            "is_anonymous": poll.is_anonymous,
+            "allows_multiple_answers": poll.allows_multiple_answers,
+            "correct_option_id": poll.correct_option_id,
+            "explanation": poll.explanation,
+        }
+    await state.update_data(**upd)
+
     users = await list_all_users()
-    # Список получателей в state НЕ храним — на большой базе это лишняя
-    # нагрузка на storage, и список может устареть к моменту подтверждения.
-    # В broadcast_send перечитаем актуальный список из БД.
     await state.set_state(BroadcastForm.waiting_for_confirm)
 
     preview = (
         f"{te(PE_MEGAPHONE, '📢')} <b>Рассылка готова</b>\n\n"
-        f"{te(PE_PEOPLE, '👥')} <b>Получателей (примерно):</b> {len(users)}\n\n"
-        f"<b>Превью сообщения:</b>\n"
-        f"━━━━━━━━━━━━━━\n{text}\n━━━━━━━━━━━━━━\n\n"
-        f"Подтверждаете? (это нельзя отменить после старта)"
+        f"{te(PE_PEOPLE, '👥')} <b>Получателей (примерно):</b> {len(users)}\n"
+        f"📨 <b>Тип:</b> {_content_label(message)}\n\n"
+        "Сообщение выше — то, что получат пользователи (как есть).\n"
+        "Подтверждаете? (это нельзя отменить после старта)"
     )
     await message.answer(
         preview,
@@ -290,6 +341,37 @@ async def broadcast_got_text(message: types.Message, state: FSMContext):
     )
 
 
+async def _broadcast_deliver(bot: Bot, uid: int, data: dict) -> None:
+    """Доставляет один элемент рассылки получателю uid.
+    Опрос — пересоздаём (его нельзя скопировать), остальное — copy_message."""
+    if data.get("content_is_poll") and data.get("poll"):
+        poll = data["poll"]
+        try:
+            from aiogram.types import InputPollOption
+            opts = [InputPollOption(text=o) for o in poll["options"]]
+        except Exception:
+            opts = poll["options"]
+        kwargs = dict(
+            chat_id=uid,
+            question=poll["question"],
+            options=opts,
+            is_anonymous=poll.get("is_anonymous", True),
+            type=poll.get("type", "regular"),
+            allows_multiple_answers=poll.get("allows_multiple_answers", False),
+        )
+        if poll.get("type") == "quiz":
+            kwargs["correct_option_id"] = poll.get("correct_option_id") or 0
+            if poll.get("explanation"):
+                kwargs["explanation"] = poll["explanation"]
+        await bot.send_poll(**kwargs)
+    else:
+        await bot.copy_message(
+            chat_id=uid,
+            from_chat_id=data["content_chat_id"],
+            message_id=data["content_message_id"],
+        )
+
+
 @router.message(BroadcastForm.waiting_for_confirm, F.text == LBL_SEND_TO_ALL)
 async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
     if not is_admin(message.from_user.id):
@@ -297,15 +379,13 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
         return
 
     data = await state.get_data()
-    text = data.get("broadcast_text", "")
     await state.clear()
 
-    # Перечитываем актуальный список получателей из БД (в state не хранили).
     users: list[int] = await list_all_users()
-
-    if not text or not users:
+    has_content = data.get("poll") or data.get("content_message_id")
+    if not has_content or not users:
         await message.answer(
-            f"{te(PE_INFO, 'ℹ️')} Сообщение или список получателей пусты.",
+            f"{te(PE_INFO, 'ℹ️')} Нечего рассылать или нет получателей.",
             reply_markup=_menu_for(message.from_user.id),
         )
         return
@@ -323,33 +403,17 @@ async def broadcast_send(message: types.Message, state: FSMContext, bot: Bot):
 
     for i, uid in enumerate(users, 1):
         try:
-            await bot.send_message(uid, text, disable_web_page_preview=True)
+            await _broadcast_deliver(bot, uid, data)
             delivered += 1
         except TelegramForbiddenError:
             blocked += 1
         except TelegramRetryAfter as e:
-            # Telegram попросил подождать — ждём и повторяем (не более 30 сек)
             await asyncio.sleep(min(e.retry_after, 30) + 1)
             try:
-                await bot.send_message(uid, text, disable_web_page_preview=True)
+                await _broadcast_deliver(bot, uid, data)
                 delivered += 1
             except Exception:
                 failed += 1
-        except TelegramBadRequest as e:
-            # Чаще всего — не валидный HTML в тексте админа. Пробуем plain.
-            if "parse" in str(e).lower() or "tag" in str(e).lower():
-                try:
-                    await bot.send_message(
-                        uid, text,
-                        disable_web_page_preview=True,
-                        parse_mode=None,
-                    )
-                    delivered += 1
-                    continue
-                except Exception:
-                    pass
-            logger.debug("broadcast: %s -> %s", uid, e)
-            failed += 1
         except Exception as e:
             logger.debug("broadcast: %s -> %s", uid, e)
             failed += 1
